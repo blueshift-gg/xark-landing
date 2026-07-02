@@ -1,0 +1,19 @@
+---
+title: "Quickstart"
+description: "From a Noir circuit to a verified proof on Solana."
+---
+
+The pipeline from a Noir circuit to a verified proof on Solana:
+
+```sh
+nargo execute                     # compile the circuit + witness
+xark inspect                      # public-input order
+xark setup --insecure-dev-mode    # dev keys (use `xark ceremony` for real)
+xark prove                        # the Groth16 proof
+xark verify                       # "Proof verified: true"
+xark export --crate-name <name>   # on-chain verifier crate + instruction_data.bin
+```
+
+Your Solana program depends on the generated verifier crate and calls `verify_instruction_data(...)`
+with the exported bytes. Re-run `xark export` whenever the circuit changes so the verifying key stays
+in sync.

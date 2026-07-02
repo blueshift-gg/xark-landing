@@ -1,0 +1,22 @@
+---
+title: "Introduction"
+description: "Groth16 proving backend for Noir, verified on Solana."
+---
+
+xark is a Groth16 proving backend for Noir circuits. You write a circuit in Noir; xark lowers it to
+R1CS, runs the Groth16 setup, produces proofs, and exports an on-chain verifier crate with the
+verifying key baked in.
+
+The point of a zero-knowledge proof is that a Solana program can act on a statement being *true*
+without ever seeing the private data behind it. Prove you're over 18, that a balance covers a
+withdrawal, that a value sits in a Merkle tree — the chain checks the proof, not the secret.
+
+Verification happens natively: xark targets Groth16 over the BN254 curve, which Solana verifies
+through its `alt_bn128` syscalls. Proofs are ~256 bytes and verify in a few hundred k compute units,
+no matter how large the underlying computation was.
+
+## Where to start
+
+- New to ZK? Start with [What is a ZK proof?](/docs/learn-zk/01-what-is-a-zk-proof) and work through
+  the Learn ZK track.
+- Already know ZK? Jump to the [Quickstart](/docs/quickstart).

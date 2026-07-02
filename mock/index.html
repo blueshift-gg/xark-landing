@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>xark — prove anything, reveal nothing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#000000;
+    --panel:#0b0b0b;
+    --panel-2:#111111;
+    --line:#1c1c1c;
+    --line-2:#262626;
+    --lime:#99FF00;
+    --white:#ffffff;
+    --muted:#7d7d7d;
+    --muted-2:#565656;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);color:var(--white);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;line-height:1.5;overflow-x:hidden;
+    background-image:
+      linear-gradient(to right,rgba(255,255,255,.022) 1px,transparent 1px),
+      linear-gradient(to bottom,rgba(255,255,255,.022) 1px,transparent 1px);
+    background-size:34px 34px;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px}
+  a{color:inherit;text-decoration:none}
+  .mono{font-family:var(--mono)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .lime{color:var(--lime)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+    background:rgba(0,0,0,.55);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand svg{height:22px;width:auto;display:block}
+  .nav-links{display:flex;gap:30px;align-items:center;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .nav-links a:hover{color:var(--white)}
+  .nav-cta{border:1px solid var(--line-2);padding:8px 14px;color:var(--white)!important;transition:.15s}
+  .nav-cta:hover{border-color:var(--lime);color:var(--lime)!important}
+
+  /* hero */
+  .hero{padding:110px 0 40px;text-align:center;position:relative}
+  .hero h1{font-size:clamp(44px,7vw,88px);line-height:.98;font-weight:600;letter-spacing:-.03em}
+  .hero h1 .rev{color:var(--muted-2)}
+  .hero .sub{margin:26px auto 0;max-width:560px;color:var(--muted);font-size:17px;font-family:var(--mono);font-weight:400}
+  .hero .sub b{color:var(--white);font-weight:500}
+
+  /* demo card */
+  .demo{max-width:540px;margin:52px auto 0;background:var(--panel);
+    border:1px solid var(--line);text-align:left}
+  .demo-head{display:flex;align-items:center;justify-content:space-between;
+    padding:14px 18px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .lock{display:flex;align-items:center;gap:8px}
+  .lock .dot{width:7px;height:7px;background:var(--lime);box-shadow:0 0 10px rgba(153,255,0,.7)}
+  .demo-body{padding:24px 22px 26px}
+  .commit-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:13px;margin-bottom:20px}
+  .commit-row .lbl{color:var(--muted-2);text-transform:uppercase;letter-spacing:.15em;font-size:11px}
+  .commit-row .val{color:var(--lime)}
+  .prompt{font-size:22px;font-weight:500;letter-spacing:-.01em;margin-bottom:16px}
+  .inrow{display:flex;gap:10px}
+  .inrow input{flex:1;background:#000;border:1px solid var(--line-2);color:var(--white);
+    font-family:var(--mono);font-size:16px;padding:13px 15px;outline:none}
+  .inrow input:focus{border-color:var(--lime)}
+  .inrow input::placeholder{color:var(--muted-2)}
+  .btn{background:var(--lime);color:#000;border:none;font-family:var(--mono);font-weight:600;
+    font-size:14px;letter-spacing:.02em;padding:0 22px;cursor:pointer;transition:.15s}
+  .btn:hover{box-shadow:0 0 22px rgba(153,255,0,.35)}
+  .btn:active{transform:translateY(1px)}
+
+  /* proof grid */
+  .proofgrid{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;margin:22px 0 0}
+  .proofgrid .px{aspect-ratio:1;background:#141414;transition:background .25s,box-shadow .25s}
+  .proofgrid .px.on{background:var(--lime)}
+  .status{font-family:var(--mono);font-size:13px;color:var(--muted);margin-top:16px;min-height:18px}
+
+  /* reveal */
+  .reveal{margin-top:20px;border-top:1px solid var(--line);padding-top:18px;display:none}
+  .reveal.show{display:block}
+  .reveal .rk{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted-2);margin-bottom:14px}
+  .rrow{display:flex;align-items:center;justify-content:space-between;font-family:var(--mono);font-size:13px;padding:8px 0;border-bottom:1px dashed var(--line)}
+  .rrow:last-child{border-bottom:none}
+  .rrow .k{color:var(--muted)}
+  .rrow .v{color:var(--white)}
+  .rrow .v.ok{color:var(--lime)}
+  .secretcell{display:inline-block;width:15px;height:15px;background:#000;border:1px solid var(--line-2);vertical-align:-3px;margin-right:8px}
+  .caption{margin-top:18px;font-size:13.5px;line-height:1.55;color:var(--muted);font-family:var(--mono)}
+  .caption b{color:var(--white);font-weight:500}
+
+  /* section shells */
+  section.blk{padding:96px 0;border-top:1px solid var(--line)}
+  .sec-head{max-width:640px;margin-bottom:44px}
+  .sec-head h2{font-size:clamp(28px,4vw,40px);font-weight:600;letter-spacing:-.02em;line-height:1.05}
+  .sec-head p{margin-top:16px;color:var(--muted);font-size:16px}
+
+  /* pipeline */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-family:var(--mono);font-size:14px}
+  .pipe .node{border:1px solid var(--line-2);padding:11px 16px;color:var(--white)}
+  .pipe .node.hl{border-color:var(--lime);color:var(--lime)}
+  .pipe .arw{color:var(--muted-2)}
+
+  /* examples */
+  .grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+  .tile{border:1px solid var(--line);background:var(--panel);padding:22px 22px 26px;transition:.15s;position:relative}
+  .tile:hover{border-color:var(--line-2);background:var(--panel-2)}
+  .tile .no{font-family:var(--mono);font-size:12px;color:var(--lime);letter-spacing:.1em}
+  .tile h3{margin:12px 0 8px;font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .tile p{color:var(--muted);font-size:14px;font-family:var(--mono);line-height:1.5}
+  .tile .pi{position:absolute;top:22px;right:22px;font-family:var(--mono);font-size:11px;color:var(--muted-2)}
+
+  /* compare */
+  .cmp{border:1px solid var(--line);font-family:var(--mono);font-size:14px}
+  .cmp .row{display:grid;grid-template-columns:1.4fr 1fr 1fr;border-bottom:1px solid var(--line)}
+  .cmp .row:last-child{border-bottom:none}
+  .cmp .cell{padding:15px 18px}
+  .cmp .cell:not(:last-child){border-right:1px solid var(--line)}
+  .cmp .row.h .cell{color:var(--muted-2);text-transform:uppercase;font-size:11px;letter-spacing:.14em}
+  .cmp .row.h .cell.x{color:var(--lime)}
+  .cmp .k{color:var(--muted)}
+  .cmp .x{color:var(--white)}
+  .cmp .o{color:var(--muted-2)}
+
+  /* footer */
+  footer{border-top:1px solid var(--line);padding:44px 0 60px;color:var(--muted);font-family:var(--mono);font-size:13px}
+  .foot-in{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:18px}
+  .foot-in a:hover{color:var(--white)}
+  .foot-links{display:flex;gap:26px}
+
+  @media(max-width:720px){
+    .nav-links{gap:18px}.nav-links .hidem{display:none}
+    .grid4{grid-template-columns:1fr}
+    .hero{padding:72px 0 20px}
+    .cmp .row{grid-template-columns:1.3fr 1fr 1fr}
+    .pipe{font-size:12px}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-in">
+    <a class="brand" href="#" aria-label="xark">
+      <svg viewBox="0 0 217 59" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M80.2 45.72C80.2 41.8267 81.9333 38.76 85.4 36.52C88.92 34.28 94.0133 33.16 100.68 33.16H106.52C109.347 33.16 111.853 33.3467 114.04 33.72C116.227 34.0933 118.173 34.6267 119.88 35.32C119.827 32.92 119.56 30.92 119.08 29.32C118.653 27.6667 117.907 26.36 116.84 25.4C115.773 24.44 114.36 23.7467 112.6 23.32C110.84 22.8933 108.627 22.68 105.96 22.68H103.4C98.6 22.68 95.16 23.2133 93.08 24.28C91 25.3467 89.96 27.16 89.96 29.72H82.12C82.12 27.48 82.52 25.5067 83.32 23.8C84.12 22.0933 85.3733 20.6533 87.08 19.48C88.84 18.3067 91.08 17.4267 93.8 16.84C96.52 16.2533 99.8267 15.96 103.72 15.96H106.52C110.627 15.96 114.067 16.28 116.84 16.92C119.667 17.5067 121.933 18.52 123.64 19.96C125.347 21.3467 126.547 23.2133 127.24 25.56C127.987 27.8533 128.36 30.7333 128.36 34.2V57.8H121.16L121.08 53.96C119.587 55.24 117.72 56.28 115.48 57.08C113.24 57.8267 110.52 58.2 107.32 58.2H101C94.12 58.2 88.92 57.08 85.4 54.84C81.9333 52.6 80.2 49.56 80.2 45.72ZM119.88 40.12C118.173 39.64 116.253 39.2667 114.12 39C112.04 38.68 109.667 38.52 107 38.52H101.96C97.5867 38.52 94.3067 39.08 92.12 40.2C89.9867 41.32 88.92 42.8667 88.92 44.84C88.92 46.76 89.9867 48.3067 92.12 49.48C94.3067 50.6 97.7467 51.16 102.44 51.16H107.24C109.64 51.16 111.64 50.92 113.24 50.44C114.893 49.96 116.2 49.3467 117.16 48.6C118.12 47.8 118.813 46.9467 119.24 46.04C119.667 45.1333 119.88 44.28 119.88 43.48V40.12Z" fill="white"/>
+        <path d="M138.928 16.6H146.688L146.528 22.12C149.835 18.0667 155.035 16.04 162.128 16.04C162.768 16.04 163.461 16.0667 164.208 16.12C165.008 16.1733 165.755 16.2533 166.448 16.36L166.368 23.96C165.728 23.8533 164.901 23.7733 163.888 23.72C162.875 23.6667 161.888 23.64 160.928 23.64C156.501 23.6933 153.141 24.92 150.848 27.32C148.555 29.72 147.408 32.7867 147.408 36.52V57.8H138.928V16.6Z" fill="white"/>
+        <path d="M173.538 1H182.018V33.64L204.258 16.6H216.098L188.578 37.72L216.658 57.8H204.098L182.018 41.72V57.8H173.538V1Z" fill="white"/>
+        <path d="M1.00002 16H9.40002V24.4H1.00002V16Z" fill="#99FF00"/>
+        <path d="M9.40002 24.4H17.8V32.8H9.40002V24.4Z" fill="#99FF00"/>
+        <path d="M17.8 32.8H51.4V41.2H17.8V32.8Z" fill="#99FF00"/>
+        <path d="M9.40002 41.2H17.8V49.6H9.40002V41.2Z" fill="#99FF00"/>
+        <path d="M1.00002 49.6H9.40002V58H1.00002V49.6Z" fill="#99FF00"/>
+        <path d="M68.2 16H59.8V24.4H68.2V16Z" fill="#99FF00"/>
+        <path d="M59.8 24.4H51.4V32.8H59.8V24.4Z" fill="#99FF00"/>
+        <path d="M59.8 41.2H51.4V49.6H59.8V41.2Z" fill="#99FF00"/>
+        <path d="M68.2 49.6H59.8V58H68.2V49.6Z" fill="#99FF00"/>
+      </svg>
+    </a>
+    <div class="nav-links">
+      <a href="#" class="hidem">Docs</a>
+      <a href="#try" class="hidem">Try</a>
+      <a href="#" class="hidem">GitHub</a>
+      <a href="#try" class="nav-cta">Try it</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="try">
+  <div class="wrap">
+    <div class="kicker" style="margin-bottom:26px">Groth16 for Noir · verified on Solana</div>
+    <h1>Prove anything.<br><span class="rev">Reveal nothing.</span></h1>
+    <p class="sub">A secret stays secret. The proof is <b>256 bytes</b>. The chain checks it in <b>milliseconds</b>, natively.</p>
+
+    <!-- guess demo -->
+    <div class="demo">
+      <div class="demo-head">
+        <span>guess-the-secret.nr</span>
+        <span class="lock"><span class="dot"></span> WINNER COMMITTED</span>
+      </div>
+      <div class="demo-body">
+        <div class="commit-row">
+          <span class="lbl">Commitment</span>
+          <span class="val" id="commit">0x99f0a7c4…e21c</span>
+        </div>
+        <div class="prompt">Guess the secret number.</div>
+        <div class="inrow">
+          <input id="guess" inputmode="numeric" placeholder="e.g. 402917" value="402917" />
+          <button class="btn" id="prove">Prove</button>
+        </div>
+
+        <div class="proofgrid" id="pg"></div>
+        <div class="status" id="status">Enter a number and prove — the winner was fixed before you arrived.</div>
+
+        <div class="reveal" id="reveal">
+          <div class="rk">What just happened</div>
+          <div class="rrow"><span class="k">your guess</span><span class="v mono" id="rg">402917</span></div>
+          <div class="rrow"><span class="k">commitment (fixed before you played)</span><span class="v mono lime">0x99f0…e21c</span></div>
+          <div class="rrow"><span class="k">groth16 proof · 256 bytes</span><span class="v ok mono">verified ✓</span></div>
+          <div class="rrow"><span class="k">winning number</span><span class="v mono"><span class="secretcell"></span>never revealed</span></div>
+          <div class="caption">You just played a game you can <b>verify is fair</b>, against a number you <b>can't see</b> and <b>can't find</b>. That's a zero-knowledge proof.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section class="blk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker" style="margin-bottom:16px">The pipeline</div>
+      <h2>You write the rules. xark does the proof.</h2>
+      <p>Mark inputs public or private in Noir, assert what must hold. xark lowers the circuit to Groth16 over BN254 and generates a Solana verifier that checks it through the native <span class="mono lime">alt_bn128</span> syscalls.</p>
+    </div>
+    <div class="pipe">
+      <span class="node">Noir</span><span class="arw">→</span>
+      <span class="node">ACIR + witness</span><span class="arw">→</span>
+      <span class="node hl">Groth16 · BN254</span><span class="arw">→</span>
+      <span class="node">alt_bn128</span><span class="arw">→</span>
+      <span class="node">Solana program</span>
+    </div>
+  </div>
+</section>
+
+<section class="blk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker" style="margin-bottom:16px">Examples</div>
+      <h2>Four circuits, easiest to hardest.</h2>
+      <p>Each is built, proved, and verified end-to-end in an in-process Solana VM.</p>
+    </div>
+    <div class="grid4">
+      <a class="tile" href="#"><span class="pi">0 public inputs</span><div class="no">01</div><h3>Over 9000</h3><p>Prove a secret number beats a bound. The range-proof primitive.</p></a>
+      <a class="tile" href="#"><span class="pi">2 public inputs</span><div class="no">02</div><h3>Age verification</h3><p>Prove 18+ without a birthday. Commitments.</p></a>
+      <a class="tile" href="#"><span class="pi">4 + 7 public inputs</span><div class="no">03</div><h3>Shielded pool</h3><p>Unlinkable deposit → withdrawal. Merkle membership + nullifiers.</p></a>
+      <a class="tile" href="#"><span class="pi">12 public inputs</span><div class="no">04</div><h3>Shielded transfer</h3><p>Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.</p></a>
+    </div>
+  </div>
+</section>
+
+<section class="blk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker" style="margin-bottom:16px">Why xark</div>
+      <h2>The backend you ship, not the one you prototype with.</h2>
+    </div>
+    <div class="cmp">
+      <div class="row h"><div class="cell">&nbsp;</div><div class="cell x">xark</div><div class="cell">the default</div></div>
+      <div class="row"><div class="cell k">trusted setup</div><div class="cell x">multi-party ceremony</div><div class="cell o">dev keys</div></div>
+      <div class="row"><div class="cell k">soundness</div><div class="cell x">Lean proofs · fuzzing · diff-tested</div><div class="cell o">—</div></div>
+      <div class="row"><div class="cell k">unsupported opcodes</div><div class="cell x">rejected, never mis-proved</div><div class="cell o">—</div></div>
+      <div class="row"><div class="cell k">on-chain verify</div><div class="cell x">Pinocchio low-CU path</div><div class="cell o">—</div></div>
+      <div class="row"><div class="cell k">snarkjs interop</div><div class="cell x">yes</div><div class="cell o">partial</div></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <div>xark — a <span class="lime">Blueshift</span> project</div>
+    <div class="foot-links"><a href="#">Docs</a><a href="#">GitHub</a><a href="#">Noir</a></div>
+  </div>
+</footer>
+
+<script>
+  // build the proof grid
+  const pg = document.getElementById('pg');
+  const COLS = 24, ROWS = 5, TOTAL = COLS*ROWS;
+  for(let i=0;i<TOTAL;i++){const d=document.createElement('div');d.className='px';pg.appendChild(d);}
+  const cells = [...pg.children];
+  const status = document.getElementById('status');
+  const reveal = document.getElementById('reveal');
+  const btn = document.getElementById('prove');
+  const guess = document.getElementById('guess');
+
+  function reset(){cells.forEach(c=>c.classList.remove('on'));reveal.classList.remove('show');}
+
+  btn.addEventListener('click', ()=>{
+    reset();
+    document.getElementById('rg').textContent = (guess.value||'—');
+    status.textContent = 'proving…';
+    btn.disabled = true; btn.style.opacity=.6;
+    // fill cells in a pseudo-random-but-forward order to feel like a proof resolving
+    const order = [...cells.keys()];
+    let i=0;
+    const t = setInterval(()=>{
+      // light a small burst per tick
+      for(let k=0;k<8 && i<order.length;k++,i++){ cells[order[i]].classList.add('on'); }
+      if(i>=order.length){
+        clearInterval(t);
+        status.innerHTML = '<span class="lime">Not it.</span> Proof verified — the outcome is honest, and the number is still secret.';
+        reveal.classList.add('show');
+        btn.disabled=false; btn.style.opacity=1;
+      }
+    }, 45);
+  });
+</script>
+</body>
+</html>

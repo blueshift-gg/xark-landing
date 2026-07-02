@@ -1,0 +1,21 @@
+# deps
+/node_modules
+.pnp
+.pnp.*
+
+# next
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# fumadocs generated
+/.source/
+
+# env & misc
+.env*
+!.env.example
+.DS_Store
+*.tsbuildinfo
+.vercel
+.wrangler

@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+
+@theme {
+  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo,
+    monospace;
+
+  /* xark docs theme — black + lime */
+  --color-fd-background: #000000;
+  --color-fd-foreground: #ffffff;
+  --color-fd-muted: #0b0b0b;
+  --color-fd-muted-foreground: #7d7d7d;
+  --color-fd-popover: #0b0b0b;
+  --color-fd-popover-foreground: #ffffff;
+  --color-fd-card: #0b0b0b;
+  --color-fd-card-foreground: #ffffff;
+  --color-fd-primary: #99ff00;
+  --color-fd-primary-foreground: #0a0a0a;
+  --color-fd-secondary: #141414;
+  --color-fd-secondary-foreground: #ffffff;
+  --color-fd-accent: #141414;
+  --color-fd-accent-foreground: #99ff00;
+  --color-fd-border: #1c1c1c;
+  --color-fd-ring: #99ff00;
+}
+
+html,
+body {
+  background: #000000;
+  color: #ffffff;
+}

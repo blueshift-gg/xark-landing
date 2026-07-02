@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>xark — prove anything, reveal nothing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#000000;--panel:#0b0b0b;--line:#1c1c1c;--line-2:#262626;
+    --lime:#99FF00;--white:#ffffff;--muted:#7d7d7d;--muted-2:#565656;--ink:#0a0a0a;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);color:var(--white);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;line-height:1.5;overflow-x:hidden;
+    background-image:
+      linear-gradient(to right,rgba(255,255,255,.022) 1px,transparent 1px),
+      linear-gradient(to bottom,rgba(255,255,255,.022) 1px,transparent 1px);
+    background-size:34px 34px;
+    display:flex;flex-direction:column;min-height:100vh;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px;width:100%}
+  a{color:inherit;text-decoration:none}
+  .mono{font-family:var(--mono)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .lime{color:var(--lime)}
+
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+    background:rgba(0,0,0,.55);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand svg{height:22px;width:auto;display:block}
+  .nav-links{display:flex;gap:30px;align-items:center;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .nav-links a:hover{color:var(--white)}
+  .nav-cta{border:1px solid var(--line-2);padding:8px 14px;color:var(--white)!important;transition:.15s}
+  .nav-cta:hover{border-color:var(--lime);color:var(--lime)!important}
+
+  main{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 0 30px}
+  .hero{text-align:center;width:100%}
+  .hero h1{font-size:clamp(44px,7vw,84px);line-height:.98;font-weight:600;letter-spacing:-.03em}
+  .hero h1 .rev{color:var(--muted-2)}
+  .hero .sub{margin:24px auto 0;max-width:540px;color:var(--muted);font-size:16px;font-family:var(--mono)}
+  .hero .sub b{color:var(--white);font-weight:500}
+
+  .demo{max-width:520px;margin:44px auto 0;background:var(--panel);border:1px solid var(--line);text-align:left}
+  .demo-head{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .lock{display:flex;align-items:center;gap:8px}
+  .lock .dot{width:7px;height:7px;background:var(--lime);box-shadow:0 0 10px rgba(153,255,0,.7)}
+  .demo-body{padding:22px 22px 24px}
+  .commit-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:13px;margin-bottom:18px}
+  .commit-row .lbl{color:var(--muted-2);text-transform:uppercase;letter-spacing:.15em;font-size:11px}
+  .commit-row .val{color:var(--lime)}
+  .prompt{font-size:21px;font-weight:500;letter-spacing:-.01em;margin-bottom:15px}
+  .inrow{display:flex;gap:10px}
+  .inrow input{flex:1;background:#000;border:1px solid var(--line-2);color:var(--white);font-family:var(--mono);font-size:16px;padding:13px 15px;outline:none}
+  .inrow input:focus{border-color:var(--lime)}
+  .inrow input::placeholder{color:var(--muted-2)}
+  .btn{background:var(--lime);color:#000;border:none;font-family:var(--mono);font-weight:600;font-size:14px;padding:0 22px;cursor:pointer;transition:.15s}
+  .btn:hover{box-shadow:0 0 22px rgba(153,255,0,.35)}
+  .btn:active{transform:translateY(1px)}
+  .proofgrid{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;margin:20px 0 0}
+  .proofgrid .px{aspect-ratio:1;background:#141414;transition:background .25s}
+  .proofgrid .px.on{background:var(--lime)}
+  .status{font-family:var(--mono);font-size:13px;color:var(--muted);margin-top:15px;min-height:18px}
+
+  .into{margin-top:34px;display:flex;gap:26px;justify-content:center;flex-wrap:wrap;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .into a{border-bottom:1px solid transparent;padding-bottom:2px;transition:.15s}
+  .into a:hover{color:var(--lime);border-color:var(--lime)}
+
+  footer{padding:22px 0;color:var(--muted-2);font-family:var(--mono);font-size:12px}
+  .foot-in{display:flex;justify-content:space-between;align-items:center}
+
+  /* lime reveal panel */
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s;z-index:80}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .panel{position:fixed;top:0;right:0;height:100vh;width:min(452px,92vw);background:var(--lime);color:var(--ink);
+    transform:translateX(100%);transition:transform .36s cubic-bezier(.22,.61,.36,1);z-index:90;
+    padding:32px 30px 30px;display:flex;flex-direction:column;font-family:var(--mono)}
+  .panel.open{transform:translateX(0)}
+  .panel .ph{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .panel .ph .t{font-size:12px;letter-spacing:.2em;font-weight:600}
+  .panel .x{cursor:pointer;font-size:22px;line-height:1;background:none;border:none;color:var(--ink);padding:0 2px}
+  .panel .result{font-family:var(--sans);font-size:30px;font-weight:600;letter-spacing:-.01em;margin:14px 0 22px}
+  .panel .prow{display:flex;justify-content:space-between;gap:14px;padding:13px 0;border-bottom:1px solid rgba(0,0,0,.16);font-size:12.5px}
+  .panel .prow .k{color:rgba(0,0,0,.55)}
+  .panel .prow .v{font-weight:600;text-align:right}
+  .panel .scell{display:inline-block;width:13px;height:13px;background:#000;vertical-align:-2px;margin-right:7px}
+  .panel .pcap{margin-top:24px;font-family:var(--sans);font-size:16px;line-height:1.55;font-weight:400;color:rgba(0,0,0,.8)}
+  .panel .pcap b{font-weight:600;color:var(--ink)}
+  .panel .pverify{margin-top:auto;border:1px solid var(--ink);padding:13px;text-align:center;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+  .panel .pverify:hover{background:var(--ink);color:var(--lime)}
+
+  @media(max-width:720px){
+    .nav-links{gap:16px}main{padding:24px 0}
+    .panel{width:100vw;padding:26px 22px}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-in">
+    <a class="brand" href="#" aria-label="xark">
+      <svg viewBox="0 0 217 59" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M80.2 45.72C80.2 41.8267 81.9333 38.76 85.4 36.52C88.92 34.28 94.0133 33.16 100.68 33.16H106.52C109.347 33.16 111.853 33.3467 114.04 33.72C116.227 34.0933 118.173 34.6267 119.88 35.32C119.827 32.92 119.56 30.92 119.08 29.32C118.653 27.6667 117.907 26.36 116.84 25.4C115.773 24.44 114.36 23.7467 112.6 23.32C110.84 22.8933 108.627 22.68 105.96 22.68H103.4C98.6 22.68 95.16 23.2133 93.08 24.28C91 25.3467 89.96 27.16 89.96 29.72H82.12C82.12 27.48 82.52 25.5067 83.32 23.8C84.12 22.0933 85.3733 20.6533 87.08 19.48C88.84 18.3067 91.08 17.4267 93.8 16.84C96.52 16.2533 99.8267 15.96 103.72 15.96H106.52C110.627 15.96 114.067 16.28 116.84 16.92C119.667 17.5067 121.933 18.52 123.64 19.96C125.347 21.3467 126.547 23.2133 127.24 25.56C127.987 27.8533 128.36 30.7333 128.36 34.2V57.8H121.16L121.08 53.96C119.587 55.24 117.72 56.28 115.48 57.08C113.24 57.8267 110.52 58.2 107.32 58.2H101C94.12 58.2 88.92 57.08 85.4 54.84C81.9333 52.6 80.2 49.56 80.2 45.72ZM119.88 40.12C118.173 39.64 116.253 39.2667 114.12 39C112.04 38.68 109.667 38.52 107 38.52H101.96C97.5867 38.52 94.3067 39.08 92.12 40.2C89.9867 41.32 88.92 42.8667 88.92 44.84C88.92 46.76 89.9867 48.3067 92.12 49.48C94.3067 50.6 97.7467 51.16 102.44 51.16H107.24C109.64 51.16 111.64 50.92 113.24 50.44C114.893 49.96 116.2 49.3467 117.16 48.6C118.12 47.8 118.813 46.9467 119.24 46.04C119.667 45.1333 119.88 44.28 119.88 43.48V40.12Z" fill="white"/>
+        <path d="M138.928 16.6H146.688L146.528 22.12C149.835 18.0667 155.035 16.04 162.128 16.04C162.768 16.04 163.461 16.0667 164.208 16.12C165.008 16.1733 165.755 16.2533 166.448 16.36L166.368 23.96C165.728 23.8533 164.901 23.7733 163.888 23.72C162.875 23.6667 161.888 23.64 160.928 23.64C156.501 23.6933 153.141 24.92 150.848 27.32C148.555 29.72 147.408 32.7867 147.408 36.52V57.8H138.928V16.6Z" fill="white"/>
+        <path d="M173.538 1H182.018V33.64L204.258 16.6H216.098L188.578 37.72L216.658 57.8H204.098L182.018 41.72V57.8H173.538V1Z" fill="white"/>
+        <path d="M1.00002 16H9.40002V24.4H1.00002V16Z" fill="#99FF00"/>
+        <path d="M9.40002 24.4H17.8V32.8H9.40002V24.4Z" fill="#99FF00"/>
+        <path d="M17.8 32.8H51.4V41.2H17.8V32.8Z" fill="#99FF00"/>
+        <path d="M9.40002 41.2H17.8V49.6H9.40002V41.2Z" fill="#99FF00"/>
+        <path d="M1.00002 49.6H9.40002V58H1.00002V49.6Z" fill="#99FF00"/>
+        <path d="M68.2 16H59.8V24.4H68.2V16Z" fill="#99FF00"/>
+        <path d="M59.8 24.4H51.4V32.8H59.8V24.4Z" fill="#99FF00"/>
+        <path d="M59.8 41.2H51.4V49.6H59.8V41.2Z" fill="#99FF00"/>
+        <path d="M68.2 49.6H59.8V58H68.2V49.6Z" fill="#99FF00"/>
+      </svg>
+    </a>
+    <div class="nav-links">
+      <a href="#">Docs</a>
+      <a href="#">Examples</a>
+      <a href="#">GitHub</a>
+      <a href="#" class="nav-cta">Try it</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <div class="wrap hero">
+    <div class="kicker" style="margin-bottom:24px">Groth16 for Noir · verified on Solana</div>
+    <h1>Prove anything.<br><span class="rev">Reveal nothing.</span></h1>
+    <p class="sub">A secret stays secret. The proof is <b>256 bytes</b>. The chain checks it in <b>milliseconds</b>.</p>
+
+    <div class="demo">
+      <div class="demo-head">
+        <span>guess-the-secret.nr</span>
+        <span class="lock"><span class="dot"></span> WINNER COMMITTED</span>
+      </div>
+      <div class="demo-body">
+        <div class="commit-row">
+          <span class="lbl">Commitment</span>
+          <span class="val">0x99f0a7c4…e21c</span>
+        </div>
+        <div class="prompt">Guess the secret number.</div>
+        <div class="inrow">
+          <input id="guess" inputmode="numeric" placeholder="e.g. 402917" value="402917" />
+          <button class="btn" id="prove">Prove</button>
+        </div>
+        <div class="proofgrid" id="pg"></div>
+        <div class="status" id="status">The winner was fixed before you arrived. Prove a guess.</div>
+      </div>
+    </div>
+
+    <div class="into">
+      <a href="#">Read the docs →</a>
+      <a href="#">See the examples →</a>
+      <a href="#">How it works →</a>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap foot-in">
+    <span>xark — a <span class="lime">Blueshift</span> project</span>
+    <span>unaudited · for builders</span>
+  </div>
+</footer>
+
+<!-- lime reveal panel -->
+<div class="scrim" id="scrim"></div>
+<aside class="panel" id="panel" aria-hidden="true">
+  <div class="ph"><span class="t">WHAT JUST HAPPENED</span><button class="x" id="pclose" aria-label="close">×</button></div>
+  <div class="result" id="presult">Not it.</div>
+  <div class="prow"><span class="k">your guess</span><span class="v" id="pg-guess">402917</span></div>
+  <div class="prow"><span class="k">commitment · fixed beforehand</span><span class="v">0x99f0…e21c</span></div>
+  <div class="prow"><span class="k">groth16 proof · 256 bytes</span><span class="v">verified ✓</span></div>
+  <div class="prow"><span class="k">winning number</span><span class="v"><span class="scell"></span>never revealed</span></div>
+  <div class="pcap">You played a game you can <b>verify is fair</b>, against a number you <b>can't see</b> and <b>can't find</b>. That's a zero-knowledge proof.</div>
+  <div class="pverify">verify this proof yourself →</div>
+</aside>
+
+<script>
+  const pg=document.getElementById('pg'),COLS=24,ROWS=4,TOTAL=COLS*ROWS;
+  for(let i=0;i<TOTAL;i++){const d=document.createElement('div');d.className='px';pg.appendChild(d);}
+  const cells=[...pg.children],status=document.getElementById('status'),btn=document.getElementById('prove'),guess=document.getElementById('guess');
+  const scrim=document.getElementById('scrim'),panel=document.getElementById('panel'),pclose=document.getElementById('pclose');
+
+  function openPanel(){scrim.classList.add('open');panel.classList.add('open');panel.setAttribute('aria-hidden','false');}
+  function closePanel(){scrim.classList.remove('open');panel.classList.remove('open');panel.setAttribute('aria-hidden','true');}
+  scrim.addEventListener('click',closePanel);
+  pclose.addEventListener('click',closePanel);
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
+
+  btn.addEventListener('click',()=>{
+    cells.forEach(c=>c.classList.remove('on'));
+    document.getElementById('pg-guess').textContent=(guess.value||'—');
+    status.textContent='proving…';btn.disabled=true;btn.style.opacity=.6;
+    let i=0;const order=[...cells.keys()];
+    const t=setInterval(()=>{
+      for(let k=0;k<8&&i<order.length;k++,i++){cells[order[i]].classList.add('on');}
+      if(i>=order.length){clearInterval(t);
+        status.innerHTML='<span class="lime">Not it.</span> Verified — the number is still secret.';
+        btn.disabled=false;btn.style.opacity=1;
+        setTimeout(openPanel,140);
+      }
+    },45);
+  });
+</script>
+</body>
+</html>
