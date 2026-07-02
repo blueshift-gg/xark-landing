@@ -1,1 +1,4 @@
-{ "title": "xark", "pages": ["index","quickstart","learn-zk"] }
+{
+  "title": "xark",
+  "pages": ["index", "quickstart", "learn-zk", "guides", "reference", "trust"]
+}

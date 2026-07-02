@@ -8,6 +8,10 @@ export default defineConfig({
   mdxOptions: {
     preset: "fumadocs",
     rehypeCodeOptions: {
+      langAlias: {
+        // Noir has no Shiki grammar; it is syntactically close to Rust.
+        noir: "rust",
+      },
       themes: {
         light: "github-light",
         dark: "github-dark-default",

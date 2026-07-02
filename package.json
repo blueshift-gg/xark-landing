@@ -12,7 +12,7 @@
     "@types/mdx": "^2.0.14",
     "clsx": "^2.1.1",
     "fumadocs-core": "^16.10.2",
-    "fumadocs-mdx": "^15.0.12",
+    "fumadocs-mdx": "15.0.12",
     "fumadocs-ui": "^16.10.2",
     "lucide-react": "^1.18.0",
     "motion": "^12.23.12",

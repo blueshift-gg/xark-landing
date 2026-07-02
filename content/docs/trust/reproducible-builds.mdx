@@ -1,0 +1,50 @@
+---
+title: Reproducible builds
+description: Verify that the verifier deployed on-chain is exactly the code you can read.
+---
+
+A verifier you can't reproduce is a verifier you have to trust blindly. xark ships a **reference
+Solana program** wrapping `xark_verifier::verify_groth16` that builds to a **byte-identical `.so`** —
+so you can hash-match the source against what's actually deployed. Because the verifier is generic
+over the circuit, this is *one fixed binary* for every circuit, not one per circuit.
+
+## How it's pinned
+
+Determinism comes from pinning everything that touches codegen:
+
+- **Toolchain** — `cargo-build-sbf` from the Anza `stable` channel (a specific `platform-tools` and
+  `rustc`), the only thing that compiles the SBF target.
+- **Release profile** — `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`,
+  `strip = "symbols"`, `incremental = false` — forbidding the two things that break determinism in
+  practice: multi-codegen-unit parallelism and incremental builds.
+- **Dependencies** — a committed `Cargo.lock` with cargo checksum verification (`--locked`); sources
+  aren't vendored because a locked lockfile plus checksums is byte-for-byte equivalent to a vendored
+  tree.
+
+The expected hash lives at `crates/verifier/reference-program/expected.sha256`, and CI fails a PR
+whose build drifts from it.
+
+## Verify it yourself
+
+```sh
+# build the reference verifier
+cargo build-sbf \
+  --manifest-path crates/verifier/reference-program/Cargo.toml \
+  --sbf-out-dir build-out/ -- --locked
+
+# check it against the committed hash
+shasum -a 256 -c crates/verifier/reference-program/expected.sha256
+
+# and against what's actually deployed
+solana program dump <PROGRAM_ID> deployed.so
+shasum -a 256 deployed.so
+```
+
+A mismatch between the deployed program and the reference hash is a security-relevant finding.
+
+<Callout title="What this does and doesn't catch">
+It catches **source-vs-deployed drift, toolchain drift, and dependency drift** — the deployed bytes
+are the reviewed bytes. It does **not** catch a compromised pinned toolchain (a backdoored
+`platform-tools` would still hash-match) or a compromised on-chain loader (a property of the Solana
+runtime, out of scope).
+</Callout>

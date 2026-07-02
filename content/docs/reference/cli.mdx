@@ -1,0 +1,126 @@
+---
+title: CLI
+description: Every xark subcommand, its flags, and the files it writes.
+---
+
+`xark` is the *Rust Groth16 (BN254) backend for Noir*. It consumes Noir/ACIR artifacts, lowers the
+supported opcodes into R1CS, and proves and verifies them with Arkworks Groth16.
+
+Run inside a Noir project (a directory with `Nargo.toml`) and every path is inferred from the
+package name: artifacts under `target/`, keys and proofs under `target/groth16/`. Every flag below
+can override an inferred path.
+
+## `xark inspect`
+
+Inspect a Noir ACIR artifact — opcode coverage and the public-input count and order.
+
+```sh
+xark inspect [--artifact target/<name>.json] [--json] [--strict]
+```
+
+- `--json` — machine-readable output instead of the human report.
+- `--strict` — run the Brillig output-pinning `(SI)` invariant check; exits non-zero on unpinned
+  outputs.
+
+Writes nothing; prints to stdout.
+
+## `xark setup`
+
+Generate the Groth16 proving and verifying keys.
+
+```sh
+# dev keys (forgeable — demos only)
+xark setup --insecure-dev-mode
+
+# production: phase-2 from a .ptau transcript
+xark setup --ptau-file powersOfTau.ptau
+```
+
+- `--insecure-dev-mode` — derive keys deterministically. **Forgeable.** Mutually exclusive with
+  `--ptau-file`.
+- `--ptau-file <PATH>` — the phase-1 powers-of-tau transcript (auto-detected from `ptau/` or
+  `ceremony/` if present).
+- `--phase2-seed <HEX>` — 32-byte hex seed for the `(γ, δ)` derivation.
+- `--out <DIR>` — output directory (default `target/groth16`).
+
+<Files>
+  <Folder name="target/groth16" defaultOpen>
+    <File name="proving_key.bin" />
+    <File name="verifying_key.bin" />
+    <File name="metadata.json" />
+    <File name="snarkjs-verification_key.json" />
+  </Folder>
+</Files>
+
+## `xark prove`
+
+Generate a Groth16 proof from a witness.
+
+```sh
+xark prove [--witness target/<name>.gz] [--proving-key …] [--out target/groth16/proof.bin]
+```
+
+Writes `proof.bin` and `public_inputs.bin`, plus snarkjs-compatible `snarkjs-proof.json` and
+`snarkjs-public.json`, under `target/groth16/`.
+
+## `xark verify`
+
+Verify a proof against its public inputs.
+
+```sh
+xark verify
+# Proof verified: true
+```
+
+Prints `Proof verified: true` or `false`; exits with code `2` when the proof does not verify.
+
+## `xark export`
+
+Export a self-contained Solana verifier crate with the verifying key baked in.
+
+```sh
+xark export --crate-name my-verifier
+```
+
+<Files>
+  <Folder name="target/my-verifier-xark-verifier" defaultOpen>
+    <File name="Cargo.toml" />
+    <File name="src/lib.rs" />
+    <File name="verifying_key.solana.bin" />
+    <File name="proof.solana.bin" />
+    <File name="public_inputs.solana.bin" />
+    <File name="instruction_data.bin" />
+    <File name="README.md" />
+    <File name="client_call_example.rs" />
+  </Folder>
+</Files>
+
+The generated `lib.rs` exposes `verify`, `verify_strict`, `verify_instruction_data`, and
+`verify_instruction_data_strict`, plus a `NUM_PUBLIC_INPUTS` constant. See
+[How verification works](/docs/guides/how-verification-works).
+
+## `xark ceremony`
+
+Run a phase-2 MPC trusted setup so the keys don't depend on any single party.
+
+```sh
+xark ceremony init --ptau-file powersOfTau.ptau --out ./ceremony
+xark ceremony contribute --ceremony-dir ./ceremony --label "alice"
+xark ceremony verify --ceremony-dir ./ceremony
+xark ceremony finalize --ceremony-dir ./ceremony
+```
+
+- `init` — seed the ceremony from a `.ptau` transcript and a phase-2 seed.
+- `contribute` — apply one contributor's randomness in place (writes a `contribution_NNNN.json`).
+- `verify` — verify the full contribution chain.
+- `finalize` — mark the chain finished and write the final `metadata.json`.
+
+Full walkthrough in [The trusted setup](/docs/trust/trusted-setup).
+
+## `xark completions`
+
+```sh
+xark completions bash   # or zsh | fish | elvish
+```
+
+Prints a shell completion script to stdout.

@@ -1,0 +1,86 @@
+---
+title: How verification works
+description: The byte layout, the alt_bn128 pairing check, and the one function your program calls.
+---
+
+`xark export` gives your Solana program a single entry point:
+
+```rust
+if verifier::verify_instruction_data(instruction_data) {
+    // proof valid — act on it
+}
+```
+
+This page is what happens underneath — worth understanding, because the *only* thing standing
+between "a proof exists" and "the chain believes it" is the byte layout and one pairing check.
+
+## The instruction data
+
+Everything the verifier needs (except the verifying key, which is baked into the crate at compile
+time) arrives as one byte string:
+
+```
+instruction_data =  proof (256 bytes)  ‖  public_inputs (N × 32 bytes)
+
+proof            =  A (G1, 64)  ‖  B (G2, 128)  ‖  C (G1, 64)
+public_inputs    =  fr_0 (32)   ‖  fr_1 (32)    ‖  …  ‖  fr_{N-1} (32)
+```
+
+Three things are load-bearing:
+
+- **Everything is little-endian.** Each `Fq`/`Fr` element is a 32-byte little-endian limb; a G1 point
+  is `x ‖ y`, a G2 point is `x.c0 ‖ x.c1 ‖ y.c0 ‖ y.c1`. This is the wire format Solana's syscalls
+  expect (selected with the `0x80` flag), not Arkworks' native byte order.
+- **`A` is already negated.** The exporter writes `−A ‖ B ‖ C` so the on-chain check is a single
+  product of pairings with no in-circuit negation.
+- **Public-input order is the circuit's order.** The N scalars appear in exactly the order
+  `nargo` assigned them — the order `xark inspect` prints. Your program must concatenate them the
+  same way, or verification fails. Each scalar must be canonical (`< r`); a non-canonical input is
+  rejected outright.
+
+## The check
+
+The verifier reconstructs the public-input commitment as a linear combination in G1, then runs one
+pairing:
+
+```
+vk_x = ic[0] + Σ  public_inputs[i] · ic[i+1]          // G1 scalar-muls + adds
+
+e(−A, B) · e(α, β) · e(vk_x, γ) · e(C, δ)  ==  1       // one 4-pair pairing
+```
+
+Both steps are native Solana `alt_bn128` syscalls (G1 scalar-mul, G1 add, and a 4-pair pairing over
+768 bytes) via the `solana_nostd_alt_bn128` crate. Off-chain, the same crate falls back to an
+Arkworks reference implementation, so the verifier is testable without a validator.
+
+<Callout title="What this costs">
+The fixed cost is the 4-pair pairing; the variable cost is the `vk_x` linear combination — N G1
+scalar-muls and adds, one per public input. So a circuit's on-chain cost scales with its **number of
+public inputs**, not the size of the computation it proves. xark measures the real per-proof compute
+units in its SBF test suite rather than hard-coding a number.
+</Callout>
+
+## The generated API
+
+The per-circuit crate `xark export` writes bakes the verifying key in as a `const VERIFIER:
+Verifier<N>` and exposes:
+
+| Function | Use |
+| --- | --- |
+| `verify_instruction_data(data: &[u8]) -> bool` | the common path — pass `proof ‖ public_inputs` |
+| `verify_instruction_data_strict(data) -> bool` | adds strict non-malleability checks |
+| `verify(proof, &[[u8; 32]; N]) -> bool` | when you already have the pieces split out |
+| `verify_strict(…)` | strict variant |
+
+The underlying `xark-verifier` crate is `#![no_std]` and dependency-light, so it drops into a
+Pinocchio or Anchor program the same way. A minimal Pinocchio handler is just:
+
+```rust
+fn process_instruction(_id: &Address, _accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    if verifier::verify_instruction_data(data) { Ok(()) }
+    else { Err(ProgramError::InvalidInstructionData) }
+}
+```
+
+See [Serialization & artifacts](/docs/reference/serialization) for the exact file formats, and
+[Reproducible builds](/docs/trust/reproducible-builds) for verifying the deployed `.so` byte-for-byte.

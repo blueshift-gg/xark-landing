@@ -90,6 +90,30 @@
   border-color: var(--lime);
   color: var(--lime) !important;
 }
+.xk .xk-gh {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-2);
+  padding: 7px 12px;
+  color: var(--white) !important;
+  font-family: var(--mono);
+  font-size: 13px;
+  transition: 0.15s;
+}
+.xk .xk-gh:hover {
+  border-color: var(--lime);
+  color: var(--lime) !important;
+}
+.xk .xk-gh svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  display: block;
+}
+.xk .xk-gh-star {
+  color: var(--lime);
+}
 
 /* hero */
 .xk .xk-main {

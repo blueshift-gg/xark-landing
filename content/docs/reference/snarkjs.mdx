@@ -1,0 +1,32 @@
+---
+title: snarkjs interop
+description: Verify the same xark proof outside Solana, in JavaScript.
+---
+
+Every xark proof is **snarkjs-compatible**. Alongside its native binary artifacts, `xark` emits the
+JSON that [snarkjs](https://github.com/iden3/snarkjs) expects, so the exact proof you verify on
+Solana also verifies in a browser or a Node script — a cheap, independent check that your circuit
+and keys are sound.
+
+## The JSON artifacts
+
+| Command | File | Contents |
+| --- | --- | --- |
+| `xark setup` | `target/groth16/snarkjs-verification_key.json` | the verifying key |
+| `xark prove` | `target/groth16/snarkjs-proof.json` | the proof |
+| `xark prove` | `target/groth16/snarkjs-public.json` | the public inputs |
+
+## Verify with snarkjs
+
+```sh
+snarkjs groth16 verify \
+  target/groth16/snarkjs-verification_key.json \
+  target/groth16/snarkjs-public.json \
+  target/groth16/snarkjs-proof.json
+```
+
+<Callout title="Why this matters">
+snarkjs is an independent Groth16 implementation. If it accepts a proof xark produced, the two agree
+on the curve, the encoding, and the verifying key — a differential test you get for free on every
+proof. The examples repo wires this up as `just verify-snarkjs`.
+</Callout>

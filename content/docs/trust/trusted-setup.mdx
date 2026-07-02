@@ -1,0 +1,78 @@
+---
+title: The trusted setup
+description: Why Groth16 needs a ceremony, and how xark runs one.
+---
+
+Groth16 is fast and its proofs are tiny, but it has one cost: a per-circuit **trusted setup**.
+Producing the keys generates secret randomness — the "toxic waste" `(τ, α, β, γ, δ)`. Anyone who
+knows it can forge a valid proof for *any* statement, no matter how correct the verifier is. The
+whole game is to generate the keys so that **no single party ever knows that secret**.
+
+<Callout type="warn" title="Dev keys know the secret">
+`xark setup --insecure-dev-mode` derives the keys from a recoverable trapdoor — it prints
+`WARNING: setup_mode = insecure-dev-mode. Do not use in production.` It is for tests and demos only.
+Its `metadata.json` records `production_safe: false`.
+</Callout>
+
+## Two phases
+
+A Groth16 ceremony has two parts, and xark treats them very differently:
+
+- **Phase 1 — universal, circuit-independent.** The "powers of tau." You should **not** roll your
+  own: reuse a large public transcript like the
+  [Perpetual Powers of Tau](https://github.com/privacy-scaling-explorations/perpetualpowersoftau),
+  which has hundreds of contributors — a far stronger "at least one was honest" assumption than
+  anything you'd run locally. `xark setup --ptau-file <file>` reads the standard `.ptau` format
+  directly.
+- **Phase 2 — circuit-specific.** xark runs this itself; no external prover is in the loop. Each
+  contributor injects fresh secret randomness `δ_i`, publishes a Schnorr proof of their contribution,
+  and the chain is checked with δ-consistency pairing checks.
+
+## Running the ceremony
+
+<Steps>
+<Step>
+### Seed it from a phase-1 transcript
+```sh
+xark ceremony init --artifact target/<name>.json \
+  --ptau-file final.ptau --phase2-seed $SEED --out ceremony/
+```
+</Step>
+<Step>
+### Each contributor adds randomness
+```sh
+xark ceremony contribute --ceremony-dir ceremony/ --label alice
+```
+Every contribution rewrites the keys in place and appends a signed `contribution_NNNN.json`.
+</Step>
+<Step>
+### Anyone verifies the chain
+```sh
+xark ceremony verify --ceremony-dir ceremony/
+```
+Third parties should run this independently against the published transcript.
+</Step>
+<Step>
+### Finalize
+```sh
+xark ceremony finalize --ceremony-dir ceremony/
+```
+Writes the final `metadata.json` with `setup_mode: "phase2-from-ptau+mpc[N contributors]"` and
+`production_safe: true`.
+</Step>
+</Steps>
+
+## Setup modes at a glance
+
+| How the keys were made | `production_safe` | `setup_mode` |
+| --- | :---: | --- |
+| `--insecure-dev-mode` | `false` | `insecure-dev-mode` |
+| `xark setup --ptau-file` | `true` | `phase2-from-ptau` |
+| `xark ceremony …` | `true` | `phase2-from-ptau+mpc[N contributors]` |
+
+<Callout title="What a real deployment needs">
+A single phase-2 contribution (`setup --ptau-file`) is honest but weak — it trusts one party's `δ`.
+For anything holding value: multiple independent phase-2 contributors, each publishing their
+attestation; `xark ceremony verify` run by third parties; and the full transcript published so
+anyone can check it.
+</Callout>

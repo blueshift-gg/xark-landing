@@ -1,22 +1,38 @@
 ---
-title: "Introduction"
-description: "Groth16 proving backend for Noir, verified on Solana."
+title: Introduction
+description: A Rust Groth16 backend for Noir — prove anything, reveal nothing, verified on Solana.
 ---
 
-xark is a Groth16 proving backend for Noir circuits. You write a circuit in Noir; xark lowers it to
-R1CS, runs the Groth16 setup, produces proofs, and exports an on-chain verifier crate with the
-verifying key baked in.
+xark compiles a Noir circuit into a ~256-byte Groth16 proof and a self-contained Solana verifier
+that checks it through the native `alt_bn128` syscalls. A program acts on *"this statement is true"* —
+an age, a balance, a Merkle membership — without ever seeing the private data behind it.
 
-The point of a zero-knowledge proof is that a Solana program can act on a statement being *true*
-without ever seeing the private data behind it. Prove you're over 18, that a balance covers a
-withdrawal, that a value sits in a Merkle tree — the chain checks the proof, not the secret.
+It lowers **ACIR, not Noir source**: `nargo` compiles your circuit to ACIR, and xark lowers the
+supported opcodes into R1CS and proves them with Arkworks Groth16 over BN254.
 
-Verification happens natively: xark targets Groth16 over the BN254 curve, which Solana verifies
-through its `alt_bn128` syscalls. Proofs are ~256 bytes and verify in a few hundred k compute units,
-no matter how large the underlying computation was.
+<Cards>
+  <Card title="Quickstart" href="/docs/quickstart" description="Circuit → proof → on-chain verifier, in six commands." />
+  <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
+  <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the on-chain byte layout." />
+  <Card title="What xark supports" href="/docs/reference/supported-opcodes" description="The opcodes it proves — and the ones it refuses, before you waste a setup." />
+</Cards>
 
-## Where to start
+## What makes it different
 
-- New to ZK? Start with [What is a ZK proof?](/docs/learn-zk/01-what-is-a-zk-proof) and work through
-  the Learn ZK track.
-- Already know ZK? Jump to the [Quickstart](/docs/quickstart).
+- **It refuses what it can't prove soundly.** Unsupported opcodes are rejected *eagerly, before any
+  setup or proving cost*, with a specific error — never silently mis-proved. See
+  [supported opcodes](/docs/reference/supported-opcodes).
+- **A real trusted setup.** Beyond dev keys, xark runs a multi-contributor phase-2
+  [MPC ceremony](/docs/trust/trusted-setup) with Schnorr proofs of contribution and δ-consistency
+  checks.
+- **Machine-checked where it counts.** The gadgets and the ACIR→R1CS lowering carry
+  [Lean 4 proofs](/docs/trust/formal-proofs-and-audit); the on-chain verifier is checked with Kani;
+  every proof is cross-verified against [snarkjs](/docs/reference/snarkjs).
+- **A tiny, `no_std` on-chain verifier** with a [reproducible build](/docs/trust/reproducible-builds)
+  you can hash-match against what's actually deployed.
+
+<Callout type="warn" title="Status: experimental">
+xark is **experimental and not externally audited**, and its on-chain verifier has never been
+deployed to mainnet. The formal proofs and test suite are real, but they are not a substitute for an
+external audit. Don't hold value on it yet.
+</Callout>

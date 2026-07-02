@@ -1,0 +1,39 @@
+---
+title: Serialization & artifacts
+description: The files xark writes, and the two encodings — native and on-chain.
+---
+
+xark writes proofs and keys in two encodings, for two audiences. Knowing which is which saves you a
+lot of "why doesn't this verify" confusion.
+
+- **Native (`.bin`)** — Arkworks canonical serialization (`Compress::Yes`, validated on read),
+  byte-for-byte what `ark-groth16` 0.6 produces. This is what `xark verify` reads off-chain, and it
+  is the authoritative form.
+- **On-chain (`.solana.bin`)** — a 32-byte **little-endian**, uncompressed wire format that Solana's
+  `alt_bn128` syscalls consume directly. Different byte order, different compression — see
+  [How verification works](/docs/guides/how-verification-works).
+- **JSON** — snarkjs-compatible, coordinates as decimal strings. See
+  [snarkjs interop](/docs/reference/snarkjs).
+
+## Artifacts
+
+| File | Encoding | Produced by | Contents |
+| --- | --- | --- | --- |
+| `proving_key.bin` | native | `setup` | `ProvingKey<Bn254>` |
+| `verifying_key.bin` | native | `setup` | `VerifyingKey<Bn254>` |
+| `proof.bin` | native | `prove` | `Proof<Bn254>` |
+| `public_inputs.bin` | native | `prove` | the N public scalars |
+| `metadata.json` | JSON | `setup` | circuit hash, `setup_mode`, `production_safe` |
+| `snarkjs-*.json` | JSON | `setup`/`prove` | vk / proof / public, decimal strings |
+| `verifying_key.solana.bin` | on-chain LE | `export` | VK, little-endian |
+| `proof.solana.bin` | on-chain LE | `export` | 256 B, `−A ‖ B ‖ C` |
+| `public_inputs.solana.bin` | on-chain LE | `export` | N × 32 B, little-endian |
+| `instruction_data.bin` | on-chain LE | `export` | `proof ‖ public_inputs` (what you submit) |
+
+## metadata.json and circuit hash
+
+`metadata.json` records a `circuit_hash` that binds the lowering version, the curve and proving
+system, the pinned Noir/ACIR version, the number and identity of public inputs, and the canonical
+ACIR bytes. If any of those change, the hash changes — which is how xark detects that a proof and a
+verifying key belong to different circuits. It also records how the keys were made
+(`setup_mode`, `production_safe`), covered under [The trusted setup](/docs/trust/trusted-setup).

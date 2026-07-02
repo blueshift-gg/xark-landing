@@ -1,0 +1,67 @@
+---
+title: What xark supports
+description: The ACIR opcodes it proves — and the ones it refuses, before you spend a setup.
+---
+
+xark lowers a fixed, explicit set of ACIR opcodes into R1CS. Anything outside that set is
+**rejected up front** — during lowering, before any setup or proving cost — with an error that tells
+you exactly what and why. It never emits an unsound proof for an opcode it doesn't understand.
+
+Run `xark inspect` on any circuit to see its coverage.
+
+## Supported
+
+| Class | Opcodes |
+| --- | --- |
+| Arithmetic | `AssertZero` |
+| Memory | `MemoryInit`, `MemoryOp` (fixed and variable index) |
+| Control | `Call` (circuit inlining), `BrilligCall` (see [below](#brillig-hints)) |
+| Hashing | `sha256_compression`, `poseidon2_permutation`, `keccakf1600`, `blake2s`, `blake3` |
+| Bitwise | `range`, `and`, `xor` |
+| Symmetric | `aes128_encrypt` |
+| Elliptic curve | `embedded_curve_add`, `multi_scalar_mul` |
+| Signatures | `ecdsa_secp256k1`, `ecdsa_secp256r1` |
+
+<Callout title="Cost, not a limit">
+ECDSA is supported but heavy: it lowers to roughly **3.6M** R1CS constraints for secp256k1 and
+**5.4M** for secp256r1 per verification. xark warns rather than rejects — but budget your setup and
+proving time accordingly.
+</Callout>
+
+## Rejected — and why
+
+Rejection is by exclusion: any black-box function not in the list above is refused. A few carry
+tailored explanations:
+
+- **`recursive_aggregation`** — permanently unsupported in a BN254-only backend. Recursive Groth16
+  needs a cycle of curves and costs >10M constraints per step; the error points you to a PLONK-family
+  backend or a curve cycle instead.
+- **the bigint family** (`bigint_add`, `bigint_mul`, …) — non-native arbitrary-modulus arithmetic
+  isn't implemented, and Noir 1.0.0-beta.22 doesn't expose `std::bigint` anyway. Rejected at setup
+  time so you don't pay for a circuit that would crash.
+- **AND/XOR with `num_bits` outside `[1, 64]`** — Noir emits these only for `u8`/`u16`/`u32`/`u64`.
+- **Databus memory** (`--enable-databus`) — recompile without it.
+
+A rejection looks like this — specific opcode, specific index, and a fix:
+
+```
+Unsupported ACIR opcode at index 42: BlackBoxFuncCall::recursive_aggregation
+
+Recursive Groth16 aggregation is not supported and will not be added in the
+BN254-only configuration. ...
+```
+
+The error text is treated as part of xark's stable interface — it won't shift under you between
+releases.
+
+## Brillig hints
+
+Noir's unconstrained `Brillig` VM computes *hint* witnesses (modular inverses, bit decompositions,
+division remainders). xark **does not re-execute Brillig and emits no constraint for the call
+itself** — it trusts the output witnesses. That is sound *because* Noir's compiler guarantees every
+Brillig output is also pinned by a surrounding `AssertZero`, which xark *does* lower and Groth16
+*does* check.
+
+`xark inspect --strict` verifies that invariant statically: it flags any Brillig output not
+referenced by a real constraint. An unpinned output would mean a Noir compiler bug or tampering —
+which is why the [Noir version is pinned](/docs/quickstart) and the check is one flag away.

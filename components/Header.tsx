@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { GitHubStars } from "@/components/GitHubStars";
 import { Wordmark } from "@/components/Wordmark";
 
 export function Header() {
@@ -12,10 +13,7 @@ export function Header() {
         <div className="xk-nav-links">
           <Link href="/docs">Docs</Link>
           <Link href="/examples">Examples</Link>
-          <a href="https://github.com/blueshift-gg/xark">GitHub</a>
-          <Link href="/" className="xk-nav-cta">
-            Try it
-          </Link>
+          <GitHubStars />
         </div>
       </div>
     </nav>
