@@ -1,15 +1,26 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
+import localFont from "next/font/local";
 
 import { siteMetadata } from "@/site.config";
 
 import "./globals.css";
 
-const grotesk = Space_Grotesk({
-  variable: "--font-space-grotesk",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+const prolinea = localFont({
+  src: [
+    {
+      path: "../../public/fonts/Prolinea-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../../public/fonts/Prolinea-Medium.woff2",
+      weight: "500",
+      style: "normal",
+    },
+  ],
+  variable: "--font-prolinea",
 });
 
 const mono = IBM_Plex_Mono({
@@ -27,7 +38,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${grotesk.variable} ${mono.variable}`}
+      className={`${prolinea.variable} ${mono.variable}`}
     >
       <body className="antialiased">
         <RootProvider

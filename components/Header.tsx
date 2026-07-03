@@ -13,6 +13,7 @@ export function Header() {
         <div className="xk-nav-links">
           <Link href="/docs">Docs</Link>
           <Link href="/examples">Examples</Link>
+          <Link href="/docs/learn-zk/01-what-is-a-zk-proof">How it works</Link>
           <GitHubStars />
         </div>
       </div>

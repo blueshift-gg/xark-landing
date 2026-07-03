@@ -9,8 +9,8 @@ export const siteMetadata: Metadata = {
   description:
     "A Groth16 proving backend for Noir. Prove anything, reveal nothing — verified on Solana through the native alt_bn128 syscalls.",
   icons: {
-    icon: [{ url: "/icon.svg", type: "image/svg+xml" }],
-    shortcut: "/icon.svg",
+    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
+    shortcut: "/favicon.svg",
   },
   openGraph: {
     type: "website",

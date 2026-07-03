@@ -10,7 +10,7 @@
   --muted: #7d7d7d;
   --muted-2: #565656;
   --mono: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --sans: var(--font-prolinea), ui-sans-serif, system-ui, sans-serif;
 
   min-height: 100vh;
   display: flex;
@@ -117,20 +117,20 @@
 
 /* hero */
 .xk .xk-main {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px 0 30px;
+  padding: 32px 0 64px;
+  margin-top: 80px;
 }
 .xk .xk-hero {
   text-align: center;
 }
 .xk .xk-h1 {
-  font-size: clamp(44px, 7vw, 84px);
+  font-size: clamp(44px, 7vw, 72px);
   line-height: 0.98;
-  font-weight: 600;
-  letter-spacing: -0.03em;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 .xk .xk-rev {
   color: var(--muted-2);
@@ -139,7 +139,7 @@
   margin: 24px auto 0;
   max-width: 540px;
   color: var(--muted);
-  font-size: 16px;
+  font-size: 15px;
   font-family: var(--mono);
 }
 .xk .xk-sub b {
@@ -154,12 +154,21 @@
   background: var(--panel);
   border: 1px solid var(--line);
   text-align: left;
+  overflow: hidden;
+}
+.xk .xk-grid-wrap.is-collapsed {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  margin-top:-20px;
 }
 .xk .xk-demo-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 13px 18px;
+  background: var(--panel);
   border-bottom: 1px solid var(--line);
   font-family: var(--mono);
   font-size: 12px;
@@ -177,7 +186,13 @@
   box-shadow: 0 0 10px rgba(153, 255, 0, 0.7);
 }
 .xk .xk-demo-body {
-  padding: 22px 22px 24px;
+  padding: 17px 16px 20px;
+}
+.xk .xk-demo-body--compact-bottom {
+  padding-bottom: 0;
+}
+.xk .xk-grid-wrap {
+  padding: 0 16px 20px;
 }
 .xk .xk-commit-row {
   display: flex;
@@ -198,8 +213,8 @@
 }
 .xk .xk-prompt {
   font-size: 21px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-weight: 400;
+  letter-spacing: -0.005em;
   margin-bottom: 15px;
 }
 .xk .xk-inrow {
@@ -212,7 +227,7 @@
   border: 1px solid var(--line-2);
   color: var(--white);
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: 15px;
   padding: 13px 15px;
   outline: none;
 }
@@ -252,10 +267,13 @@
 .xk .xk-px {
   aspect-ratio: 1;
   background: #141414;
-  transition: background 0.25s;
+  position: relative;
 }
-.xk .xk-px.on {
-  background: var(--lime);
+.xk .xk-px-blink {
+  position: absolute;
+  inset: 0;
+  background: rgba(153, 255, 0, 0.4);
+  pointer-events: none;
 }
 .xk .xk-status {
   font-family: var(--mono);
@@ -292,6 +310,7 @@
   color: var(--muted-2);
   font-family: var(--mono);
   font-size: 12px;
+  margin-top: auto;
 }
 .xk .xk-foot-in {
   display: flex;
@@ -299,65 +318,17 @@
   align-items: center;
 }
 
-/* lime reveal panel */
-.xk .xk-scrim {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.25s;
-  z-index: 80;
-}
-.xk .xk-scrim.open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.xk .xk-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  height: 100vh;
-  width: min(452px, 92vw);
-  background: var(--lime);
-  color: var(--ink);
-  transform: translateX(100%);
-  transition: transform 0.36s cubic-bezier(0.22, 0.61, 0.36, 1);
-  z-index: 90;
-  padding: 32px 30px 30px;
+/* in-card result reveal */
+.xk .xk-demo.is-result .xk-demo-body {
   display: flex;
   flex-direction: column;
-  font-family: var(--mono);
-}
-.xk .xk-panel.open {
-  transform: translateX(0);
-}
-.xk .xk-ph {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-.xk .xk-ph .t {
-  font-size: 12px;
-  letter-spacing: 0.2em;
-  font-weight: 600;
-}
-.xk .xk-x {
-  cursor: pointer;
-  font-size: 22px;
-  line-height: 1;
-  background: none;
-  border: none;
-  color: var(--ink);
-  padding: 0 2px;
 }
 .xk .xk-result {
-  font-family: var(--sans);
+  font-family: var(--sans) !important;
   font-size: 30px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 14px 0 22px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  margin-bottom: 8px;
 }
 .xk .xk-prow {
   display: flex;
@@ -365,6 +336,7 @@
   gap: 14px;
   padding: 13px 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.16);
+  font-family: var(--mono);
   font-size: 12.5px;
 }
 .xk .xk-prow .k {
@@ -385,28 +357,51 @@
 .xk .xk-pcap {
   margin-top: 24px;
   font-family: var(--sans);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.55;
   color: rgba(0, 0, 0, 0.8);
 }
 .xk .xk-pcap b {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
-.xk .xk-pverify {
-  margin-top: auto;
-  border: 1px solid var(--ink);
-  padding: 13px;
-  text-align: center;
+.xk .xk-result-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+}
+.xk .xk-btn-outline,
+.xk .xk-btn-dark {
+  flex: 1;
+  font-family: var(--mono);
   font-size: 13px;
   font-weight: 600;
+  padding: 13px 12px;
+  text-align: center;
   cursor: pointer;
   transition: 0.15s;
+  border: none;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.xk .xk-btn-outline {
+  background: transparent;
+  border: 1px solid var(--ink);
   color: var(--ink);
 }
-.xk .xk-pverify:hover {
+.xk .xk-btn-outline:hover {
   background: var(--ink);
   color: var(--lime);
+}
+.xk .xk-btn-dark {
+  background: #0a0a0a;
+  color: var(--white);
+}
+.xk .xk-btn-dark:hover {
+  background: var(--white);
+  color: var(--ink);
 }
 
 /* interior pages (examples) */
@@ -420,14 +415,14 @@
 }
 .xk .xk-sec-head h1 {
   font-size: clamp(30px, 4.5vw, 44px);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1.04;
 }
 .xk .xk-sec-head p {
   margin-top: 16px;
   color: var(--muted);
-  font-size: 16px;
+  font-size: 15px;
 }
 .xk .xk-grid4 {
   display: grid;
@@ -455,8 +450,8 @@
 .xk .xk-tile h3 {
   margin: 12px 0 8px;
   font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 500;
+  letter-spacing: -0.005em;
 }
 .xk .xk-tile p {
   color: var(--muted);
@@ -480,9 +475,8 @@
   .xk .xk-main {
     padding: 24px 0;
   }
-  .xk .xk-panel {
-    width: 100vw;
-    padding: 26px 22px;
+  .xk .xk-result-actions {
+    flex-direction: column;
   }
   .xk .xk-grid4 {
     grid-template-columns: 1fr;

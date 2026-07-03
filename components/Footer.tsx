@@ -5,7 +5,7 @@ export function Footer() {
         <span>
           xark — a <span className="xk-lime">Blueshift</span> project
         </span>
-        <span>unaudited · for builders</span>
+        <span>groth16 for noir · unaudited · verified on solana</span>
       </div>
     </footer>
   );
