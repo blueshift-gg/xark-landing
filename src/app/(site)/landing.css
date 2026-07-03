@@ -116,6 +116,17 @@
 }
 
 /* minesweeper demo */
+.xk .xk-demo.xk-ms {
+  max-width: 384px;
+  margin-top: 12px;
+}
+.xk .xk-ms .xk-demo-body {
+  padding: 13px 14px 15px;
+}
+.xk .xk-ms-grid.is-busy {
+  pointer-events: none;
+  opacity: 0.85;
+}
 .xk .xk-ms.is-shaking {
   animation: xk-ms-shake 0.45s ease;
 }
@@ -135,7 +146,7 @@
 .xk .xk-ms-grid {
   display: grid;
   grid-template-columns: repeat(9, 1fr);
-  gap: 4px;
+  gap: 3px;
   margin: 2px 0 0;
 }
 .xk .xk-ms-cell {
@@ -144,7 +155,7 @@
   background: #191919;
   color: var(--white);
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1;
   padding: 0;
@@ -245,14 +256,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px 0 64px;
-  margin-top: 80px;
+  padding: 10px 0 18px;
+  margin-top: 36px;
 }
 .xk .xk-hero {
   text-align: center;
 }
 .xk .xk-h1 {
-  font-size: clamp(44px, 7vw, 72px);
+  font-size: clamp(32px, 4.6vw, 52px);
   line-height: 0.98;
   font-weight: 500;
   letter-spacing: -0.01em;
@@ -261,10 +272,10 @@
   color: var(--muted-2);
 }
 .xk .xk-sub {
-  margin: 24px auto 0;
-  max-width: 540px;
+  margin: 14px auto 0;
+  max-width: 520px;
   color: var(--muted);
-  font-size: 15px;
+  font-size: 13.5px;
   font-family: var(--mono);
 }
 .xk .xk-sub b {

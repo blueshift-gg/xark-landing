@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 // Server-only. Holds each game's secret board + salt and produces a real Groth16
 // proof per revealed cell by shelling out to nargo (witness) and the xark CLI
-// (prove). The browser verifies the proof; the board never leaves this process.
+// (prove). The browser verifies each proof; the board never leaves this process.
 
 const exec = promisify(execFile);
 
@@ -21,8 +21,14 @@ const CELLS = N * N;
 const MINES = 10;
 const CENTER = Math.floor(CELLS / 2); // (4,4)
 
-type Game = { board: number[]; salt: string };
-const games = new Map<string, Game>();
+export type Game = { board: number[]; salt: string };
+
+// Persist across dev HMR / module reloads so in-flight games survive edits
+// (in-memory is fine for a single-instance demo).
+const games: Map<string, Game> =
+  (globalThis as unknown as { __msGames?: Map<string, Game> }).__msGames ??
+  new Map<string, Game>();
+(globalThis as unknown as { __msGames?: Map<string, Game> }).__msGames = games;
 
 // The prover shares one Prover.toml + target dir, so serialize access.
 let chain: Promise<unknown> = Promise.resolve();
@@ -58,7 +64,7 @@ export type Reveal = {
   publicSignals: string[];
 };
 
-async function prove(
+export async function proveCell(
   board: number[],
   salt: string,
   r: number,
@@ -89,6 +95,48 @@ async function prove(
   });
 }
 
+function neighbourCount(board: number[], r: number, c: number): number {
+  let n = 0;
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const rr = r + dr;
+      const cc = c + dc;
+      if (rr >= 0 && rr < N && cc >= 0 && cc < N && board[rr * N + cc] === 1) n++;
+    }
+  }
+  return n;
+}
+
+// The cells a click opens: a mine is just itself; otherwise classic flood through
+// the connected zero-region and its border. Mines are never included.
+export function floodCells(board: number[], r: number, c: number): [number, number][] {
+  if (board[r * N + c] === 1) return [[r, c]];
+  const seen = new Set<number>();
+  const out: [number, number][] = [];
+  const stack: [number, number][] = [[r, c]];
+  while (stack.length) {
+    const [cr, cc] = stack.pop()!;
+    if (cr < 0 || cr >= N || cc < 0 || cc >= N) continue;
+    const idx = cr * N + cc;
+    if (seen.has(idx) || board[idx] === 1) continue;
+    seen.add(idx);
+    out.push([cr, cc]);
+    if (neighbourCount(board, cr, cc) === 0) {
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr || dc) stack.push([cr + dr, cc + dc]);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export function getGame(id: string): Game | undefined {
+  return games.get(id);
+}
+
 export async function newGame() {
   const board = genBoard();
   const salt = randSalt();
@@ -96,15 +144,6 @@ export async function newGame() {
   games.set(id, { board, salt });
   // Prove the guaranteed-safe centre as the opening move — this also establishes
   // the commitment the player checks stays constant across every later reveal.
-  const center = await prove(board, salt, Math.floor(CENTER / N), CENTER % N);
+  const center = await proveCell(board, salt, Math.floor(CENTER / N), CENTER % N);
   return { id, commitment: center.commitment, center };
-}
-
-export async function revealCell(id: string, r: number, c: number): Promise<Reveal> {
-  const game = games.get(id);
-  if (!game) throw new Error("unknown or expired game");
-  if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || r >= N || c < 0 || c >= N) {
-    throw new Error("cell out of range");
-  }
-  return prove(game.board, game.salt, r, c);
 }
