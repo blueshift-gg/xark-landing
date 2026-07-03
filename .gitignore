@@ -20,3 +20,7 @@ next-env.d.ts
 .vercel
 .wrangler
 .gstack/
+
+# circuit build artifacts
+circuits/**/target/
+circuits/**/Prover.toml

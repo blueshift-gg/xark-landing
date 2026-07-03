@@ -1,0 +1,6 @@
+[package]
+name = "minesweeper"
+type = "bin"
+authors = ["Blueshift"]
+
+[dependencies]

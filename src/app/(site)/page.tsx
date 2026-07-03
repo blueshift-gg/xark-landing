@@ -1,5 +1,5 @@
-import { GuessDemo } from "@/components/GuessDemo";
 import HeadingReveal from "@/components/HeadingReveal";
+import { MinesweeperDemo } from "@/components/MinesweeperDemo";
 
 export default function Home() {
   return (
@@ -21,7 +21,7 @@ export default function Home() {
           it in <b>milliseconds</b>.
         </p>
 
-        <GuessDemo />
+        <MinesweeperDemo />
 
         {/* <div className="xk-into">
           <a href="/docs">Read the docs →</a>
