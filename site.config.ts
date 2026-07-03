@@ -18,5 +18,13 @@ export const siteMetadata: Metadata = {
     title: "xark — prove anything, reveal nothing",
     description:
       "A Groth16 proving backend for Noir, verified on Solana.",
+      images: [
+        {
+          url: "/meta-image.png",
+          width: 1200,
+          height: 630,
+          alt: "xark — prove anything, reveal nothing",
+        },
+      ],
   },
 };
