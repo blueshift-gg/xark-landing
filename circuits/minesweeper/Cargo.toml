@@ -1,0 +1,16 @@
+[package]
+name = "minesweeper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# Local-checkout dependencies. `xark build` compiles this crate with the pinned
+# nightly (xark as RUSTC), so the `xark` lib + gadget rlibs carry matching MIR.
+[dependencies]
+xark = { path = "../../../xark/crates/xark", default-features = false }
+xark-poseidon2 = { path = "../../../xark/crates/xark-poseidon2" }
+
+[workspace]

@@ -182,7 +182,7 @@ export function MinesweeperDemo() {
       }}
     >
       <div className="xk-demo-head">
-        <span>minesweeper.nr</span>
+        <span>minesweeper.rs</span>
         <span className="xk-lock">
           <span className="xk-dot" /> BOARD COMMITTED
         </span>
