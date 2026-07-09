@@ -4,6 +4,10 @@ import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import vkey from "@/circuits/minesweeper/verification_key.json";
+// NEXT_PUBLIC_PROVER_URL → native Rust container (set in .env.local for dev).
+// Falls back to /api/minesweeper (in-process WASM) when not set.
+const PROVER = process.env.NEXT_PUBLIC_PROVER_URL || "/api/minesweeper";
+
 import { smooth } from "@/utils/easings";
 
 // The honest ZK minesweeper. The board + salt live server-side; every opened
@@ -84,7 +88,7 @@ export function MinesweeperDemo() {
     setCells(blank());
     try {
       const j = await (
-        await fetch("/api/minesweeper/new", { method: "POST" })
+        await fetch(`${PROVER}/new`, { method: "POST" })
       ).json();
       if (j.error) throw new Error(j.error);
       idRef.current = j.id;
@@ -115,7 +119,7 @@ export function MinesweeperDemo() {
       setBusy(true);
       let hitMine = false;
       try {
-        const res = await fetch("/api/minesweeper/reveal", {
+        const res = await fetch(`${PROVER}/reveal`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
