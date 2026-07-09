@@ -16,7 +16,7 @@ export default function Home() {
           cursorColor="#99ff00"
           color="#ffffff"
         />
-        <p className="xk-sub">
+        <p className="xk-sub text-balance">
           A secret stays secret. The proof is <b>256 bytes</b>. The chain checks
           it in <b>milliseconds</b>.
         </p>
