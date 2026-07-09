@@ -128,34 +128,15 @@ export function MinesweeperDemo() {
             c: idx % N,
           }),
         });
-        if (!res.ok || !res.body) throw new Error("reveal failed");
-        // Read the NDJSON stream: each line is one cell's proof. Verify and
-        // reveal it as it arrives, so the region cascades open and the counter
-        // ticks live.
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            let rv: Reveal;
-            try {
-              rv = JSON.parse(line);
-            } catch {
-              continue;
-            }
-            if (!(await verify(rv)) || rv.commitment !== commitRef.current) {
-              continue;
-            }
-            applyAll([rv]);
-            setProofs((p) => p + 1);
-            if (rv.isMine) hitMine = true;
+        if (!res.ok) throw new Error("reveal failed");
+        const reveals: Reveal[] = await res.json();
+        for (const rv of reveals) {
+          if (!(await verify(rv)) || rv.commitment !== commitRef.current) {
+            continue;
           }
+          applyAll([rv]);
+          setProofs((p) => p + 1);
+          if (rv.isMine) hitMine = true;
         }
         if (hitMine) setStatus("lost");
       } catch {
