@@ -9,7 +9,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@blueshift-gg/xark-wasm": "file:../xark/crates/xark-wasm/pkg",
+    "@blueshift-gg/xark-wasm": "file:vendor/xark-wasm",
     "@types/mdx": "^2.0.14",
     "animejs": "^4.5.0",
     "classnames": "^2.5.1",

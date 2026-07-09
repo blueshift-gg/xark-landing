@@ -1,11 +1,12 @@
 import { floodCells, getGame, N, proveCell } from "@/lib/minesweeper";
+import type { Reveal } from "@/lib/minesweeper";
 
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Streams one proof per opened cell as NDJSON, so a flood cascades open in the
 // browser (and the proof counter ticks live) instead of blocking on the whole
-// region.
+// region. Each prove is wrapped in setImmediate so the synchronous WASM call
+// doesn't starve the event loop between chunks.
 export async function POST(req: Request) {
   let body: { id?: unknown; r?: unknown; c?: unknown };
   try {
@@ -30,7 +31,11 @@ export async function POST(req: Request) {
     async start(controller) {
       for (const [pr, pc] of cells) {
         try {
-          const rv = await proveCell(game.board, game.salt, pr, pc);
+          const rv = await new Promise<Reveal>((resolve, reject) => {
+            setImmediate(() => {
+              proveCell(game.board, game.salt, pr, pc).then(resolve, reject);
+            });
+          });
           controller.enqueue(encoder.encode(JSON.stringify(rv) + "\n"));
         } catch {
           // skip a cell that failed to prove; keep the cascade going

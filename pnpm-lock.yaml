@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@blueshift-gg/xark-wasm':
-        specifier: file:../xark/crates/xark-wasm/pkg
-        version: file:../xark/crates/xark-wasm/pkg
+        specifier: file:vendor/xark-wasm
+        version: file:vendor/xark-wasm
       '@types/mdx':
         specifier: ^2.0.14
         version: 2.0.14
@@ -82,8 +82,8 @@ packages:
     resolution: {integrity: sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw==}
     engines: {node: '>=10'}
 
-  '@blueshift-gg/xark-wasm@file:../xark/crates/xark-wasm/pkg':
-    resolution: {directory: ../xark/crates/xark-wasm/pkg, type: directory}
+  '@blueshift-gg/xark-wasm@file:vendor/xark-wasm':
+    resolution: {directory: vendor/xark-wasm, type: directory}
 
   '@emnapi/runtime@1.11.1':
     resolution: {integrity: sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==}
@@ -2065,7 +2065,7 @@ snapshots:
 
   '@alloc/quick-lru@5.2.0': {}
 
-  '@blueshift-gg/xark-wasm@file:../xark/crates/xark-wasm/pkg': {}
+  '@blueshift-gg/xark-wasm@file:vendor/xark-wasm': {}
 
   '@emnapi/runtime@1.11.1':
     dependencies:

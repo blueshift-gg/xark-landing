@@ -1,24 +1,13 @@
-import { execFile } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { promisify } from "node:util";
-
 import { poseidon2Hash2 } from "./poseidon2";
+import r1csObj from "@/circuits/minesweeper/artifacts/r1cs.json";
+import circuitObj from "@/circuits/minesweeper/artifacts/circuit.json";
+import { decodePk } from "@/circuits/minesweeper/artifacts/pk";
+import { decodeWasm } from "@/vendor/xark-wasm/wasm";
 
 // Server-only. Holds each game's secret board + salt and produces a real Groth16
-// proof per revealed cell. Proving runs **in-memory** via `@blueshift-gg/xark-wasm`
-// — no CLI shell-out per cell, no temp files, no lock. The one-time `xark build`
-// and `xark setup` (producing R1CS + keys) still run as a subprocess, but only
-// once, lazily, cached on disk. The browser verifies each proof; the board never
-// leaves this process.
-
-const exec = promisify(execFile);
-
-const CIRCUIT_DIR = path.join(process.cwd(), "circuits", "minesweeper");
-const OUT_DIR = path.join(CIRCUIT_DIR, "target", "xark", "minesweeper");
-const XARK = path.join(os.homedir(), ".cargo", "bin", "xark");
+// proof per revealed cell. Proving runs **in-memory** via the vendored WASM.
+// Everything is imported as regular modules — no `node:`, no `process`, no
+// `fetch`, no `fs`. Works in Cloudflare Workers, Node.js, and edge.
 
 // BN254 scalar field modulus (for packing the board into one field element).
 const P =
@@ -38,12 +27,9 @@ const games: Map<string, Game> =
   new Map<string, Game>();
 (globalThis as unknown as { __msGames?: Map<string, Game> }).__msGames = games;
 
-// ---- WASM prover (in-memory, no CLI shell-out per cell) ---------------------
+// ---- WASM prover (all artifacts pre-loaded at import time) -------------------
 
-type WasmProveFn = (
-  r1csJson: string,
-  circuitJson: string,
-  pkBytes: Uint8Array,
+type WasmProveFastFn = (
   inputsJson: string,
 ) => {
   proof: Uint8Array;
@@ -53,62 +39,37 @@ type WasmProveFn = (
   numPublicInputs: number;
 };
 
-let __wasmProve: WasmProveFn | null = null;
-let __artifacts: { r1cs: string; circuit: string; pk: Uint8Array } | null = null;
+let __wasmProveFast: WasmProveFastFn | null = null;
 
 let readyPromise: Promise<void> | null = null;
 async function ensureReady(): Promise<void> {
   if (readyPromise) return readyPromise;
   readyPromise = (async () => {
-    // 1. Ensure circuit artifacts exist (one-time build + setup, cached on disk).
-    const hasAll =
-      (await exists(path.join(OUT_DIR, "pk.bin"))) &&
-      (await exists(path.join(OUT_DIR, "r1cs.json"))) &&
-      (await exists(path.join(OUT_DIR, "circuit.json")));
-    if (!hasAll) {
-      await exec(XARK, ["build", CIRCUIT_DIR], { maxBuffer: 1 << 26 });
-      await exec(
-        XARK,
-        ["setup", CIRCUIT_DIR, "--insecure-dev-mode", "--deterministic-rng", "42"],
-        { maxBuffer: 1 << 26 },
-      );
-    }
+    // One-time setup: stringify JSON objects, decode binaries, init WASM.
+    const r1csJson = JSON.stringify(r1csObj);
+    const circuitJson = JSON.stringify(circuitObj);
+    const pkBytes = decodePk();
+    const wasmBytes = decodeWasm();
 
-    // 2. Load artifacts into memory once.
-    const [r1cs, circuit, pk] = await Promise.all([
-      fs.readFile(path.join(OUT_DIR, "r1cs.json"), "utf8"),
-      fs.readFile(path.join(OUT_DIR, "circuit.json"), "utf8"),
-      fs.readFile(path.join(OUT_DIR, "pk.bin")),
-    ]);
-    __artifacts = { r1cs, circuit, pk: new Uint8Array(pk) };
-
-    // 3. Initialise the WASM module.
-    const wasmPath = path.join(
-      process.cwd(),
-      "node_modules",
-      "@blueshift-gg",
-      "xark-wasm",
-      "xark_wasm_bg.wasm",
-    );
-    const wasmBytes = new Uint8Array(await fs.readFile(wasmPath));
     const mod = await import("@blueshift-gg/xark-wasm");
     await mod.default({ module_or_path: wasmBytes });
-    __wasmProve = mod.prove as WasmProveFn;
+    mod.preload(r1csJson, circuitJson, pkBytes);
+    __wasmProveFast = mod.prove_fast as WasmProveFastFn;
   })().catch((e) => {
-    readyPromise = null; // allow retry on next request
+    readyPromise = null;
     throw e;
   });
   return readyPromise;
 }
 
-async function exists(p: string): Promise<boolean> {
-  return fs.access(p).then(() => true, () => false);
-}
-
 // ---- board helpers ----------------------------------------------------------
 
 function randSalt(): string {
-  return BigInt("0x" + randomBytes(31).toString("hex")).toString();
+  const buf = new Uint8Array(31);
+  crypto.getRandomValues(buf);
+  let hex = "";
+  for (const b of buf) hex += b.toString(16).padStart(2, "0");
+  return BigInt("0x" + hex).toString();
 }
 
 function genBoard(): number[] {
@@ -123,8 +84,6 @@ function genBoard(): number[] {
   return board;
 }
 
-// Pack the board into a single field element (board[0] + board[1]·2 + …), the
-// same packing the circuit commits to.
 function packBoard(board: number[]): bigint {
   let packed = 0n;
   let pow = 1n;
@@ -154,12 +113,8 @@ export async function proveCell(
   c: number,
 ): Promise<Reveal> {
   await ensureReady();
-  const { r1cs, circuit, pk } = __artifacts!;
-  const prove = __wasmProve!;
+  const proveFast = __wasmProveFast!;
 
-  // The prover supplies every public value; the circuit asserts each. We
-  // still read them back out of `snarkjsPublic` below so the returned
-  // values are exactly the proof's public signals.
   const packed = packBoard(board);
   const commitment = poseidon2Hash2(packed, BigInt(salt));
   const isMine = board[r * N + c];
@@ -174,7 +129,7 @@ export async function proveCell(
   inputs.is_mine = String(isMine);
   inputs.count = String(count);
 
-  const result = prove(r1cs, circuit, pk, JSON.stringify(inputs));
+  const result = proveFast(JSON.stringify(inputs));
   // public inputs order (from `xark inspect`): [r, c, commitment, is_mine, count]
   const publicSignals = JSON.parse(result.snarkjsPublic) as string[];
   return {
@@ -235,10 +190,8 @@ export function getGame(id: string): Game | undefined {
 export async function newGame() {
   const board = genBoard();
   const salt = randSalt();
-  const id = randomUUID();
+  const id = crypto.randomUUID();
   games.set(id, { board, salt });
-  // Prove the guaranteed-safe centre as the opening move — this also establishes
-  // the commitment the player checks stays constant across every later reveal.
   const center = await proveCell(board, salt, Math.floor(CENTER / N), CENTER % N);
   return { id, commitment: center.commitment, center };
 }

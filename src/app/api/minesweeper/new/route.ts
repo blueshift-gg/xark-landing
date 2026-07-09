@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 
 import { newGame } from "@/lib/minesweeper";
 
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST() {
