@@ -6,8 +6,8 @@ import { decodeWasm } from "@/vendor/xark-wasm/wasm";
 
 // Server-only. Holds each game's secret board + salt and produces a real Groth16
 // proof per revealed cell. Proving runs **in-memory** via the vendored WASM.
-// Everything is imported as regular modules — no `node:`, no `process`, no
-// `fetch`, no `fs`. Works in Cloudflare Workers, Node.js, and edge.
+// Workers: Wrangler pre-compiles `.wasm` imports into WebAssembly.Module.
+// Node/webpack dev: decode from base64 and compile at runtime.
 
 // BN254 scalar field modulus (for packing the board into one field element).
 const P =
@@ -20,14 +20,12 @@ const CENTER = Math.floor(CELLS / 2); // (4,4)
 
 export type Game = { board: number[]; salt: string };
 
-// Persist across dev HMR / module reloads so in-flight games survive edits
-// (in-memory is fine for a single-instance demo).
 const games: Map<string, Game> =
   (globalThis as unknown as { __msGames?: Map<string, Game> }).__msGames ??
   new Map<string, Game>();
 (globalThis as unknown as { __msGames?: Map<string, Game> }).__msGames = games;
 
-// ---- WASM prover (all artifacts pre-loaded at import time) -------------------
+// ---- WASM prover ------------------------------------------------------------
 
 type WasmProveFastFn = (
   inputsJson: string,
@@ -45,16 +43,27 @@ let readyPromise: Promise<void> | null = null;
 async function ensureReady(): Promise<void> {
   if (readyPromise) return readyPromise;
   readyPromise = (async () => {
-    // One-time setup: stringify JSON objects, decode binaries, init WASM.
     const r1csJson = JSON.stringify(r1csObj);
     const circuitJson = JSON.stringify(circuitObj);
     const pkBytes = decodePk();
-    const wasmBytes = decodeWasm();
 
-    const mod = await import("@blueshift-gg/xark-wasm");
-    await mod.default({ module_or_path: wasmBytes });
-    mod.preload(r1csJson, circuitJson, pkBytes);
-    __wasmProveFast = mod.prove_fast as WasmProveFastFn;
+    // WASM module: Wrangler pre-compiles `.wasm` imports at deploy time and
+    // exposes via globalThis.__XARK_WASM (see scripts/patch-wasm.mjs). In dev,
+    // fall back to base64 bytes + WebAssembly.compile.
+    let wasmModule: WebAssembly.Module;
+    const precompiled = (globalThis as Record<string, unknown>).__XARK_WASM as
+      | WebAssembly.Module
+      | undefined;
+    if (precompiled) {
+      wasmModule = precompiled;
+    } else {
+      wasmModule = await WebAssembly.compile(decodeWasm() as BufferSource);
+    }
+
+    const wasm = await import("@/vendor/xark-wasm/xark_wasm.js");
+    wasm.initSync({ module: wasmModule });
+    wasm.preload(r1csJson, circuitJson, pkBytes);
+    __wasmProveFast = wasm.prove_fast as WasmProveFastFn;
   })().catch((e) => {
     readyPromise = null;
     throw e;
@@ -130,7 +139,6 @@ export async function proveCell(
   inputs.count = String(count);
 
   const result = proveFast(JSON.stringify(inputs));
-  // public inputs order (from `xark inspect`): [r, c, commitment, is_mine, count]
   const publicSignals = JSON.parse(result.snarkjsPublic) as string[];
   return {
     r,
@@ -156,8 +164,6 @@ function neighbourCount(board: number[], r: number, c: number): number {
   return n;
 }
 
-// ---- flood-fill -------------------------------------------------------------
-
 export function floodCells(board: number[], r: number, c: number): [number, number][] {
   if (board[r * N + c] === 1) return [[r, c]];
   const seen = new Set<number>();
@@ -180,8 +186,6 @@ export function floodCells(board: number[], r: number, c: number): [number, numb
   }
   return out;
 }
-
-// ---- game lifecycle ---------------------------------------------------------
 
 export function getGame(id: string): Game | undefined {
   return games.get(id);
