@@ -10,10 +10,26 @@ dark, with the xark lime-on-black identity.
 
 ```bash
 pnpm install
+pnpm setup       # builds the circuit + Groth16 keys + copies env templates
 pnpm dev          # http://localhost:3000
 ```
 
-(Requires Node 20+ and pnpm. `pnpm build && pnpm start` for a production build.)
+(Requires Node 20+, pnpm, and the `xark` CLI on PATH.)
+
+## Production secrets
+
+The minesweeper demo encrypts game state into a token using `MINESWEEPER_SECRET`.
+The key is derived from the secret with SHA-256, so any strong random string
+works — hex, base64, or a long passphrase all produce a valid AES-256 key.
+For local dev, `pnpm setup` copies the default from `.dev.vars.example`. For
+production:
+
+```bash
+# Generate a strong secret and set it on the deployed Worker:
+openssl rand -base64 32 | npx wrangler secret put MINESWEEPER_SECRET
+```
+
+Wrangler encrypts it and injects it as `process.env.MINESWEEPER_SECRET` at runtime.
 
 ## Structure
 

@@ -1,10 +1,11 @@
-import { floodCells, getGame, N, proveRevealSet } from "@/lib/minesweeper";
+import { floodCells, N, proveRevealSet } from "@/lib/minesweeper";
+import { unsealGame } from "@/lib/game-token";
 
 export const dynamic = "force-dynamic";
 
-// One proof for the whole flood. The client verifies the single proof, then
-// animates the cells open locally — so an exploding reveal is one round-trip,
-// not one proof per cell.
+// One proof for the whole flood. The client sends the encrypted game token
+// (received from /new) as `id` — the server decrypts it to recover the board,
+// salt, and commitment. No server-side state at all.
 export async function POST(req: Request) {
   let body: { id?: unknown; r?: unknown; c?: unknown };
   try {
@@ -13,7 +14,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "bad request" }, { status: 400 });
   }
 
-  const game = getGame(String(body.id));
+  const game = await unsealGame(String(body.id));
   if (!game) {
     return Response.json({ error: "unknown or expired game" }, { status: 404 });
   }
@@ -31,9 +32,12 @@ export async function POST(req: Request) {
   }
 
   try {
-    // floodCells returns [[r,c]] if the clicked cell is a mine (game over);
-    // otherwise the full flood region. Either way: a single proof.
-    const reveal = await proveRevealSet(game.board, game.salt, floodCells(game.board, r, c), game.commitment);
+    const reveal = await proveRevealSet(
+      game.board,
+      game.salt,
+      floodCells(game.board, r, c),
+      game.commitment,
+    );
     return Response.json(reveal);
   } catch (e) {
     return Response.json({ error: String(e) }, { status: 500 });
