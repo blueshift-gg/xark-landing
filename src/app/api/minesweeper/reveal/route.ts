@@ -1,12 +1,10 @@
-import { floodCells, getGame, N, proveCell } from "@/lib/minesweeper";
-import type { Reveal } from "@/lib/minesweeper";
+import { floodCells, getGame, N, proveRevealSet } from "@/lib/minesweeper";
 
 export const dynamic = "force-dynamic";
 
-// Streams one proof per opened cell as NDJSON, so a flood cascades open in the
-// browser (and the proof counter ticks live) instead of blocking on the whole
-// region. Each prove is wrapped in setImmediate so the synchronous WASM call
-// doesn't starve the event loop between chunks.
+// One proof for the whole flood. The client verifies the single proof, then
+// animates the cells open locally — so an exploding reveal is one round-trip,
+// not one proof per cell.
 export async function POST(req: Request) {
   let body: { id?: unknown; r?: unknown; c?: unknown };
   try {
@@ -21,34 +19,23 @@ export async function POST(req: Request) {
   }
   const r = Number(body.r);
   const c = Number(body.c);
-  if (!Number.isInteger(r) || r < 0 || r >= N || !Number.isInteger(c) || c < 0 || c >= N) {
+  if (
+    !Number.isInteger(r) ||
+    r < 0 ||
+    r >= N ||
+    !Number.isInteger(c) ||
+    c < 0 ||
+    c >= N
+  ) {
     return Response.json({ error: "cell out of range" }, { status: 400 });
   }
 
-  const cells = floodCells(game.board, r, c);
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      for (const [pr, pc] of cells) {
-        try {
-          const rv = await new Promise<Reveal>((resolve, reject) => {
-            setImmediate(() => {
-              proveCell(game.board, game.salt, pr, pc).then(resolve, reject);
-            });
-          });
-          controller.enqueue(encoder.encode(JSON.stringify(rv) + "\n"));
-        } catch {
-          // skip a cell that failed to prove; keep the cascade going
-        }
-      }
-      controller.close();
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "content-type": "application/x-ndjson; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
+  try {
+    // floodCells returns [[r,c]] if the clicked cell is a mine (game over);
+    // otherwise the full flood region. Either way: a single proof.
+    const reveal = await proveRevealSet(game.board, game.salt, floodCells(game.board, r, c), game.commitment);
+    return Response.json(reveal);
+  } catch (e) {
+    return Response.json({ error: String(e) }, { status: 500 });
+  }
 }

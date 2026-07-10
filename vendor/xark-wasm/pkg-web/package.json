@@ -1,0 +1,21 @@
+{
+  "name": "@blueshift-gg/xark-wasm",
+  "type": "module",
+  "description": "WebAssembly bindings for generating xark Groth16 (BN254) proofs in the browser / Node.",
+  "version": "0.0.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blueshift-gg/xark"
+  },
+  "files": [
+    "xark_wasm_bg.wasm",
+    "xark_wasm.js",
+    "xark_wasm.d.ts"
+  ],
+  "main": "xark_wasm.js",
+  "types": "xark_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

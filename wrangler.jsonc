@@ -21,8 +21,5 @@
   },
   "observability": {
     "enabled": true
-  },
-  "vars": {
-    "NEXT_PUBLIC_PROVER_URL": "https://xark-prover.blueshift-gg.workers.dev"
   }
 }

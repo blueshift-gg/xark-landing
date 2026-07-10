@@ -1,80 +1,82 @@
-//! Minesweeper cell-opening proof — the honest ZK demo behind the xark landing.
+//! Minesweeper reveal proof — ONE proof for any reveal: a single cell, a flood
+//! fill, or a mine click, all against the committed board.
 //!
-//! A 9×9 board (`board[i] ∈ {0,1}`, 0 = safe, 1 = mine) is packed into a single
-//! field element and committed as `hash2(packed, salt)` (Poseidon2). Given a
-//! public cell `(r, c)` the circuit constrains `(commitment, is_mine, count)`
-//! against the committed board — proving that one cell's value while revealing
-//! nothing about any other cell.
+//! A 9×9 board (`board[i] ∈ {0,1}`, 0 = safe, 1 = mine) is bit-packed into one
+//! field element and committed as `hash2(packed, salt)` (Poseidon2). The prover
+//! supplies a public reveal bitmask `revealed[i]` (1 = open cell `i`) and, for
+//! each opened cell, its mine flag `is_mine[i]` and neighbour count `count[i]`.
+//! The circuit asserts each is correct; hidden cells are forced to
+//! `is_mine = count = 0`, so nothing about them leaks.
 //!
-//! The prover (server) supplies **every** public value — including `commitment`,
-//! `is_mine` and `count` — and the circuit asserts each is correct. The verifier
-//! (browser) reads those values back out of the proof's public signals, so the
-//! house cannot move a mine or lie about a cell, and unopened cells stay hidden.
-//! Every reveal proves against the same commitment, so a moved mine (different
-//! board) would change the commitment and fail the browser's consistency check.
+//! Why one proof for a whole flood: instead of selecting one cell by a runtime
+//! `(r, c)` (expensive one-hot decode + mux), we sweep all 81 cells with a
+//! compile-time index `i`. Each cell's neighbour count `ns[i]` is then a *free
+//! linear combination* of fixed neighbours — no one-hot, no mux — and gating the
+//! outputs by `revealed[i]` is ~2 constraints/cell. So a flood of K cells costs
+//! the same one-time commitment plus ~2K constraints, in a single proof — vs K
+//! separate proofs that each re-hash the whole board.
 
 #![no_std]
 use xark::prelude::*;
 use xark_poseidon2::hash2;
 
-pub fn circuit(
-    board: Private<[Field; 81]>,
-    salt: Private<Field>,
-    r: Public<Field>,
-    c: Public<Field>,
-    commitment: Public<Field>,
-    is_mine: Public<Field>,
-    count: Public<Field>,
-) {
-    // r, c must be valid 9×9 coordinates. `U::<4>` range-proves `< 16`; the
-    // explicit `< 9` check tightens that to the board. This range proof is also
-    // what makes the ±1 neighbour sentinels below sound: a coordinate outside
-    // `[0,8]` can never equal a sentinel constant.
-    let ru = U::<4>::new(r);
-    let cu = U::<4>::new(c);
-    assert(ru.lt_const::<9>());
-    assert(cu.lt_const::<9>());
+const N: u8 = 9;
+const SIZE: usize = (N * N) as usize;
 
-    // Pack + boolean-constrain the whole board, then commit to it.
+pub fn circuit(
+    board: Private<[Field; SIZE]>,
+    salt: Private<Field>,
+    commitment: Public<Field>,
+    // Public reveal bitmask: revealed[i] == 1 ⟹ cell i is opened this proof.
+    revealed: Public<[Field; SIZE]>,
+    // Public per-cell mine flag. Asserted == revealed[i] * board[i], so a hidden
+    // cell is forced to 0 and an opened mine reads 1 (game over).
+    is_mine: Public<[Field; SIZE]>,
+    // Public per-cell neighbour count. Asserted == revealed[i] * ns[i], so a
+    // hidden cell is forced to 0 (no leak of nearby mine counts).
+    count: Public<[Field; SIZE]>,
+) {
+    // Commit the board once: booleanity + Poseidon2. Paid once per proof,
+    // amortised across every cell opened in it.
     let mut packed = Field::from(0u8);
     let mut pow = Field::from(1u8);
-    let mut i = 0usize;
-    while i < 81 {
-        assert_eq(board[i] * (board[i] - 1u8), Field::from(0u8)); // board[i] ∈ {0, 1}
-        packed = packed + board[i] * pow;
+    for cell in board {
+        cell.assert_bool();
+        packed = packed + cell * pow;
         pow = pow + pow;
-        i += 1;
     }
     assert_eq(hash2(packed, salt), commitment);
 
-    // Open cell (r, c): its own value + its neighbour-mine count. Static scan of
-    // the board (constant indices). Two cells are adjacent iff their rows differ
-    // by ≤ 1 AND their columns differ by ≤ 1; since rj = j/9 and cj = j%9 are
-    // compile-time constants per unrolled iteration, adjacency is a disjunction
-    // of equalities with the public (r, c) — no dynamic indexing and no
-    // witness-dependent control flow. `rj - 1` / `rj + 1` are field constants;
-    // at the board edge they evaluate to a value outside `[0,8]` (e.g. `-1` or
-    // `9`), which the range-proved `r`/`c` can never equal, so they correctly
-    // contribute nothing.
-    let mut is_mine_acc = Field::from(0u8);
-    let mut count_acc = Field::from(0u8);
-    let mut j = 0usize;
-    while j < 81 {
-        let rj = (j / 9) as u64;
-        let cj = (j % 9) as u64;
-        let rj_f = Field::from(rj);
-        let cj_f = Field::from(cj);
+    // Sweep all cells with a compile-time index. ns[i] = neighbour mine count
+    // (free linear sum of the fixed neighbours; centre excluded, boundary
+    // clamped). The only per-cell constraints are the two gated equalities and
+    // the bitmask booleanity.
+    let mut i = 0usize;
+    while i < SIZE {
+        let ri = i / (N as usize);
+        let ci = i % (N as usize);
 
-        let row_adj = (r == rj_f) | (r == (rj_f - 1u8)) | (r == (rj_f + 1u8));
-        let col_adj = (c == cj_f) | (c == (cj_f - 1u8)) | (c == (cj_f + 1u8));
-        let adjacent = row_adj & col_adj;
-        let is_self = (r == rj_f) & (c == cj_f);
+        let mut ns = Field::from(0u8);
+        let mut dr = 0u8;
+        while dr < 3 {
+            let mut dc = 0u8;
+            while dc < 3 {
+                if !(dr == 1 && dc == 1) {
+                    let nr = (ri as i32) + (dr as i32) - 1;
+                    let nc = (ci as i32) + (dc as i32) - 1;
+                    if nr >= 0 && nr < (N as i32) && nc >= 0 && nc < (N as i32) {
+                        let nidx = (nr as usize) * (N as usize) + (nc as usize);
+                        ns = ns + board[nidx];
+                    }
+                }
+                dc += 1;
+            }
+            dr += 1;
+        }
 
-        is_mine_acc = is_mine_acc + Field::from(is_self) * board[j];
-        count_acc = count_acc + Field::from(adjacent & !is_self) * board[j];
-        j += 1;
+        revealed[i].assert_bool();
+        assert_eq(is_mine[i], revealed[i] * board[i]); // mine flag (0 if hidden)
+        assert_eq(count[i], revealed[i] * ns);         // neighbour count (0 if hidden)
+        i += 1;
     }
-
-    assert_eq(is_mine_acc, is_mine);
-    assert_eq(count_acc, count);
 }

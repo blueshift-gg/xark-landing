@@ -6,6 +6,7 @@
   "scripts": {
     "build": "next build --webpack",
     "dev": "next dev",
+    "setup": "xark build circuits/minesweeper && xark setup circuits/minesweeper --insecure-dev-mode --deterministic-rng 42 && cp circuits/minesweeper/target/xark/minesweeper/{r1cs.json,circuit.json} circuits/minesweeper/artifacts/ && echo 'pk.ts needs manual regen from pk.bin — only r1cs.json + circuit.json synced'",
     "start": "next start",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",

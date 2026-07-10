@@ -4,17 +4,17 @@ import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import vkey from "@/circuits/minesweeper/verification_key.json";
-// NEXT_PUBLIC_PROVER_URL → native Rust container (set in .env.local for dev).
-// Falls back to /api/minesweeper (in-process WASM) when not set.
-const PROVER = process.env.NEXT_PUBLIC_PROVER_URL || "/api/minesweeper";
+// Always the in-process WASM prover (/api/minesweeper). No external prover.
+const PROVER = "/api/minesweeper";
 
 import { smooth } from "@/utils/easings";
 
-// The honest ZK minesweeper. The board + salt live server-side; every opened
-// cell comes back as a real Groth16 proof (xark CLI) that the cell opens to this
-// value against the committed board. Each proof is verified here with snarkjs
-// before the cell flips — so "proofs: N" is N real verifications, unopened cells
-// are cells nobody proved, and the commitment is checked constant across reveals.
+// The honest ZK minesweeper. The board + salt live server-side; each click comes
+// back as ONE real Groth16 proof (xark WASM) covering every cell the reveal
+// opens (a single cell, a flood fill, or a mine) against the committed board.
+// Each proof is verified here with snarkjs before the cells flip — so "proofs:
+// N" is N real verifications (one per click), unopened cells are cells nobody
+// proved, and the commitment is checked constant across reveals.
 
 const N = 9;
 const CELLS = 81;
@@ -22,14 +22,12 @@ const MINES = 10;
 const SAFE = CELLS - MINES;
 const SHAKE = [0, -10, 10, -7, 7, -4, 4, 0];
 
-type Reveal = {
-  r: number;
-  c: number;
-  isMine: boolean;
-  count: number;
+type CellReveal = { r: number; c: number; isMine: boolean; count: number };
+type RevealSet = {
   commitment: string;
   proof: unknown;
   publicSignals: string[];
+  cells: CellReveal[];
 };
 type CellState = { revealed: boolean; count: number; mine: boolean };
 
@@ -51,10 +49,10 @@ function shortHex(s: string): string {
   }
 }
 
-async function verify(rv: Reveal): Promise<boolean> {
+async function verify(rs: RevealSet): Promise<boolean> {
   const snarkjs = await import("snarkjs");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return snarkjs.groth16.verify(vkey as any, rv.publicSignals, rv.proof as any);
+  return snarkjs.groth16.verify(vkey as any, rs.publicSignals, rs.proof as any);
 }
 
 export function MinesweeperDemo() {
@@ -68,14 +66,14 @@ export function MinesweeperDemo() {
   const idRef = useRef<string | null>(null);
   const commitRef = useRef<string | null>(null);
 
-  const applyAll = (reveals: Reveal[]) =>
+  const applyCells = (cells: CellReveal[]) =>
     setCells((prev) => {
       const next = prev.slice();
-      for (const rv of reveals) {
-        next[rv.r * N + rv.c] = {
+      for (const cell of cells) {
+        next[cell.r * N + cell.c] = {
           revealed: true,
-          count: rv.count,
-          mine: rv.isMine,
+          count: cell.count,
+          mine: cell.isMine,
         };
       }
       return next;
@@ -94,8 +92,8 @@ export function MinesweeperDemo() {
       idRef.current = j.id;
       commitRef.current = j.commitment;
       setCommitment(shortHex(j.commitment));
-      if (!(await verify(j.center))) throw new Error("opening proof invalid");
-      applyAll([j.center]);
+      if (!(await verify(j.reveal))) throw new Error("opening proof invalid");
+      applyCells(j.reveal.cells);
       setProofs(1);
       setStatus("playing");
     } catch {
@@ -117,7 +115,6 @@ export function MinesweeperDemo() {
     async (idx: number) => {
       if (status !== "playing" || busy || cells[idx].revealed) return;
       setBusy(true);
-      let hitMine = false;
       try {
         const res = await fetch(`${PROVER}/reveal`, {
           method: "POST",
@@ -129,16 +126,12 @@ export function MinesweeperDemo() {
           }),
         });
         if (!res.ok) throw new Error("reveal failed");
-        const reveals: Reveal[] = await res.json();
-        for (const rv of reveals) {
-          if (!(await verify(rv)) || rv.commitment !== commitRef.current) {
-            continue;
-          }
-          applyAll([rv]);
+        const rs: RevealSet = await res.json();
+        if ((await verify(rs)) && rs.commitment === commitRef.current) {
+          applyCells(rs.cells);
           setProofs((p) => p + 1);
-          if (rv.isMine) hitMine = true;
+          if (rs.cells.some((cell) => cell.isMine)) setStatus("lost");
         }
-        if (hitMine) setStatus("lost");
       } catch {
         // keep the board; a transient failure shouldn't wipe progress
       } finally {

@@ -4,6 +4,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: import.meta.dirname,
+  serverExternalPackages: ["@blueshift-gg/xark-wasm"],
 };
 
 const withMDX = createMDX();
