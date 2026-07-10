@@ -177,10 +177,10 @@
   position: relative;
   transition: background 0.12s, transform 0.08s;
 }
-.xk .xk-ms-cell.hidden:hover {
+.xk .xk-ms-cell.hidden:not(:disabled):hover {
   background: #262626;
 }
-.xk .xk-ms-cell.hidden:active {
+.xk .xk-ms-cell.hidden:not(:disabled):active {
   transform: scale(0.93);
 }
 .xk .xk-ms-cell.open {
@@ -237,6 +237,9 @@
 .xk .xk-ms-msg b {
   color: var(--white);
   font-weight: 600;
+}
+.xk .xk-ms-msg.is-pending {
+  color: var(--lime);
 }
 .xk .xk-ms.is-won .xk-ms-msg,
 .xk .xk-ms.is-won .xk-ms-msg b {

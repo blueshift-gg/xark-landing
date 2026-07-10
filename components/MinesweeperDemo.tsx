@@ -29,10 +29,20 @@ type RevealSet = {
   publicSignals: string[];
   cells: CellReveal[];
 };
-type CellState = { revealed: boolean; count: number; mine: boolean };
+type CellState = {
+  revealed: boolean;
+  count: number;
+  mine: boolean;
+  proving: boolean;
+};
 
 const blank = (): CellState[] =>
-  Array.from({ length: CELLS }, () => ({ revealed: false, count: 0, mine: false }));
+  Array.from({ length: CELLS }, () => ({
+    revealed: false,
+    count: 0,
+    mine: false,
+    proving: false,
+  }));
 
 const bodyVariants = {
   initial: { opacity: 0 },
@@ -62,9 +72,11 @@ export function MinesweeperDemo() {
   >("loading");
   const [commitment, setCommitment] = useState("0x…");
   const [proofs, setProofs] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<"proving" | "verifying" | null>(null);
   const idRef = useRef<string | null>(null);
   const commitRef = useRef<string | null>(null);
+  // The board is non-interactive unless it's the player's turn and idle.
+  const inert = status !== "playing" || pending !== null;
 
   const applyCells = (cells: CellReveal[]) =>
     setCells((prev) => {
@@ -74,15 +86,31 @@ export function MinesweeperDemo() {
           revealed: true,
           count: cell.count,
           mine: cell.isMine,
+          proving: false,
         };
       }
       return next;
     });
 
+  // Mark cells whose proof has arrived but not yet verified, so they pulse
+  // (the `.proving` class) — the "received, pending verification" signal.
+  const markProving = (cells: CellReveal[]) =>
+    setCells((prev) => {
+      const next = prev.slice();
+      for (const cell of cells) {
+        const i = cell.r * N + cell.c;
+        next[i] = { ...next[i], proving: true };
+      }
+      return next;
+    });
+
+  const clearProving = () =>
+    setCells((prev) => prev.map((c) => (c.proving ? { ...c, proving: false } : c)));
+
   const newGame = useCallback(async () => {
     setStatus("loading");
     setProofs(0);
-    setBusy(false);
+    setPending(null);
     setCells(blank());
     try {
       const j = await (
@@ -92,11 +120,16 @@ export function MinesweeperDemo() {
       idRef.current = j.id;
       commitRef.current = j.commitment;
       setCommitment(shortHex(j.commitment));
+      markProving(j.reveal.cells);
+      setPending("verifying");
       if (!(await verify(j.reveal))) throw new Error("opening proof invalid");
       applyCells(j.reveal.cells);
       setProofs(1);
+      setPending(null);
       setStatus("playing");
     } catch {
+      clearProving();
+      setPending(null);
       setStatus("error");
     }
   }, []);
@@ -113,8 +146,11 @@ export function MinesweeperDemo() {
 
   const open = useCallback(
     async (idx: number) => {
-      if (status !== "playing" || busy || cells[idx].revealed) return;
-      setBusy(true);
+      if (status !== "playing" || pending !== null || cells[idx].revealed) return;
+      setPending("proving");
+      markProving([
+        { r: Math.floor(idx / N), c: idx % N, isMine: false, count: 0 },
+      ]);
       try {
         const res = await fetch(`${PROVER}/reveal`, {
           method: "POST",
@@ -127,18 +163,22 @@ export function MinesweeperDemo() {
         });
         if (!res.ok) throw new Error("reveal failed");
         const rs: RevealSet = await res.json();
+        setPending("verifying");
+        markProving(rs.cells);
         if ((await verify(rs)) && rs.commitment === commitRef.current) {
           applyCells(rs.cells);
           setProofs((p) => p + 1);
           if (rs.cells.some((cell) => cell.isMine)) setStatus("lost");
+        } else {
+          clearProving(); // verify failed or commitment mismatch
         }
       } catch {
-        // keep the board; a transient failure shouldn't wipe progress
+        clearProving(); // keep the board; a transient failure shouldn't wipe progress
       } finally {
-        setBusy(false);
+        setPending(null);
       }
     },
-    [status, busy, cells],
+    [status, pending, cells],
   );
 
   const isResult = status === "lost" || status === "won";
@@ -227,13 +267,14 @@ export function MinesweeperDemo() {
             </div>
 
             <div
-              className={busy ? "xk-ms-grid is-busy" : "xk-ms-grid"}
+              className={inert ? "xk-ms-grid is-busy" : "xk-ms-grid"}
               aria-label="minesweeper board"
             >
               {cells.map((cell, idx) => {
                 const cls = [
                   "xk-ms-cell",
                   cell.revealed ? "open" : "hidden",
+                  cell.proving ? "proving" : "",
                   cell.mine ? "mine" : "",
                   cell.revealed && !cell.mine && cell.count > 0
                     ? `n${cell.count}`
@@ -246,7 +287,7 @@ export function MinesweeperDemo() {
                     key={idx}
                     className={cls}
                     onClick={() => open(idx)}
-                    disabled={status !== "playing" || cell.revealed || busy}
+                    disabled={inert || cell.revealed}
                     aria-label={`cell ${Math.floor(idx / N)},${idx % N}`}
                   >
                     {cell.revealed && cell.mine ? (
@@ -262,14 +303,20 @@ export function MinesweeperDemo() {
             </div>
 
             <div className="xk-ms-foot">
-              <span className="xk-ms-msg">
+              <span
+                className={
+                  pending === "verifying" ? "xk-ms-msg is-pending" : "xk-ms-msg"
+                }
+              >
                 {status === "loading"
                   ? "Committing a board…"
-                  : busy
-                    ? "Proving + verifying…"
-                    : status === "error"
-                      ? "Prover unavailable."
-                      : "Each cell is a proof, verified in your browser."}
+                  : pending === "proving"
+                    ? "Generating proof…"
+                    : pending === "verifying"
+                      ? "Verifying proof…"
+                      : status === "error"
+                        ? "Prover unavailable."
+                        : "Each cell is a proof, verified in your browser."}
               </span>
               {status === "error" ? (
                 <button className="xk-ms-reset" onClick={newGame}>
