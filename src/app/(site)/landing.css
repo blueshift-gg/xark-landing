@@ -189,11 +189,36 @@
   background: #191919;
   transition: transform 0.08s, background 0.12s;
 }
-.xk .xk-ms-cell.hidden:not(:disabled):hover::before {
+.xk .xk-ms-cell.hidden:not(:disabled):not(.flagged):hover::before {
   background: #262626;
 }
-.xk .xk-ms-cell.hidden:not(:disabled):active::before {
+.xk .xk-ms-cell.hidden:not(:disabled):not(.flagged):active::before {
   transform: scale(0.93);
+}
+.xk .xk-ms-flag {
+  position: relative;
+  width: 10px;
+  height: 12px;
+}
+.xk .xk-ms-flag::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 0;
+  width: 1.5px;
+  height: 100%;
+  background: var(--lime);
+}
+.xk .xk-ms-flag::after {
+  content: "";
+  position: absolute;
+  left: 2.5px;
+  top: 1px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 3px 0 3px 5px;
+  border-color: transparent transparent transparent var(--lime);
 }
 .xk .xk-ms-cell.open {
   cursor: default;
@@ -262,6 +287,10 @@
 .xk .xk-ms-proofs {
   color: var(--lime);
   white-space: nowrap;
+}
+.xk .xk-ms-flags {
+  margin-right: 10px;
+  opacity: 0.85;
 }
 .xk .xk-ms-reset {
   background: none;

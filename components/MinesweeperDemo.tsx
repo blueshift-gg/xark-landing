@@ -34,6 +34,7 @@ type CellState = {
   count: number;
   mine: boolean;
   proving: boolean;
+  flagged: boolean;
 };
 
 const blank = (): CellState[] =>
@@ -42,6 +43,7 @@ const blank = (): CellState[] =>
     count: 0,
     mine: false,
     proving: false,
+    flagged: false,
   }));
 
 const bodyVariants = {
@@ -77,6 +79,7 @@ export function MinesweeperDemo() {
   const commitRef = useRef<string | null>(null);
   // The board is non-interactive unless it's the player's turn and idle.
   const inert = status !== "playing" || pending !== null;
+  const flagsUsed = cells.filter((c) => c.flagged).length;
 
   const applyCells = (cells: CellReveal[]) =>
     setCells((prev) => {
@@ -87,6 +90,7 @@ export function MinesweeperDemo() {
           count: cell.count,
           mine: cell.isMine,
           proving: false,
+          flagged: false,
         };
       }
       return next;
@@ -146,7 +150,13 @@ export function MinesweeperDemo() {
 
   const open = useCallback(
     async (idx: number) => {
-      if (status !== "playing" || pending !== null || cells[idx].revealed) return;
+      if (
+        status !== "playing" ||
+        pending !== null ||
+        cells[idx].revealed ||
+        cells[idx].flagged
+      )
+        return;
       setPending("proving");
       markProving([
         { r: Math.floor(idx / N), c: idx % N, isMine: false, count: 0 },
@@ -179,6 +189,28 @@ export function MinesweeperDemo() {
       }
     },
     [status, pending, cells],
+  );
+
+  // Right-click toggles a flag so the player can mark suspected mines. A
+  // flagged cell can't be opened by left-click (no-op) and is excluded from
+  // the press animation, so the edge-click fix never bites on it.
+  const toggleFlag = useCallback(
+    (idx: number) => {
+      if (status !== "playing" || pending !== null) return;
+      setCells((prev) => {
+        if (prev[idx].revealed) return prev;
+        // Only MINES flags exist; cap there so the counter can't go negative.
+        // Unflagging is always allowed so a used flag can be moved elsewhere.
+        if (!prev[idx].flagged) {
+          const used = prev.reduce((n, c) => n + (c.flagged ? 1 : 0), 0);
+          if (used >= MINES) return prev;
+        }
+        const next = prev.slice();
+        next[idx] = { ...next[idx], flagged: !next[idx].flagged };
+        return next;
+      });
+    },
+    [status, pending],
   );
 
   const isResult = status === "lost" || status === "won";
@@ -276,6 +308,7 @@ export function MinesweeperDemo() {
                   cell.revealed ? "open" : "hidden",
                   cell.proving ? "proving" : "",
                   cell.mine ? "mine" : "",
+                  cell.flagged ? "flagged" : "",
                   cell.revealed && !cell.mine && cell.count > 0
                     ? `n${cell.count}`
                     : "",
@@ -287,6 +320,10 @@ export function MinesweeperDemo() {
                     key={idx}
                     className={cls}
                     onClick={() => open(idx)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      toggleFlag(idx);
+                    }}
                     disabled={inert || cell.revealed}
                     aria-label={`cell ${Math.floor(idx / N)},${idx % N}`}
                   >
@@ -294,6 +331,8 @@ export function MinesweeperDemo() {
                       <span className="xk-ms-bomb" />
                     ) : cell.revealed && cell.count > 0 ? (
                       cell.count
+                    ) : cell.flagged ? (
+                      <span className="xk-ms-flag" />
                     ) : (
                       ""
                     )}
@@ -324,6 +363,7 @@ export function MinesweeperDemo() {
                 </button>
               ) : (
                 <span className="xk-ms-proofs">
+                  <span className="xk-ms-flags">⚑ {MINES - flagsUsed}</span>
                   {proofs} proof{proofs === 1 ? "" : "s"} ✓
                 </span>
               )}
