@@ -1,18 +1,19 @@
-import _wasmModule from "./xark_wasm_bg.wasm";
 /* @ts-self-types="./xark_wasm.d.ts" */
 
 /**
- * List a circuit's declared inputs (the values `prove`'s `inputs_json` must
+ * List a circuit's declared inputs (the values [`prove`]'s `inputs_json` must
  * supply) as a JSON string: `[{"name":"…","role":"public"|"private"}, …]` in
  * declaration (variable-id) order. Convenience for the JS caller.
- * @param {string} circuit_json
+ *
+ * `circuit_xbc` is the binary `circuit.xbc`.
+ * @param {Uint8Array} circuit_xbc
  * @returns {string}
  */
-export function circuit_inputs(circuit_json) {
+export function circuit_inputs(circuit_xbc) {
     let deferred3_0;
     let deferred3_1;
     try {
-        const ptr0 = passStringToWasm0(circuit_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr0 = passArray8ToWasm0(circuit_xbc, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.circuit_inputs(ptr0, len0);
         var ptr2 = ret[0];
@@ -30,48 +31,46 @@ export function circuit_inputs(circuit_json) {
 }
 
 /**
- * Parse a circuit's `r1cs.json` + `circuit.json` + `pk.bin` once so
- * subsequent calls to [`prove_fast`] skip all heavy deserialization.
- * Call once per circuit; subsequent calls silently replace the cached state.
- * @param {string} r1cs_json
- * @param {string} circuit_json
+ * Parse a circuit's `circuit.xbc` + `pk.bin` once so subsequent calls to
+ * [`prove_fast`] skip all heavy deserialization. Call once per circuit;
+ * subsequent calls silently replace the cached state.
+ *
+ * `circuit_xbc` is the self-contained binary artifact `xark build` always
+ * writes; `pk_bytes` is the `pk.bin` from `xark setup`.
+ * @param {Uint8Array} circuit_xbc
  * @param {Uint8Array} pk_bytes
  */
-export function preload(r1cs_json, circuit_json, pk_bytes) {
-    const ptr0 = passStringToWasm0(r1cs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+export function preload(circuit_xbc, pk_bytes) {
+    const ptr0 = passArray8ToWasm0(circuit_xbc, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(circuit_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(pk_bytes, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(pk_bytes, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.preload(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.preload(ptr0, len0, ptr1, len1);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
 /**
+ * Generate a Groth16 proof entirely in memory, self-verified before returning.
  *
  * See the crate docs for the shape of each argument and the return object.
- * Throws a `JsValue` (string) on any error: bad JSON, unknown input, an
- * unsatisfiable witness, a malformed proving key, or a proof that fails to
+ * Throws a `JsValue` (string) on any error: a malformed `.xbc`, unknown input,
+ * an unsatisfiable witness, a malformed proving key, or a proof that fails to
  * self-verify.
- * @param {string} r1cs_json
- * @param {string} circuit_json
+ * @param {Uint8Array} circuit_xbc
  * @param {Uint8Array} pk_bytes
  * @param {string} inputs_json
  * @returns {any}
  */
-export function prove(r1cs_json, circuit_json, pk_bytes, inputs_json) {
-    const ptr0 = passStringToWasm0(r1cs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+export function prove(circuit_xbc, pk_bytes, inputs_json) {
+    const ptr0 = passArray8ToWasm0(circuit_xbc, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(circuit_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(pk_bytes, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(pk_bytes, wasm.__wbindgen_malloc);
+    const ptr2 = passStringToWasm0(inputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(inputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.prove(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    const ret = wasm.prove(ptr0, len0, ptr1, len1, ptr2, len2);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -79,8 +78,8 @@ export function prove(r1cs_json, circuit_json, pk_bytes, inputs_json) {
 }
 
 /**
- * Like [`prove`], but uses the parsed artifacts cached by a prior [`preload`]
- * call — skipping the ~7 MB JSON + 537 KB pk.bin deserialization on every cell.
+ * Like [`prove`], but uses the artifacts cached by a prior [`preload`] call —
+ * skipping the `.xbc` expansion and `pk.bin` deserialization on every call.
  *
  * Returns the same shape as [`prove`]. Throws if [`preload`] hasn't been
  * called for this circuit.
@@ -512,4 +511,3 @@ async function __wbg_init(module_or_path) {
 }
 
 export { initSync, __wbg_init as default };
-initSync(_wasmModule);

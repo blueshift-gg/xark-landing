@@ -5,22 +5,22 @@ import { preload, prove_fast } from "@blueshift-gg/xark-wasm";
 import { sealGame, type SealedGame } from "./game-token";
 import { poseidon2Hash2 } from "./poseidon2";
 
-// Circuit artifacts — imported at build time as static data so the Worker
-// never touches a filesystem. r1cs.json / circuit.json are parsed by webpack
-// on import, so we re-stringify for prove(). pk is a base64 TS constant.
-import r1csParsed from "../circuits/minesweeper/artifacts/r1cs.json";
-import circuitParsed from "../circuits/minesweeper/artifacts/circuit.json";
+// Circuit artifacts — embedded as base64 TS constants (generated from the real
+// circuit.xbc + pk.bin by scripts/gen-artifacts.mjs) so the module is fully
+// self-contained: no filesystem and no runtime fetch, which matters on workerd
+// where the prover runs. circuit.xbc is the single self-contained build
+// artifact; the wasm derives both the witness solver and the minimized R1CS
+// from it, so no r1cs.json/circuit.json are needed.
+import { xbcBytes } from "../circuits/minesweeper/artifacts/xbc";
 import { pkBytes } from "../circuits/minesweeper/artifacts/pk";
 
-const R1CS = JSON.stringify(r1csParsed);
-const CIRCUIT = JSON.stringify(circuitParsed);
+const XBC = xbcBytes();
 const PK = pkBytes();
 
-// Parse the ~2.5 MB R1CS/CIRCUIT JSON + pk once per instance and reuse it
-// across reveals. `prove()` re-deserializes on every call (~191 ms); caching
-// it drops warm reveals from ~294 ms to ~103 ms (prove_fast). The first call
-// on a cold instance pays preload() once — identical to a single prove() —
-// so cold starts are unchanged. Safe without locking: preload() is a
+// Parse the circuit.xbc + pk.bin once per instance and reuse it across reveals.
+// prove() re-expands the .xbc on every call; preload() + prove_fast skip that,
+// leaving just the witness solve + Groth16 prove per reveal. The first call on
+// a cold instance pays preload() once. Safe without locking: preload() is a
 // synchronous wasm call, so the guard block can't be interleaved on the
 // single-threaded event loop.
 let warmed = false;
@@ -141,7 +141,7 @@ export async function proveRevealSet(
   for (let i = 0; i < CELLS; i++) inputs[`count[${i}]`] = String(count[i]);
 
   if (!warmed) {
-    preload(R1CS, CIRCUIT, PK);
+    preload(XBC, PK);
     warmed = true;
   }
   const result: { snarkjsProof: string; snarkjsPublic: string } = prove_fast(

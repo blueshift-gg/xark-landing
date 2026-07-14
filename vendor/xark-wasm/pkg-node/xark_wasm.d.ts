@@ -2,31 +2,37 @@
 /* eslint-disable */
 
 /**
- * List a circuit's declared inputs (the values `prove`'s `inputs_json` must
+ * List a circuit's declared inputs (the values [`prove`]'s `inputs_json` must
  * supply) as a JSON string: `[{"name":"…","role":"public"|"private"}, …]` in
  * declaration (variable-id) order. Convenience for the JS caller.
+ *
+ * `circuit_xbc` is the binary `circuit.xbc`.
  */
-export function circuit_inputs(circuit_json: string): string;
+export function circuit_inputs(circuit_xbc: Uint8Array): string;
 
 /**
- * Parse a circuit's `r1cs.json` + `circuit.json` + `pk.bin` once so
- * subsequent calls to [`prove_fast`] skip all heavy deserialization.
- * Call once per circuit; subsequent calls silently replace the cached state.
+ * Parse a circuit's `circuit.xbc` + `pk.bin` once so subsequent calls to
+ * [`prove_fast`] skip all heavy deserialization. Call once per circuit;
+ * subsequent calls silently replace the cached state.
+ *
+ * `circuit_xbc` is the self-contained binary artifact `xark build` always
+ * writes; `pk_bytes` is the `pk.bin` from `xark setup`.
  */
-export function preload(r1cs_json: string, circuit_json: string, pk_bytes: Uint8Array): void;
+export function preload(circuit_xbc: Uint8Array, pk_bytes: Uint8Array): void;
 
 /**
+ * Generate a Groth16 proof entirely in memory, self-verified before returning.
  *
  * See the crate docs for the shape of each argument and the return object.
- * Throws a `JsValue` (string) on any error: bad JSON, unknown input, an
- * unsatisfiable witness, a malformed proving key, or a proof that fails to
+ * Throws a `JsValue` (string) on any error: a malformed `.xbc`, unknown input,
+ * an unsatisfiable witness, a malformed proving key, or a proof that fails to
  * self-verify.
  */
-export function prove(r1cs_json: string, circuit_json: string, pk_bytes: Uint8Array, inputs_json: string): any;
+export function prove(circuit_xbc: Uint8Array, pk_bytes: Uint8Array, inputs_json: string): any;
 
 /**
- * Like [`prove`], but uses the parsed artifacts cached by a prior [`preload`]
- * call — skipping the ~7 MB JSON + 537 KB pk.bin deserialization on every cell.
+ * Like [`prove`], but uses the artifacts cached by a prior [`preload`] call —
+ * skipping the `.xbc` expansion and `pk.bin` deserialization on every call.
  *
  * Returns the same shape as [`prove`]. Throws if [`preload`] hasn't been
  * called for this circuit.
