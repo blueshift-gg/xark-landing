@@ -3,16 +3,14 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import init, {
-  verify as wasmVerify,
-  public_inputs_to_snarkjs_json,
-} from "@blueshift-gg/xark-wasm";
+import init, { verify as wasmVerify } from "@blueshift-gg/xark-wasm";
 import { vkBytes } from "@/circuits/minesweeper/artifacts/vk";
 import {
   CELLS,
   MINES,
   N,
   SAFE,
+  encodePublicInputs,
   type CellReveal,
   type RevealSet,
 } from "@/lib/minesweeper-shared";
@@ -73,38 +71,17 @@ function ensureWasm(): Promise<unknown> {
   return wasmReady;
 }
 
-// Reconstruct the circuit's public-input vector from the committed board hash
-// and the cells the server claims it opened, in declaration order:
-//   [commitment, revealed[0..80], is_mine[0..80], count[0..80]]  (244 values)
-// A verified proof only proves *some* statement is valid under the VK; binding
-// it to what we render requires checking its public inputs equal this vector.
-function expectedPublicInputs(
-  commitment: string,
-  cells: CellReveal[],
-): string[] {
-  const revealed = new Array<string>(CELLS).fill("0");
-  const isMine = new Array<string>(CELLS).fill("0");
-  const count = new Array<string>(CELLS).fill("0");
-  for (const { r, c, isMine: m, count: n } of cells) {
-    const i = r * N + c;
-    revealed[i] = "1";
-    isMine[i] = m ? "1" : "0";
-    count[i] = String(n);
-  }
-  return [BigInt(commitment).toString(), ...revealed, ...isMine, ...count];
-}
-
-// Verify a reveal against the committed board: the proof must (a) verify under
-// the committed VK, and (b) have public inputs that exactly match the cells
-// we're about to render, anchored to the constant `committed` hash. Without
-// (b), a dishonest server could pair a valid proof with fabricated cells.
+// Verify a reveal against the committed board. The server sends only the
+// 128-byte proof; we reconstruct the circuit's public inputs locally from the
+// committed board hash and the cells the server claims it opened, then verify
+// the proof against *those* bytes. So a valid proof is accepted only if it
+// proves exactly the statement we're about to render — a dishonest server can't
+// pair a valid proof with fabricated cells, and there's nothing to compare
+// (the reconstructed inputs *are* what we verify against).
 async function verify(rs: RevealSet, committed: string): Promise<boolean> {
   await ensureWasm();
-  const publicInputs = Uint8Array.fromBase64(rs.publicInputs);
-  if (!wasmVerify(VK, Uint8Array.fromBase64(rs.proof), publicInputs)) return false;
-  const got: string[] = JSON.parse(public_inputs_to_snarkjs_json(publicInputs));
-  const want = expectedPublicInputs(committed, rs.cells);
-  return got.length === want.length && got.every((v, i) => v === want[i]);
+  const publicInputs = encodePublicInputs(committed, rs.cells);
+  return wasmVerify(VK, Uint8Array.fromBase64(rs.proof), publicInputs);
 }
 
 export function MinesweeperDemo() {

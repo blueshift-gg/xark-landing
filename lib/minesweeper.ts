@@ -159,12 +159,15 @@ export async function proveRevealSet(
     preload(XBC, PK);
     warmed = true;
   }
-  const { proof, publicInputs }: { proof: Uint8Array; publicInputs: Uint8Array } =
+  // The prover still emits publicInputs, but we don't ship them: the client
+  // reconstructs the same bytes from `cells` + `commitment` (encodePublicInputs)
+  // and verifies against those. Sending them would add ~10KB the client can
+  // already derive.
+  const { proof }: { proof: Uint8Array } =
     prove_preloaded(JSON.stringify(inputs));
 
   return {
     proof: proof.toBase64(),
-    publicInputs: publicInputs.toBase64(),
     cells: cellReveals,
   };
 }
