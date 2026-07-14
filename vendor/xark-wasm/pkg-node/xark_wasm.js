@@ -33,7 +33,7 @@ exports.circuit_inputs = circuit_inputs;
 
 /**
  * Parse a circuit's `circuit.xbc` + `pk.bin` once so subsequent calls to
- * [`prove_fast`] skip all heavy deserialization. Call once per circuit;
+ * [`prove_preloaded`] skip all heavy deserialization. Call once per circuit;
  * subsequent calls silently replace the cached state.
  *
  * `circuit_xbc` is the self-contained binary artifact `xark build` always
@@ -54,12 +54,44 @@ function preload(circuit_xbc, pk_bytes) {
 exports.preload = preload;
 
 /**
- * Generate a Groth16 proof entirely in memory, self-verified before returning.
+ * Convert a binary proof (the `proof` `Uint8Array` from [`prove`], == `proof.bin`)
+ * to snarkjs-compatible JSON — the same shape the host writes to
+ * `snarkjs-proof.json`. Opt-in: [`prove`] returns only the canonical bytes, so
+ * callers who need snarkjs interop derive the JSON here.
+ * @param {Uint8Array} proof_bytes
+ * @returns {string}
+ */
+function proof_to_snarkjs_json(proof_bytes) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(proof_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.proof_to_snarkjs_json(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+exports.proof_to_snarkjs_json = proof_to_snarkjs_json;
+
+/**
+ * Generate a Groth16 proof entirely in memory.
  *
  * See the crate docs for the shape of each argument and the return object.
  * Throws a `JsValue` (string) on any error: a malformed `.xbc`, unknown input,
- * an unsatisfiable witness, a malformed proving key, or a proof that fails to
- * self-verify.
+ * an unsatisfiable witness, or a malformed proving key.
+ *
+ * Does not self-verify (matching snarkjs / arkworks / gnark) — verify a
+ * returned proof with [`verify`] when needed.
  * @param {Uint8Array} circuit_xbc
  * @param {Uint8Array} pk_bytes
  * @param {string} inputs_json
@@ -81,24 +113,53 @@ function prove(circuit_xbc, pk_bytes, inputs_json) {
 exports.prove = prove;
 
 /**
- * Like [`prove`], but uses the artifacts cached by a prior [`preload`] call —
- * skipping the `.xbc` expansion and `pk.bin` deserialization on every call.
+ * Prove using the artifacts cached by a prior [`preload`] call — skipping the
+ * `.xbc` expansion, `pk.bin` deserialization, and R1CS minimize on every call.
  *
- * Returns the same shape as [`prove`]. Throws if [`preload`] hasn't been
- * called for this circuit.
+ * Does not self-verify; verify a returned proof with [`verify`] when needed.
+ * Returns the same shape as [`prove`]. Throws if [`preload`] hasn't been called.
  * @param {string} inputs_json
  * @returns {any}
  */
-function prove_fast(inputs_json) {
+function prove_preloaded(inputs_json) {
     const ptr0 = passStringToWasm0(inputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.prove_fast(ptr0, len0);
+    const ret = wasm.prove_preloaded(ptr0, len0);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
 }
-exports.prove_fast = prove_fast;
+exports.prove_preloaded = prove_preloaded;
+
+/**
+ * Convert binary public inputs (the `publicInputs` `Uint8Array` from [`prove`],
+ * == `public_inputs.bin`) to the snarkjs `public.json` array of decimal strings.
+ * Opt-in, mirroring [`proof_to_snarkjs_json`].
+ * @param {Uint8Array} public_inputs_bytes
+ * @returns {string}
+ */
+function public_inputs_to_snarkjs_json(public_inputs_bytes) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(public_inputs_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.public_inputs_to_snarkjs_json(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+exports.public_inputs_to_snarkjs_json = public_inputs_to_snarkjs_json;
 
 /**
  * Verify a Groth16 proof against its public inputs, in memory.

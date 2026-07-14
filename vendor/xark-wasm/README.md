@@ -62,12 +62,12 @@ console.log(verify(vk, proof, publicInputs)); // true
 ### Proving many times (preload)
 
 `prove` re-expands the `.xbc` on every call. For repeated proofs against the same
-circuit + key, parse them once with `preload` and call `prove_fast`:
+circuit + key, parse them once with `preload` and call `prove_preloaded`:
 
 ```js
 preload(xbc, pk);                                   // once
-const a = prove_fast(JSON.stringify({ secret: "3", result: "27" }));
-const b = prove_fast(JSON.stringify({ secret: "2", result: "8" }));
+const a = prove_preloaded(JSON.stringify({ secret: "3", result: "27" }));
+const b = prove_preloaded(JSON.stringify({ secret: "2", result: "8" }));
 ```
 
 ### Node.js
@@ -113,19 +113,21 @@ Returns:
 |-------------------|--------------|
 | `proof`           | `Uint8Array` |
 | `publicInputs`    | `Uint8Array` |
-| `snarkjsProof`    | `string`     |
-| `snarkjsPublic`   | `string`     |
 | `numPublicInputs` | `number`     |
 
 Input values are **decimal strings** (`"3"`, `"-7"`), keyed by the circuit's
 declared input names. Throws on a malformed `.xbc`, unknown input, unsatisfiable
 witness, malformed key, or failed self-verification.
 
+`proof` and `publicInputs` are the canonical compressed bytes (identical to the
+host's `proof.bin` / `public_inputs.bin`) — pass them straight to `verify`. For
+snarkjs interop, convert them on demand (see `proof_to_snarkjs_json` below).
+
 ### `preload(circuitXbc, pkBytes)`
 
 Parse + cache the `.xbc` and proving key once (replaces prior cached state).
 
-### `prove_fast(inputsJson)`
+### `prove_preloaded(inputsJson)`
 
 Like `prove` but reuses the artifacts cached by `preload`. Throws if `preload`
 hasn't been called.
@@ -140,6 +142,23 @@ hasn't been called.
 
 Returns `true` if valid, `false` if well-formed but not verifying. Throws on
 deserialization errors.
+
+### `proof_to_snarkjs_json(proofBytes)` → `string`
+
+Converts the `proof` `Uint8Array` from `prove` into snarkjs-compatible JSON (the
+same shape as the host's `snarkjs-proof.json`). Opt-in: `prove` returns only the
+canonical bytes, so you derive the snarkjs view only when you need it.
+
+### `public_inputs_to_snarkjs_json(publicInputsBytes)` → `string`
+
+Converts the `publicInputs` `Uint8Array` from `prove` into the snarkjs `public.json`
+array of decimal strings.
+
+```js
+const { proof, publicInputs } = prove(xbc, pk, inputsJson);
+const snarkjsProof  = JSON.parse(proof_to_snarkjs_json(proof));
+const snarkjsPublic = JSON.parse(public_inputs_to_snarkjs_json(publicInputs));
+```
 
 ### `circuit_inputs(circuitXbc)` → `string`
 

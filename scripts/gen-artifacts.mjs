@@ -1,10 +1,15 @@
-// Regenerate the base64 TS artifact wrappers from the freshly-built xark
-// artifacts: artifacts/pk.ts ← target/xark/minesweeper/pk.bin,
-// artifacts/xbc.ts ← target/xark/minesweeper/circuit.xbc.
+// Regenerate the artifact modules from the freshly-built xark artifacts.
+// Run after `xark build` + `xark setup` (see the `setup` npm script).
 //
-// The .bin/.xbc are the source of truth; these .ts wrappers are build artifacts
-// (embedded so the workerd prover stays self-contained — no fs, no runtime
-// fetch). Run after `xark build` + `xark setup` (see the `setup` npm script).
+//   pk.ts + xbc.ts   server prover (pk.bin + circuit.xbc)
+//   vk.ts            browser verifier (vk.bin)
+//
+// Each exports a `Uint8Array` decoded from a base64 literal via the native
+// `Uint8Array.fromBase64` (Node ≥ 25, workerd, modern browsers — the project
+// pins Node ≥ 26). base64 is the most compact source encoding (~1.33× the
+// binary) and the decode is native, no `atob`/charCodeAt loop. The bytes
+// are inlined into the bundle so the workerd prover + browser verifier stay
+// self-contained (no fs, no fetch).
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -17,27 +22,21 @@ const artifacts = join(circuit, "artifacts");
 
 mkdirSync(artifacts, { recursive: true });
 
-function wrap(binPath, constName, fnName) {
+// Emit `export const <name> = Uint8Array.fromBase64("...")` — the export IS the
+// bytes, decoded natively at module load.
+function emit(binPath, tsPath, name) {
   const b64 = readFileSync(binPath).toString("base64");
-  return (
-    `const ${constName} = "${b64}";\n` +
-    `export function ${fnName}(): Uint8Array { return Uint8Array.from(atob(${constName}), c => c.charCodeAt(0)); }\n`
-  );
+  writeFileSync(tsPath, `export const ${name} = Uint8Array.fromBase64("${b64}");\n`);
+  return readFileSync(binPath).length;
 }
 
-writeFileSync(join(artifacts, "pk.ts"), wrap(join(out, "pk.bin"), "PK_BASE64", "pkBytes"));
-writeFileSync(join(artifacts, "xbc.ts"), wrap(join(out, "circuit.xbc"), "XBC_BASE64", "xbcBytes"));
+const specs = [
+  [join(out, "pk.bin"), join(artifacts, "pk.ts"), "pkBytes"],
+  [join(out, "circuit.xbc"), join(artifacts, "xbc.ts"), "xbcBytes"],
+  [join(out, "vk.bin"), join(artifacts, "vk.ts"), "vkBytes"],
+];
 
-// Self-check: decode back and compare to the source bytes.
-function check(tsPath, binPath, label) {
-  const b64 = readFileSync(tsPath, "utf8").match(/"([^"]+)"/)[1];
-  const decoded = Buffer.from(b64, "base64");
-  const orig = readFileSync(binPath);
-  console.log(
-    `${label}: ${decoded.length} bytes —`,
-    decoded.equals(orig) ? "roundtrip OK" : "MISMATCH ❌",
-  );
+for (const [binPath, tsPath, name] of specs) {
+  const n = emit(binPath, tsPath, name);
+  console.log(`${name}: ${n} bytes`);
 }
-
-check(join(artifacts, "pk.ts"), join(out, "pk.bin"), "pk.ts ");
-check(join(artifacts, "xbc.ts"), join(out, "circuit.xbc"), "xbc.ts");

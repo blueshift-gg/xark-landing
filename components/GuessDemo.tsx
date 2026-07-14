@@ -148,7 +148,7 @@ export function GuessDemo() {
     setShownGuess(guess || "—");
     setProving(true);
     // NOTE: v1 visual demo. The real flow proves server-side with the xark CLI
-    // (secret + salt never reach the browser) and verifies here via snarkjs-wasm.
+    // (secret + salt never reach the browser) and verifies here via xark-wasm.
     requestAnimationFrame(() => {
       setLit(TOTAL);
     });

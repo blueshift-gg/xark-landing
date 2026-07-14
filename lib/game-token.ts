@@ -48,13 +48,13 @@ export async function sealGame(game: SealedGame): Promise<string> {
   const out = new Uint8Array(iv.length + buf.byteLength);
   out.set(iv, 0);
   out.set(new Uint8Array(buf), iv.length);
-  return Buffer.from(out).toString("base64url");
+  return out.toBase64({ alphabet: "base64url", omitPadding: true });
 }
 
 export async function unsealGame(token: string): Promise<SealedGame | null> {
   try {
     const key = await getKey();
-    const raw = new Uint8Array(Buffer.from(token, "base64url"));
+    const raw = Uint8Array.fromBase64(token, { alphabet: "base64url" });
     const buf = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: raw.slice(0, 12) },
       key,

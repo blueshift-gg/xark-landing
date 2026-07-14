@@ -3,7 +3,19 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import vkey from "@/circuits/minesweeper/verification_key.json";
+import init, {
+  verify as wasmVerify,
+  public_inputs_to_snarkjs_json,
+} from "@blueshift-gg/xark-wasm";
+import { vkBytes } from "@/circuits/minesweeper/artifacts/vk";
+import {
+  CELLS,
+  MINES,
+  N,
+  SAFE,
+  type CellReveal,
+  type RevealSet,
+} from "@/lib/minesweeper-shared";
 // Always the in-process WASM prover (/api/minesweeper). No external prover.
 const PROVER = "/api/minesweeper";
 
@@ -12,23 +24,12 @@ import { smooth } from "@/utils/easings";
 // The honest ZK minesweeper. The board + salt live server-side; each click comes
 // back as ONE real Groth16 proof (xark WASM) covering every cell the reveal
 // opens (a single cell, a flood fill, or a mine) against the committed board.
-// Each proof is verified here with snarkjs before the cells flip — so "proofs:
-// N" is N real verifications (one per click), unopened cells are cells nobody
-// proved, and the commitment is checked constant across reveals.
+// Each proof is verified here in the browser with xark-wasm before the cells
+// flip — so "proofs: N" is N real verifications (one per click), unopened cells
+// are cells nobody proved, and the commitment is checked constant across reveals.
 
-const N = 9;
-const CELLS = 81;
-const MINES = 10;
-const SAFE = CELLS - MINES;
 const SHAKE = [0, -10, 10, -7, 7, -4, 4, 0];
 
-type CellReveal = { r: number; c: number; isMine: boolean; count: number };
-type RevealSet = {
-  commitment: string;
-  proof: unknown;
-  publicSignals: string[];
-  cells: CellReveal[];
-};
 type CellState = {
   revealed: boolean;
   count: number;
@@ -61,10 +62,49 @@ function shortHex(s: string): string {
   }
 }
 
-async function verify(rs: RevealSet): Promise<boolean> {
-  const snarkjs = await import("snarkjs");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return snarkjs.groth16.verify(vkey as any, rs.publicSignals, rs.proof as any);
+// Instantiate the xark-wasm verifier once in the browser (pkg-web build →
+// fetches xark_wasm_bg.wasm on first use), then verify each proof against the
+// committed verifying key. Everything is binary: proof + publicInputs are the
+// canonical compressed bytes from the server, vk.bin is embedded here.
+const VK = vkBytes;
+let wasmReady: Promise<unknown> | null = null;
+function ensureWasm(): Promise<unknown> {
+  if (!wasmReady) wasmReady = init();
+  return wasmReady;
+}
+
+// Reconstruct the circuit's public-input vector from the committed board hash
+// and the cells the server claims it opened, in declaration order:
+//   [commitment, revealed[0..80], is_mine[0..80], count[0..80]]  (244 values)
+// A verified proof only proves *some* statement is valid under the VK; binding
+// it to what we render requires checking its public inputs equal this vector.
+function expectedPublicInputs(
+  commitment: string,
+  cells: CellReveal[],
+): string[] {
+  const revealed = new Array<string>(CELLS).fill("0");
+  const isMine = new Array<string>(CELLS).fill("0");
+  const count = new Array<string>(CELLS).fill("0");
+  for (const { r, c, isMine: m, count: n } of cells) {
+    const i = r * N + c;
+    revealed[i] = "1";
+    isMine[i] = m ? "1" : "0";
+    count[i] = String(n);
+  }
+  return [BigInt(commitment).toString(), ...revealed, ...isMine, ...count];
+}
+
+// Verify a reveal against the committed board: the proof must (a) verify under
+// the committed VK, and (b) have public inputs that exactly match the cells
+// we're about to render, anchored to the constant `committed` hash. Without
+// (b), a dishonest server could pair a valid proof with fabricated cells.
+async function verify(rs: RevealSet, committed: string): Promise<boolean> {
+  await ensureWasm();
+  const publicInputs = Uint8Array.fromBase64(rs.publicInputs);
+  if (!wasmVerify(VK, Uint8Array.fromBase64(rs.proof), publicInputs)) return false;
+  const got: string[] = JSON.parse(public_inputs_to_snarkjs_json(publicInputs));
+  const want = expectedPublicInputs(committed, rs.cells);
+  return got.length === want.length && got.every((v, i) => v === want[i]);
 }
 
 export function MinesweeperDemo() {
@@ -126,7 +166,8 @@ export function MinesweeperDemo() {
       setCommitment(shortHex(j.commitment));
       markProving(j.reveal.cells);
       setPending("verifying");
-      if (!(await verify(j.reveal))) throw new Error("opening proof invalid");
+      if (!(await verify(j.reveal, j.commitment)))
+        throw new Error("opening proof invalid");
       applyCells(j.reveal.cells);
       setProofs(1);
       setPending(null);
@@ -175,12 +216,12 @@ export function MinesweeperDemo() {
         const rs: RevealSet = await res.json();
         setPending("verifying");
         markProving(rs.cells);
-        if ((await verify(rs)) && rs.commitment === commitRef.current) {
+        if (commitRef.current && (await verify(rs, commitRef.current))) {
           applyCells(rs.cells);
           setProofs((p) => p + 1);
           if (rs.cells.some((cell) => cell.isMine)) setStatus("lost");
         } else {
-          clearProving(); // verify failed or commitment mismatch
+          clearProving(); // verify failed or public inputs didn't match
         }
       } catch {
         clearProving(); // keep the board; a transient failure shouldn't wipe progress

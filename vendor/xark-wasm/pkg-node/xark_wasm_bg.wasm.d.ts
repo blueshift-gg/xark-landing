@@ -3,8 +3,10 @@
 export const memory: WebAssembly.Memory;
 export const circuit_inputs: (a: number, b: number) => [number, number, number, number];
 export const preload: (a: number, b: number, c: number, d: number) => [number, number];
+export const proof_to_snarkjs_json: (a: number, b: number) => [number, number, number, number];
 export const prove: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
-export const prove_fast: (a: number, b: number) => [number, number, number];
+export const prove_preloaded: (a: number, b: number) => [number, number, number];
+export const public_inputs_to_snarkjs_json: (a: number, b: number) => [number, number, number, number];
 export const verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const version: () => [number, number];
 export const __wbindgen_exn_store: (a: number) => void;

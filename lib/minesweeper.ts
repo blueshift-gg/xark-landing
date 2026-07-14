@@ -1,36 +1,41 @@
 import { randomBytes } from "node:crypto";
 
-import { preload, prove_fast } from "@blueshift-gg/xark-wasm";
+import { preload, prove_preloaded } from "@blueshift-gg/xark-wasm";
 
-import { sealGame, type SealedGame } from "./game-token";
+import { sealGame } from "./game-token";
+import {
+  CELLS,
+  MINES,
+  N,
+  type CellReveal,
+  type RevealSet,
+} from "./minesweeper-shared";
 import { poseidon2Hash2 } from "./poseidon2";
 
-// Circuit artifacts — embedded as base64 TS constants (generated from the real
+export { N } from "./minesweeper-shared";
+
+// Circuit artifacts — embedded as Uint8Array literals (generated from the real
 // circuit.xbc + pk.bin by scripts/gen-artifacts.mjs) so the module is fully
 // self-contained: no filesystem and no runtime fetch, which matters on workerd
 // where the prover runs. circuit.xbc is the single self-contained build
 // artifact; the wasm derives both the witness solver and the minimized R1CS
 // from it, so no r1cs.json/circuit.json are needed.
-import { xbcBytes } from "../circuits/minesweeper/artifacts/xbc";
-import { pkBytes } from "../circuits/minesweeper/artifacts/pk";
-
-const XBC = xbcBytes();
-const PK = pkBytes();
+import { xbcBytes as XBC } from "../circuits/minesweeper/artifacts/xbc";
+import { pkBytes as PK } from "../circuits/minesweeper/artifacts/pk";
 
 // Parse the circuit.xbc + pk.bin once per instance and reuse it across reveals.
-// prove() re-expands the .xbc on every call; preload() + prove_fast skip that,
-// leaving just the witness solve + Groth16 prove per reveal. The first call on
-// a cold instance pays preload() once. Safe without locking: preload() is a
-// synchronous wasm call, so the guard block can't be interleaved on the
-// single-threaded event loop.
+// prove() re-expands the .xbc on every call; preload() + prove_preloaded skip
+// that (and the R1CS minimize), leaving just the witness solve + Groth16 prove
+// per reveal. The first call on a cold instance pays preload() once. Safe
+// without locking: preload() is a synchronous wasm call, so the guard block
+// can't be interleaved on the single-threaded event loop.
+//
+// prove_preloaded doesn't self-verify (like snarkjs/arkworks): the browser
+// verifies every proof (xark-wasm verify + the committed vk) before flipping
+// any cell, so the verifier at the point of consumption is the security
+// boundary — a server-side self-verify would be redundant work on the hot path.
 let warmed = false;
 
-const P =
-  21888242871839275222246405745257275088548364400416034343698204186575808495617n;
-
-export const N = 9;
-const CELLS = N * N;
-const MINES = 10;
 const CENTER = Math.floor(CELLS / 2); // (4,4)
 
 // ── board helpers ───────────────────────────────────────────────────────────
@@ -39,11 +44,23 @@ function randSalt(): string {
   return BigInt("0x" + randomBytes(31).toString("hex")).toString();
 }
 
+// Uniform index in [0, CELLS) from the platform CSPRNG. Rejection-samples the
+// top of the byte range so 81 divides evenly (no modulo bias) — the board is
+// the committed secret, so it must not come from a predictable `Math.random`.
+function randIndex(): number {
+  const limit = 256 - (256 % CELLS); // 243 = 3 * 81
+  let b: number;
+  do {
+    b = randomBytes(1)[0];
+  } while (b >= limit);
+  return b % CELLS;
+}
+
 function genBoard(): number[] {
   const board = new Array<number>(CELLS).fill(0);
   let placed = 0;
   while (placed < MINES) {
-    const i = Math.floor(Math.random() * CELLS);
+    const i = randIndex();
     if (board[i] || i === CENTER) continue;
     board[i] = 1;
     placed++;
@@ -51,6 +68,8 @@ function genBoard(): number[] {
   return board;
 }
 
+// Bit-pack the board into one field element, matching the circuit. 81 bits fit
+// far under the BN254 modulus, so no reduction is needed.
 function packBoard(board: number[]): bigint {
   let packed = 0n;
   let pow = 1n;
@@ -58,7 +77,7 @@ function packBoard(board: number[]): bigint {
     packed += BigInt(board[i]) * pow;
     pow <<= 1n;
   }
-  return packed % P;
+  return packed;
 }
 
 function neighbourCount(board: number[], r: number, c: number): number {
@@ -75,14 +94,18 @@ function neighbourCount(board: number[], r: number, c: number): number {
 
 // ── flood-fill ──────────────────────────────────────────────────────────────
 
+// A flood cell carries its neighbour-mine `count` so `proveRevealSet` doesn't
+// recompute it — one source of truth for the count that gates the proof.
+export type FloodCell = { r: number; c: number; count: number };
+
 export function floodCells(
   board: number[],
   r: number,
   c: number,
-): [number, number][] {
-  if (board[r * N + c] === 1) return [[r, c]];
+): FloodCell[] {
+  if (board[r * N + c] === 1) return [{ r, c, count: neighbourCount(board, r, c) }];
   const seen = new Set<number>();
-  const out: [number, number][] = [];
+  const out: FloodCell[] = [];
   const stack: [number, number][] = [[r, c]];
   while (stack.length) {
     const [cr, cc] = stack.pop()!;
@@ -90,8 +113,9 @@ export function floodCells(
     const idx = cr * N + cc;
     if (seen.has(idx) || board[idx] === 1) continue;
     seen.add(idx);
-    out.push([cr, cc]);
-    if (neighbourCount(board, cr, cc) === 0) {
+    const nc = neighbourCount(board, cr, cc);
+    out.push({ r: cr, c: cc, count: nc });
+    if (nc === 0) {
       for (let dr = -1; dr <= 1; dr++)
         for (let dc = -1; dc <= 1; dc++)
           if (dr || dc) stack.push([cr + dr, cc + dc]);
@@ -102,30 +126,21 @@ export function floodCells(
 
 // ── prove a reveal set (one proof for any number of cells) ──────────────────
 
-export type CellReveal = { r: number; c: number; isMine: boolean; count: number };
-
-export type RevealSet = {
-  commitment: string;
-  proof: unknown;
-  publicSignals: string[];
-  cells: CellReveal[];
-};
-
 export async function proveRevealSet(
   board: number[],
   salt: string,
-  cells: [number, number][],
+  cells: FloodCell[],
   commitment: string,
 ): Promise<RevealSet> {
-  // Build circuit inputs + return data in a single pass over the cells.
+  // Build circuit inputs + return data in a single pass over the cells. The
+  // neighbour count arrives with each flood cell — no recompute here.
   const revealed = new Array<number>(CELLS).fill(0);
   const isMine = new Array<number>(CELLS).fill(0);
   const count = new Array<number>(CELLS).fill(0);
   const cellReveals: CellReveal[] = [];
 
-  for (const [r, c] of cells) {
+  for (const { r, c, count: nc } of cells) {
     const i = r * N + c;
-    const nc = neighbourCount(board, r, c);
     revealed[i] = 1;
     isMine[i] = board[i];
     count[i] = nc;
@@ -144,14 +159,12 @@ export async function proveRevealSet(
     preload(XBC, PK);
     warmed = true;
   }
-  const result: { snarkjsProof: string; snarkjsPublic: string } = prove_fast(
-    JSON.stringify(inputs),
-  );
+  const { proof, publicInputs }: { proof: Uint8Array; publicInputs: Uint8Array } =
+    prove_preloaded(JSON.stringify(inputs));
 
   return {
-    commitment,
-    proof: JSON.parse(result.snarkjsProof),
-    publicSignals: JSON.parse(result.snarkjsPublic),
+    proof: proof.toBase64(),
+    publicInputs: publicInputs.toBase64(),
     cells: cellReveals,
   };
 }
@@ -163,10 +176,13 @@ export async function newGame() {
   const salt = randSalt();
   const commitment = poseidon2Hash2(packBoard(board), BigInt(salt)).toString();
   const id = await sealGame({ board, salt, commitment });
+  // Opening reveal: the center cell only (forced safe by `genBoard`).
+  const r = Math.floor(CENTER / N);
+  const c = CENTER % N;
   const reveal = await proveRevealSet(
     board,
     salt,
-    [[Math.floor(CENTER / N), CENTER % N]],
+    [{ r, c, count: neighbourCount(board, r, c) }],
     commitment,
   );
   return { id, commitment, reveal };
