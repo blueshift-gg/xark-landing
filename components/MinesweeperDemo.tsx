@@ -3,30 +3,36 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import init, { verify as wasmVerify } from "@blueshift-gg/xark-wasm";
+import init, {
+  preload,
+  prove_preloaded,
+  verify as wasmVerify,
+} from "@blueshift-gg/xark-wasm";
 import { vkBytes } from "@/circuits/minesweeper/artifacts/vk";
 import {
   CELLS,
+  CENTER,
   MINES,
   N,
   SAFE,
   encodePublicInputs,
+  floodCells,
+  genBoard,
+  neighbourCount,
+  packBoard,
+  randSalt,
   type CellReveal,
+  type FloodCell,
   type RevealSet,
 } from "@/lib/minesweeper-shared";
-// Always the in-process WASM prover (/api/minesweeper). No external prover.
-const PROVER = "/api/minesweeper";
+import { poseidon2Hash2 } from "@/lib/poseidon2";
 
 import { smooth } from "@/utils/easings";
 
-// The honest ZK minesweeper. The board + salt live server-side; each click comes
-// back as ONE real Groth16 proof (xark WASM) covering every cell the reveal
-// opens (a single cell, a flood fill, or a mine) against the committed board.
-// Each proof is verified here in the browser with xark-wasm before the cells
-// flip — so "proofs: N" is N real verifications (one per click), unopened cells
-// are cells nobody proved, and the commitment is checked constant across reveals.
+// ── constants ───────────────────────────────────────────────────────────────
 
 const SHAKE = [0, -10, 10, -7, 7, -4, 4, 0];
+const VK = vkBytes;
 
 type CellState = {
   revealed: boolean;
@@ -60,29 +66,78 @@ function shortHex(s: string): string {
   }
 }
 
-// Instantiate the xark-wasm verifier once in the browser (pkg-web build →
-// fetches xark_wasm_bg.wasm on first use), then verify each proof against the
-// committed verifying key. Everything is binary: proof + publicInputs are the
-// canonical compressed bytes from the server, vk.bin is embedded here.
-const VK = vkBytes;
+// ── wasm helpers ────────────────────────────────────────────────────────────
+
 let wasmReady: Promise<unknown> | null = null;
 function ensureWasm(): Promise<unknown> {
   if (!wasmReady) wasmReady = init();
   return wasmReady;
 }
 
-// Verify a reveal against the committed board. The server sends only the
-// 128-byte proof; we reconstruct the circuit's public inputs locally from the
-// committed board hash and the cells the server claims it opened, then verify
-// the proof against *those* bytes. So a valid proof is accepted only if it
-// proves exactly the statement we're about to render — a dishonest server can't
-// pair a valid proof with fabricated cells, and there's nothing to compare
-// (the reconstructed inputs *are* what we verify against).
+/** Load proving artifacts (xbc + pk) once. Code-split chunk, ~200KB. */
+async function loadProvingArtifacts(): Promise<{
+  xbc: Uint8Array;
+  pk: Uint8Array;
+}> {
+  const [{ xbcBytes }, { pkBytes }] = await Promise.all([
+    import("@/circuits/minesweeper/artifacts/xbc"),
+    import("@/circuits/minesweeper/artifacts/pk"),
+  ]);
+  return { xbc: xbcBytes, pk: pkBytes };
+}
+
+/** Build circuit inputs from the board + revealed cells. */
+function buildInputs(
+  board: number[],
+  salt: string,
+  commitment: string,
+  cells: FloodCell[],
+): string {
+  const revealed = new Array<number>(CELLS).fill(0);
+  const isMine = new Array<number>(CELLS).fill(0);
+  const count = new Array<number>(CELLS).fill(0);
+  for (const { r, c, count: nc } of cells) {
+    const i = r * N + c;
+    revealed[i] = 1;
+    isMine[i] = board[i];
+    count[i] = nc;
+  }
+  const inputs: Record<string, string> = {};
+  for (let i = 0; i < CELLS; i++) inputs[`board[${i}]`] = String(board[i]);
+  inputs.salt = salt;
+  inputs.commitment = commitment;
+  for (let i = 0; i < CELLS; i++) inputs[`revealed[${i}]`] = String(revealed[i]);
+  for (let i = 0; i < CELLS; i++) inputs[`is_mine[${i}]`] = String(isMine[i]);
+  for (let i = 0; i < CELLS; i++) inputs[`count[${i}]`] = String(count[i]);
+  return JSON.stringify(inputs);
+}
+
+/** Prove + produce a RevealSet for a list of flood cells. */
+async function proveCells(
+  board: number[],
+  salt: string,
+  commitment: string,
+  cells: FloodCell[],
+): Promise<RevealSet> {
+  const inputs = buildInputs(board, salt, commitment, cells);
+  const { proof }: { proof: Uint8Array } = prove_preloaded(inputs);
+  const cellReveals: CellReveal[] = cells.map(({ r, c, count: nc }) => ({
+    r,
+    c,
+    isMine: board[r * N + c] === 1,
+    count: nc,
+  }));
+  return { proof: proof.toBase64(), cells: cellReveals };
+}
+
+/** Verify a reveal against the committed board. */
 async function verify(rs: RevealSet, committed: string): Promise<boolean> {
   await ensureWasm();
   const publicInputs = encodePublicInputs(committed, rs.cells);
   return wasmVerify(VK, Uint8Array.fromBase64(rs.proof), publicInputs);
 }
+
+// ── component ───────────────────────────────────────────────────────────────
 
 export function MinesweeperDemo() {
   const [cells, setCells] = useState<CellState[]>(blank);
@@ -91,10 +146,19 @@ export function MinesweeperDemo() {
   >("loading");
   const [commitment, setCommitment] = useState("0x…");
   const [proofs, setProofs] = useState(0);
-  const [pending, setPending] = useState<"proving" | "verifying" | null>(null);
-  const idRef = useRef<string | null>(null);
+  const [pending, setPending] = useState<
+    | "loading-artifacts"
+    | "preloading"
+    | "proving"
+    | "verifying"
+    | null
+  >(null);
+
+  // Board state lives in refs, not React state: no React devtools leakage.
+  const boardRef = useRef<number[] | null>(null);
+  const saltRef = useRef<string | null>(null);
   const commitRef = useRef<string | null>(null);
-  // The board is non-interactive unless it's the player's turn and idle.
+
   const inert = status !== "playing" || pending !== null;
   const flagsUsed = cells.filter((c) => c.flagged).length;
 
@@ -113,8 +177,6 @@ export function MinesweeperDemo() {
       return next;
     });
 
-  // Mark cells whose proof has arrived but not yet verified, so they pulse
-  // (the `.proving` class) — the "received, pending verification" signal.
   const markProving = (cells: CellReveal[]) =>
     setCells((prev) => {
       const next = prev.slice();
@@ -126,7 +188,9 @@ export function MinesweeperDemo() {
     });
 
   const clearProving = () =>
-    setCells((prev) => prev.map((c) => (c.proving ? { ...c, proving: false } : c)));
+    setCells((prev) =>
+      prev.map((c) => (c.proving ? { ...c, proving: false } : c)),
+    );
 
   const newGame = useCallback(async () => {
     setStatus("loading");
@@ -134,18 +198,36 @@ export function MinesweeperDemo() {
     setPending(null);
     setCells(blank());
     try {
-      const j = await (
-        await fetch(`${PROVER}/new`, { method: "POST" })
-      ).json();
-      if (j.error) throw new Error(j.error);
-      idRef.current = j.id;
-      commitRef.current = j.commitment;
-      setCommitment(shortHex(j.commitment));
-      markProving(j.reveal.cells);
+      // Generate board + salt + commitment locally — no server, no API call.
+      const board = genBoard();
+      const salt = randSalt();
+      const comm = poseidon2Hash2(
+        packBoard(board),
+        BigInt(salt),
+      ).toString();
+      boardRef.current = board;
+      saltRef.current = salt;
+      commitRef.current = comm;
+      setCommitment(shortHex(comm));
+
+      // Load artifacts + preload prover
+      await ensureWasm();
+      setPending("loading-artifacts");
+      const { xbc, pk } = await loadProvingArtifacts();
+      setPending("preloading");
+      preload(xbc, pk);
+
+      // Opening reveal: prove + verify the center cell (guaranteed safe)
+      setPending("proving");
+      const r = Math.floor(CENTER / N);
+      const c = CENTER % N;
+      const opening = await proveCells(board, salt, comm, [
+        { r, c, count: neighbourCount(board, r, c) },
+      ]);
       setPending("verifying");
-      if (!(await verify(j.reveal, j.commitment)))
+      if (!(await verify(opening, comm)))
         throw new Error("opening proof invalid");
-      applyCells(j.reveal.cells);
+      applyCells(opening.cells);
       setProofs(1);
       setPending(null);
       setStatus("playing");
@@ -162,7 +244,10 @@ export function MinesweeperDemo() {
 
   useEffect(() => {
     if (status !== "playing") return;
-    const safe = cells.reduce((n, c) => n + (c.revealed && !c.mine ? 1 : 0), 0);
+    const safe = cells.reduce(
+      (n, c) => n + (c.revealed && !c.mine ? 1 : 0),
+      0,
+    );
     if (safe === SAFE) setStatus("won");
   }, [cells, status]);
 
@@ -175,33 +260,29 @@ export function MinesweeperDemo() {
         cells[idx].flagged
       )
         return;
+      const board = boardRef.current!;
+      const salt = saltRef.current!;
+      const comm = commitRef.current!;
+      const r = Math.floor(idx / N);
+      const c = idx % N;
+
       setPending("proving");
-      markProving([
-        { r: Math.floor(idx / N), c: idx % N, isMine: false, count: 0 },
-      ]);
+      markProving([{ r, c, isMine: false, count: 0 }]);
       try {
-        const res = await fetch(`${PROVER}/reveal`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            id: idRef.current,
-            r: Math.floor(idx / N),
-            c: idx % N,
-          }),
-        });
-        if (!res.ok) throw new Error("reveal failed");
-        const rs: RevealSet = await res.json();
+        // Flood locally, then prove + verify
+        const flooded = floodCells(board, r, c);
+        const rs = await proveCells(board, salt, comm, flooded);
         setPending("verifying");
         markProving(rs.cells);
-        if (commitRef.current && (await verify(rs, commitRef.current))) {
+        if (await verify(rs, comm)) {
           applyCells(rs.cells);
           setProofs((p) => p + 1);
           if (rs.cells.some((cell) => cell.isMine)) setStatus("lost");
         } else {
-          clearProving(); // verify failed or public inputs didn't match
+          clearProving();
         }
       } catch {
-        clearProving(); // keep the board; a transient failure shouldn't wipe progress
+        clearProving();
       } finally {
         setPending(null);
       }
@@ -209,16 +290,11 @@ export function MinesweeperDemo() {
     [status, pending, cells],
   );
 
-  // Right-click toggles a flag so the player can mark suspected mines. A
-  // flagged cell can't be opened by left-click (no-op) and is excluded from
-  // the press animation, so the edge-click fix never bites on it.
   const toggleFlag = useCallback(
     (idx: number) => {
       if (status !== "playing" || pending !== null) return;
       setCells((prev) => {
         if (prev[idx].revealed) return prev;
-        // Only MINES flags exist; cap there so the counter can't go negative.
-        // Unflagging is always allowed so a used flag can be moved elsewhere.
         if (!prev[idx].flagged) {
           const used = prev.reduce((n, c) => n + (c.flagged ? 1 : 0), 0);
           if (used >= MINES) return prev;
@@ -294,7 +370,10 @@ export function MinesweeperDemo() {
               a zero-knowledge proof.
             </div>
             <div className="xk-result-actions">
-              <a className="xk-btn-outline" href="/docs/learn-zk/01-what-is-a-zk-proof">
+              <a
+                className="xk-btn-outline"
+                href="/docs/learn-zk/01-what-is-a-zk-proof"
+              >
                 Verify yourself
               </a>
               <button type="button" className="xk-btn-dark" onClick={newGame}>
@@ -362,18 +441,24 @@ export function MinesweeperDemo() {
             <div className="xk-ms-foot">
               <span
                 className={
-                  pending === "verifying" ? "xk-ms-msg is-pending" : "xk-ms-msg"
+                  pending === "verifying"
+                    ? "xk-ms-msg is-pending"
+                    : "xk-ms-msg"
                 }
               >
                 {status === "loading"
                   ? "Committing a board…"
-                  : pending === "proving"
-                    ? "Generating proof…"
-                    : pending === "verifying"
-                      ? "Verifying proof…"
-                      : status === "error"
-                        ? "Prover unavailable."
-                        : "Each cell is a proof, verified in your browser."}
+                  : pending === "loading-artifacts"
+                    ? "Loading prover…"
+                    : pending === "preloading"
+                      ? "Preparing circuit…"
+                      : pending === "proving"
+                        ? "Generating proof…"
+                        : pending === "verifying"
+                          ? "Verifying proof…"
+                          : status === "error"
+                            ? "Prover unavailable."
+                            : "Proving locally in your browser."}
               </span>
               {status === "error" ? (
                 <button className="xk-ms-reset" onClick={newGame}>
