@@ -13,22 +13,22 @@ is different: it's a list of **constraints** (equations) that a set of values mu
 simultaneously. The prover finds values that satisfy them; the proof attests that such values
 exist and that the prover knows them.
 
-In Noir it still *looks* like code:
+In xark it is regular Rust:
 
 ```rust
-fn main(power_level: u64) {
-    assert(power_level > 9000);   // a constraint: this must hold
+fn circuit(power_level: Private<Field>, bound: Public<Field>) {
+    require_gt(power_level, bound);   // a constraint: this must hold
 }
 ```
 
-But `assert` isn't a runtime check — it's a constraint compiled into the circuit. The proof is
-worthless unless every `assert` holds for the prover's secret witness.
+`require_gt` is a constraint compiled into the circuit. The proof is
+worthless unless every `require_*` holds for the prover's secret witness.
 
 ## Everything becomes arithmetic over a finite field
 
 Under the hood, constraints are polynomial equations over a **finite field** — integers mod a big
 prime `p` (for BN254, a specific 254-bit prime). Addition and multiplication wrap around `p`.
-That's the native "type" of a circuit: a *field element*. Noir's `Field` is exactly this.
+That's the native "type" of a circuit: a *field element*. xark's `Field` is exactly this.
 
 Two consequences you'll feel:
 
@@ -43,18 +43,18 @@ Two consequences you'll feel:
 ## Witness = a satisfying assignment
 
 The **witness** is the full set of values (private + public + all the intermediates) that satisfies
-every constraint. `nargo execute` computes it from your `Prover.toml`. If your inputs *can't*
-satisfy the circuit (e.g. `power_level = 9000` with `assert(power_level > 9000)`), witness
+every constraint. `xark prove` computes it from your inputs (`--inputs`). If your inputs *can't*
+satisfy the circuit (e.g. `power_level = 9000` with `require_gt(power_level, 9000)`), witness
 generation fails — there's nothing to prove.
 
-## Noir → ACIR → R1CS → proof (where xark lives)
+## Rust → MIR → R1CS → proof
 
 ```
-Noir source
-   │  nargo compiles it to…
+Rust source
+   │  rustc type-checks it and lowers to…
    ▼
-ACIR            an "arithmetic circuit IR" — the standard, backend-agnostic circuit format
-   │  xark lowers ACIR opcodes to…
+MIR             rustc's mid-level IR — xark extracts the circuit function's MIR
+   │  xark validates the accepted subset and lowers it to…
    ▼
 R1CS            Rank-1 Constraint System — the constraint form Groth16 proves over
    │  xark runs Groth16
@@ -62,15 +62,16 @@ R1CS            Rank-1 Constraint System — the constraint form Groth16 proves 
 proof
 ```
 
-Noir owns the frontend (source → ACIR). **xark owns the backend** (ACIR → R1CS → Groth16 →
-on-chain verifier). xark supports a specific set of ACIR opcodes and *rejects* the ones it can't
-prove soundly — that rejection is a safety feature, not a limitation to route around.
+There is no separate frontend language: **the circuit is ordinary Rust**, type-checked by `rustc`.
+xark owns the backend (MIR → xark-IR → R1CS → Groth16 → on-chain verifier). It accepts a fixed
+Rust subset and *rejects* anything it can't prove soundly — that rejection is a safety feature,
+not a limitation to route around.
 
 ## Circuit cost is real
 
 Each operation adds constraints, and constraints cost proving time. A `Poseidon2` hash is tens of
 thousands; an in-circuit ECDSA verify is *millions*. Part of designing a good ZK app is keeping the
 circuit small — which is why [example 03](/examples) is deliberately structured to do
-all its hashing in Noir and none on-chain.
+all its hashing in the circuit and none on-chain.
 
 Next: [the proof system these examples use →](/docs/learn-zk/03-groth16-in-one-page)

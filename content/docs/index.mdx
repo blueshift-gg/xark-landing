@@ -1,33 +1,39 @@
 ---
 title: Introduction
-description: A Rust Groth16 backend for Noir — prove anything, reveal nothing, verified on Solana.
+description: Write zero-knowledge circuits in Rust, prove them with Groth16, verify on Solana.
 ---
 
-xark compiles a Noir circuit into a ~256-byte Groth16 proof and a self-contained Solana verifier
-that checks it through the native `alt_bn128` syscalls. A program acts on *"this statement is true"* —
-an age, a balance, a Merkle membership — without ever seeing the private data behind it.
+xark compiles a circuit written as ordinary Rust into a ~256-byte Groth16 proof and a
+self-contained Solana verifier that checks it through the native `alt_bn128` syscalls.
+A program acts on *"this statement is true"* — an age, a balance, a Merkle membership —
+without ever seeing the private data behind it.
 
-It lowers **ACIR, not Noir source**: `nargo` compiles your circuit to ACIR, and xark lowers the
-supported opcodes into R1CS and proves them with Arkworks Groth16 over BN254.
+There is no separate circuit DSL: you write a `#![no_std]` Rust function over `Field`
+values, `xark` drives `rustc` to type-check it, extracts its **MIR**, lowers that to R1CS,
+and proves it with Arkworks Groth16 over BN254. Gadgets — hashes, curves, signatures — are
+ordinary Rust crates that lower to the same small constraint set.
 
 <Cards>
   <Card title="Quickstart" href="/docs/quickstart" description="Circuit → proof → on-chain verifier, in six commands." />
   <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the on-chain byte layout." />
-  <Card title="What xark supports" href="/docs/reference/supported-opcodes" description="The opcodes it proves — and the ones it refuses, before you waste a setup." />
+  <Card title="The Rust subset xark accepts" href="/docs/reference/supported-subset" description="What lowers to a circuit — and what's rejected before you spend a setup." />
 </Cards>
 
 ## What makes it different
 
-- **It refuses what it can't prove soundly.** Unsupported opcodes are rejected *eagerly, before any
-  setup or proving cost*, with a specific error — never silently mis-proved. See
-  [supported opcodes](/docs/reference/supported-opcodes).
+- **Gadgets are plain Rust.** No per-gadget backend opcodes, no separate circuit language.
+  `xark-sha256`, `xark-poseidon`, `xark-secp256k1` are crates you add with `cargo`, inlined
+  into your circuit at compile time. See [the supported subset](/docs/reference/supported-subset).
+- **It refuses what it can't prove soundly.** Anything outside the accepted Rust subset is
+  rejected *eagerly, before any setup or proving cost* — as a real `rustc` diagnostic with a
+  source span — never silently mis-proved.
 - **A real trusted setup.** Beyond dev keys, xark runs a multi-contributor phase-2
   [MPC ceremony](/docs/trust/trusted-setup) with Schnorr proofs of contribution and δ-consistency
   checks.
-- **Machine-checked where it counts.** The gadgets and the ACIR→R1CS lowering carry
-  [Lean 4 proofs](/docs/trust/formal-proofs-and-audit); the on-chain verifier is checked with Kani;
-  every proof is cross-verified against [snarkjs](/docs/reference/snarkjs).
+- **Machine-checked where it counts.** The gadgets carry [Lean 4 proofs](/docs/trust/formal-proofs-and-audit);
+  the on-chain verifier is checked with Kani; every proof is cross-verified against
+  [snarkjs](/docs/reference/snarkjs).
 - **A tiny, `no_std` on-chain verifier** with a [reproducible build](/docs/trust/reproducible-builds)
   you can hash-match against what's actually deployed.
 

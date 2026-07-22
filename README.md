@@ -1,7 +1,7 @@
 # xark-landing
 
 Landing, docs, and the interactive demo for [xark](https://github.com/blueshift-gg/xark)
-— a Groth16 proving backend for Noir, verified on Solana.
+— full stack zero knowledge programming for Rust, verified on Solana.
 
 Built to match the Doppler house stack: **Next.js (App Router) + Fumadocs + Tailwind v4**,
 dark, with the xark lime-on-black identity.

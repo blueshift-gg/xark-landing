@@ -13,10 +13,10 @@ dumps; every one earns its place).
 [`01-over-9000`](/examples). Prove a range, verify it on devnet. Goal: get the toolchain
 working and *feel* the prove → export → verify loop end to end.
 
-**Step 2 — Learn just enough Noir (a day).**
-You only need the basics: `Field` vs sized ints, `assert`, arrays, functions, `pub` inputs. Read
-the [Noir language docs](https://noir-lang.org/docs) and rewrite example 01 from scratch without
-looking.
+**Step 2 — Learn just enough of xark's Rust subset (a day).**
+You only need the basics: `Field`, `Private`/`Public`, `require_eq`, arrays, functions, and what
+the [supported subset](/docs/reference/supported-subset) accepts. Rewrite example 01 from scratch
+without looking.
 
 **Step 3 — Build with commitments (example 02).**
 [`02-age-verification`](/examples). This is the leap from "toy proof" to "useful
@@ -41,9 +41,11 @@ first (that's 80% of the design), then the circuit, then the program.
 
 ## Curated resources
 
-**Noir**
-- [Noir docs](https://noir-lang.org/docs) — the language reference. Start here.
-- [Awesome Noir](https://github.com/noir-lang/awesome-noir) — vetted circuits and libraries to read.
+**xark & its Rust subset**
+- [The supported subset](/docs/reference/supported-subset) — what lowers to a circuit and what's
+  rejected. Start here.
+- [The xark repo](https://github.com/blueshift-gg/xark) — `gadgets/` for the hash/curve/signature
+  crates and `examples/` for runnable circuits.
 
 **ZK intuition (pick one, not all)**
 - Vitalik Buterin, *"Zk-SNARKs: under the hood"* — the best from-first-principles explainer if you

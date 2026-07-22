@@ -4,8 +4,8 @@ description: What is machine-checked, what is tested, and — plainly — what i
 ---
 
 <Callout type="error" title="Not audited. Experimental.">
-xark has **not** been externally audited, and its on-chain verifier has **never been deployed to
-mainnet**. Everything below is real and unusually rigorous for a backend at this stage — but formal
+xark has **not** been externally audited, and its on-chain verifier has **never** been deployed to
+mainnet. Everything below is real and unusually rigorous for a backend at this stage — but formal
 proofs and tests are *not* a substitute for an external audit. Treat xark as experimental. Don't hold
 value on it.
 </Callout>
@@ -14,45 +14,69 @@ With that said, the soundness story is a genuine differentiator, so here is exac
 
 ## Machine-checked with Lean 4
 
-The gadgets and the ACIR→R1CS lowering carry **deductive proofs in Lean 4 against mathlib** — 29
-modules, checked over *all* field assignments (no input bound). What's proven includes:
+The R1CS gadgets xark lowers from its Rust gadget crates carry **deductive proofs in Lean 4 against
+mathlib**, checked over *all* field assignments (no input bound). What's proven includes:
 
-- **Field primitives:** booleanity, range decomposition (unique for `n ≤ 253` bits — the load-bearing
-  `MAX_BITS`), bit-uniqueness.
-- **Gadgets:** AND/XOR/NOT, Poseidon2 (S-box and the full BN254 permutation with its round constants
-  transcribed), the Grumpkin point-addition gadget, scalar-mul ladders, non-native field arithmetic,
-  and ECDSA verification against the textbook FIPS 186-4 relation, specialized to secp256k1/r1.
-- **The lowering itself:** a meta-theorem that `AssertZero`, black-box dispatch, `Call` inlining, and
-  memory scoping lower soundly, plus per-opcode end-to-end wrappers.
-- **Brillig:** that ignoring the unconstrained hint opcodes is sound once the runtime pinning check
-  passes (see [supported opcodes](/docs/reference/supported-opcodes#brillig-hints)).
+- **Field primitives:** booleanity, range decomposition (uniquely determined for widths `n ≤ 253`),
+  bit-uniqueness.
+- **Bitwise / carry gadgets:** AND/XOR/NOT, the XOR-parity and wrapping-add carry chains — the
+  primitives SHA-256, Keccak, BLAKE2, BLAKE3, and AES compose out of.
+- **Poseidon2:** the S-box and the full BN254 permutation (the `t = 3` instance the gadget
+  implements, with its round constants and matrices transcribed), end-to-end determined.
+- **Embedded curves:** Grumpkin point addition (full algebraic closure: generic + doubling + inverse
+  + on-curve + selector mux), and secp256k1 / secp256r1 incomplete point-add.
+- **Scalar multiplication:** the LSB-first double-and-add ladder, proven abstractly over any
+  additive commutative group — including GLV decomposition and the comb / Strauss–Shamir tables.
+- **Non-native arithmetic:** the prover-aided modular-multiply chain the ECDSA gadgets build on,
+  with the full ℕ carry recurrence and the `Fr`-level no-wrap argument (`< 2^253 < r`).
+- **ECDSA verification:** an end-to-end wrapper composing the per-primitive theorems against the
+  textbook FIPS 186-4 relation, specialised to secp256k1 / secp256r1.
+- **AES S-box:** the GF(2⁸) multiplicative-inverse trick + affine transform equals the FIPS-197
+  lookup table for every byte.
+- **Merkle membership:** the per-level sibling mux is a genuine conditional swap (no
+  under-constraint).
+- **The lowering & bookkeeping:** the xark-IR → R1CS meta-theorem, allocation idempotence /
+  injectivity, and that public inputs are pinned — so the constraints the gadgets are proved against
+  are the constraints the compiler actually emits.
 
 The trust residue inside Lean is small and explicit: **three `axiom`s** (256-bit primality of the
-secp256k1, secp256r1, and BN254 field orders, which Lean's kernel can't `decide`), plus mathlib's
-standard axioms and `native_decide`. There is **no `sorry`** — CI rejects any proof depending on
-`sorryAx`.
+secp256k1, secp256r1, and BN254 scalar moduli, which Lean's kernel can't `decide`), plus mathlib's
+standard axioms and `native_decide` (used for the 256-byte AES GF(2⁸) identities). There is **no
+`sorry`** — CI prints `#print axioms` for every load-bearing theorem and rejects any proof depending
+on `sorryAx`.
 
 ## Bounded-checked with Kani
 
 The on-chain verifier's byte logic — canonicality, fail-closed behavior, strict non-malleability,
-arity, and pairing-operand assembly — is checked with **Kani bounded model checking**. That's a
-different, complementary guarantee from the unbounded Lean proofs: exhaustive within input bounds
-rather than deductive over all inputs.
+arity, totality, and pairing-operand assembly — is checked with **Kani bounded model checking**.
+That's a different, complementary guarantee from the unbounded Lean proofs: exhaustive within input
+bounds rather than deductive over all inputs.
 
 ## Tested against reality
 
 - **Differential tests against snarkjs** — an independent Groth16 implementation verifies every
   proof xark produces ([snarkjs interop](/docs/reference/snarkjs)).
-- **Known-answer vectors** — NIST/RFC test vectors for the hashes and curves.
-- Roughly **290 tests** in all (integration + unit), including the ceremony end-to-end and the
-  Brillig-pinning checks.
+- **KAT cross-checks** — every gadget is tested against its reference crate (`k256`, `p256`, `sha2`,
+  `keccak`, `blake2`, `blake3`, `aes`, `ark-grumpkin`), including tampering tests (mutate the
+  witness, confirm the constraint system reports unsatisfied) and adversarial inputs (all-zero,
+  all-FF, near-modulus, boundary-length).
+- **Official vectors** — NIST/RFC test vectors for the hashes and curves (FIPS 180-4, FIPS 202,
+  FIPS 197 / CAVP, RFC 7693, the official BLAKE3 vectors).
+- **The Lean ↔ R1CS bridge** — snapshot tests pin each gadget's multiplication-gate count to its
+  Lean soundness model, so any drift forces a re-check.
+- **Ceremony end-to-end** — every `CeremonyError` path (Schnorr PoK, transcript chain,
+  δ-consistency, dev-mode guard) is exercised.
+- **A `cargo-fuzz` smoke** over the artifact parser, witness parser, and IR→R1CS lowering (run
+  manually; production fuzzing is CPU-weeks, not yet a CI gate).
 
 ## What is trusted, not proven
 
 Honesty about the edges matters as much as the proofs:
 
-- **`nargo` / ACVM** — xark lowers ACIR faithfully, but a Noir compiler bug that under-constrains a
-  Brillig hint is out of scope; the defence is the pinned Noir version.
+- **`rustc` and the MIR extractor** — xark lowers the accepted MIR subset faithfully, but a bug in
+  MIR extraction (or a construct slipping past subset validation) is out of scope for the Lean
+  proofs. The defence is the pinned nightly, the strict subset validation that rejects everything
+  outside the accepted MIR, and the fuzz harness over the lowering.
 - **Arkworks Groth16** — used as a dependency; there is no in-repo proof of the prover itself.
 - **The Lean kernel + mathlib**, and the standard Groth16 trusted-setup assumption.
 - **BN254 gives ~100 bits of security** against the best known attacks at this size. If you need

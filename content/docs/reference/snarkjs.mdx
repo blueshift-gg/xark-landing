@@ -3,26 +3,29 @@ title: snarkjs interop
 description: Verify the same xark proof outside Solana, in JavaScript.
 ---
 
-Every xark proof is **snarkjs-compatible**. Alongside its native binary artifacts, `xark` emits the
-JSON that [snarkjs](https://github.com/iden3/snarkjs) expects, so the exact proof you verify on
-Solana also verifies in a browser or a Node script — a cheap, independent check that your circuit
-and keys are sound.
+Every xark proof is **snarkjs-compatible**. `xark setup` and `xark prove` write the JSON that
+[snarkjs](https://github.com/iden3/snarkjs) expects alongside the native binary artifacts (in the
+circuit's `target/xark/<name>/` output dir), so the exact proof you verify on Solana also verifies
+in a browser or a Node script — a cheap, independent check that your circuit and keys are sound.
 
 ## The JSON artifacts
 
 | Command | File | Contents |
 | --- | --- | --- |
-| `xark setup` | `target/groth16/snarkjs-verification_key.json` | the verifying key |
-| `xark prove` | `target/groth16/snarkjs-proof.json` | the proof |
-| `xark prove` | `target/groth16/snarkjs-public.json` | the public inputs |
+| `xark setup` | `target/xark/<name>/snarkjs-verification_key.json` | the verifying key |
+| `xark prove` | `target/xark/<name>/snarkjs-proof.json` | the proof |
+| `xark prove` | `target/xark/<name>/snarkjs-public.json` | the public inputs |
+
+`<name>` is the crate's `[package] name` — the same `target/xark/<name>/` dir that holds
+`circuit.xbc`, `pk.bin`, and `vk.bin`.
 
 ## Verify with snarkjs
 
 ```sh
 snarkjs groth16 verify \
-  target/groth16/snarkjs-verification_key.json \
-  target/groth16/snarkjs-public.json \
-  target/groth16/snarkjs-proof.json
+  target/xark/<name>/snarkjs-verification_key.json \
+  target/xark/<name>/snarkjs-public.json \
+  target/xark/<name>/snarkjs-proof.json
 ```
 
 <Callout title="Why this matters">

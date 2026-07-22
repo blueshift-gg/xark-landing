@@ -10,7 +10,7 @@ export function Footer() {
           xark — a <a href="https://blueshift.gg" target="_blank" className="xk-blueshift">
             <InfiniteLogo width={12} />Blueshift</a> project
         </span>
-        <span>groth16 for noir · unaudited · verified on solana</span>
+        <span>full stack zero knowledge programming for rust · unaudited · verified on solana</span>
       </div>
     </footer>
   );

@@ -3,26 +3,70 @@ title: CLI
 description: Every xark subcommand, its flags, and the files it writes.
 ---
 
-`xark` is the *Rust Groth16 (BN254) backend for Noir*. It consumes Noir/ACIR artifacts, lowers the
-supported opcodes into R1CS, and proves and verifies them with Arkworks Groth16.
+`xark` compiles a circuit written in Rust into R1CS and proves and verifies it with Arkworks
+Groth16 over BN254. It installs as **two** binaries: `xark` (the CLI, stable Rust) and
+`xark-rustc` (the `rustc_driver` shim `xark build` runs to extract MIR, pinned nightly).
 
-Run inside a Noir project (a directory with `Nargo.toml`) and every path is inferred from the
-package name: artifacts under `target/`, keys and proofs under `target/groth16/`. Every flag below
-can override an inferred path.
+Run any command inside a circuit crate (a directory with a `Cargo.toml`) and every path is
+inferred from the crate's `target/xark/`. Every flag below can override an inferred path.
 
-## `xark inspect`
+## `xark init <name>`
 
-Inspect a Noir ACIR artifact — opcode coverage and the public-input count and order.
+Scaffold a starter circuit crate, pre-wired for `rust-analyzer` (so unsupported constructs
+surface inline on save via `xark check`). With no name, initializes the current directory.
 
 ```sh
-xark inspect [--artifact target/<name>.json] [--json] [--strict]
+xark init my-circuit          # or: xark new my-circuit
 ```
 
-- `--json` — machine-readable output instead of the human report.
-- `--strict` — run the Brillig output-pinning `(SI)` invariant check; exits non-zero on unpinned
-  outputs.
+Writes `Cargo.toml`, `src/lib.rs`, `rust-analyzer.toml`, and `.vscode/settings.json`.
 
-Writes nothing; prints to stdout.
+## `xark build <crate-dir>`
+
+Compile a circuit crate — rustc-MIR → xark-IR → R1CS — into `target/xark/`.
+
+```sh
+xark build examples/cube [--out DIR] [--field bn254] [--emit-json]
+```
+
+- `--out <DIR>` — output directory (default `<crate>/target/xark/<pkg-name>/`).
+- `--field <F>` — the field (default `bn254`).
+- `--emit-json` — also write the human-readable `circuit.json`. Off by default: `prove`/`check`
+  load the compact `circuit.xbc`, so a normal build skips the (large, on big circuits) JSON
+  serialization. `r1cs.json` is always written.
+
+<Files>
+  <Folder name="target/xark/<name>" defaultOpen>
+    <File name="circuit.xbc" />
+    <File name="r1cs.json" />
+    <File name="circuit.json" />
+  </Folder>
+</Files>
+
+## `xark check <crate-dir>`
+
+Validate a circuit crate *without emitting artifacts*, reporting subset rejections as real
+`rustc` diagnostics with source spans. Great for editors / CI.
+
+```sh
+xark check examples/cube [--message-format=json]
+xark check examples/cube --inputs '{"secret": 3, "result": 27}'
+```
+
+- `--message-format json` — machine-readable diagnostics, the shape `rust-analyzer`'s
+  `check.overrideCommand` consumes.
+- `--inputs` — opts into the witness-based soundness check: xark builds the circuit, solves the
+  witness, and reports any derived variable the constraints fail to pin.
+
+## `xark test <crate-dir>`
+
+Build the circuit (so `target/xark/` artifacts exist), then run its `cargo test` circuit tests
+in `--release`. Extra arguments after `--` forward verbatim to `cargo test`.
+
+```sh
+xark test examples/cube
+xark test examples/cube -- --nocapture
+```
 
 ## `xark setup`
 
@@ -30,23 +74,24 @@ Generate the Groth16 proving and verifying keys.
 
 ```sh
 # dev keys (forgeable — demos only)
-xark setup --insecure-dev-mode
+xark setup examples/cube
 
 # production: phase-2 from a .ptau transcript
-xark setup --ptau-file powersOfTau.ptau
+xark setup examples/cube --ptau-file powersOfTau.ptau
 ```
 
-- `--insecure-dev-mode` — derive keys deterministically. **Forgeable.** Mutually exclusive with
-  `--ptau-file`.
-- `--ptau-file <PATH>` — the phase-1 powers-of-tau transcript (auto-detected from `ptau/` or
-  `ceremony/` if present).
+- `--insecure-dev-mode` — run setup with locally generated randomness. **Forgeable** — never
+  ship a key made this way.
+- `--ptau-file <PATH>` — the phase-1 powers-of-tau transcript (auto-detected under
+  `target/xark/`, `ptau/`, or the crate root if present). Mutually exclusive with
+  `--insecure-dev-mode`.
 - `--phase2-seed <HEX>` — 32-byte hex seed for the `(γ, δ)` derivation.
-- `--out <DIR>` — output directory (default `target/groth16`).
+- `--out <DIR>` — output directory (default `target/xark/<name>`).
 
 <Files>
-  <Folder name="target/groth16" defaultOpen>
-    <File name="proving_key.bin" />
-    <File name="verifying_key.bin" />
+  <Folder name="target/xark/<name>" defaultOpen>
+    <File name="pk.bin" />
+    <File name="vk.bin" />
     <File name="metadata.json" />
     <File name="snarkjs-verification_key.json" />
   </Folder>
@@ -54,36 +99,40 @@ xark setup --ptau-file powersOfTau.ptau
 
 ## `xark prove`
 
-Generate a Groth16 proof from a witness.
+Solve the witness from `--inputs` and produce a Groth16 proof (self-verified before returning).
 
 ```sh
-xark prove [--witness target/<name>.gz] [--proving-key …] [--out target/groth16/proof.bin]
+xark prove examples/cube --inputs '{"secret": 3, "result": 27}'
 ```
 
+- `--inputs <JSON|FILE>` — circuit inputs as inline JSON `{"name": value, …}` or a path to an
+  input file. Array elements use the flat names `xark inspect` prints (e.g. `path[0]`).
+- `--proving-key`, `--r1cs`, `--circuit`, `--out` — override inferred paths.
+
 Writes `proof.bin` and `public_inputs.bin`, plus snarkjs-compatible `snarkjs-proof.json` and
-`snarkjs-public.json`, under `target/groth16/`.
+`snarkjs-public.json`, under `target/xark/<name>/`.
 
 ## `xark verify`
 
 Verify a proof against its public inputs.
 
 ```sh
-xark verify
+xark verify examples/cube
 # Proof verified: true
 ```
 
-Prints `Proof verified: true` or `false`; exits with code `2` when the proof does not verify.
+Prints `Proof verified: true` or `false`; exits non-zero when the proof does not verify.
 
 ## `xark export`
 
 Export a self-contained Solana verifier crate with the verifying key baked in.
 
 ```sh
-xark export --crate-name my-verifier
+xark export examples/cube --crate-name my-verifier
 ```
 
 <Files>
-  <Folder name="target/my-verifier-xark-verifier" defaultOpen>
+  <Folder name="target/xark/verifier" defaultOpen>
     <File name="Cargo.toml" />
     <File name="src/lib.rs" />
     <File name="verifying_key.solana.bin" />
@@ -99,28 +148,41 @@ The generated `lib.rs` exposes `verify`, `verify_strict`, `verify_instruction_da
 `verify_instruction_data_strict`, plus a `NUM_PUBLIC_INPUTS` constant. See
 [How verification works](/docs/guides/how-verification-works).
 
+## `xark inspect <crate-dir>`
+
+Print statistics about a built circuit — variable counts by visibility, the constraint count,
+and the **public-input count and order**.
+
+```sh
+xark inspect examples/cube [--json]
+```
+
+- `--json` — machine-readable output instead of the human report.
+
 ## `xark ceremony`
 
 Run a phase-2 MPC trusted setup so the keys don't depend on any single party.
 
 ```sh
-xark ceremony init --ptau-file powersOfTau.ptau --out ./ceremony
+xark ceremony init --r1cs examples/cube/target/xark/cube/r1cs.json \
+  --ptau-file powersOfTau.ptau --out ./ceremony
 xark ceremony contribute --ceremony-dir ./ceremony --label "alice"
 xark ceremony verify --ceremony-dir ./ceremony
 xark ceremony finalize --ceremony-dir ./ceremony
 ```
 
-- `init` — seed the ceremony from a `.ptau` transcript and a phase-2 seed.
+- `init` — seed the ceremony from a `.ptau` transcript and the circuit's `r1cs.json`.
 - `contribute` — apply one contributor's randomness in place (writes a `contribution_NNNN.json`).
 - `verify` — verify the full contribution chain.
 - `finalize` — mark the chain finished and write the final `metadata.json`.
 
 Full walkthrough in [The trusted setup](/docs/trust/trusted-setup).
 
-## `xark completions`
+## Also
 
-```sh
-xark completions bash   # or zsh | fish | elvish
-```
-
-Prints a shell completion script to stdout.
+- `xark doctor` — check your toolchain is set up to build and prove circuits.
+- `xark profile <crate-dir>` — attribute each constraint to its source line, function chain, and
+  kind (writes `profile.json`).
+- `xark client` — scaffold a TypeScript client (snarkjs verify + on-chain calldata).
+- `xark clean` — remove every `target/xark/` under the current directory.
+- `xark completions bash|zsh|fish|elvish` — print a shell completion script.

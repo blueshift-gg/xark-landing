@@ -16,10 +16,10 @@ end-to-end inside an in-process Solana VM (no validator, no network). Read them 
 
 ## The pattern they share
 
-Every example is the same loop from the [Quickstart](/docs/quickstart): a Noir circuit, `xark`
+Every example is the same loop from the [Quickstart](/docs/quickstart): a Rust circuit, `xark`
 turning it into a proof and a verifier crate, and a small Solana program that calls
 `verify_instruction_data`. The two shielded examples add one trick worth its own study — **the chain
-never hashes.** All Poseidon happens inside Noir; the circuit proves that a new Merkle root correctly
+never hashes.** All Poseidon happens inside the circuit; it proves that a new Merkle root correctly
 extends the old one, so the on-chain program only stores roots and verifies proofs. Circuit and chain
 agree by construction instead of by carefully matching two Poseidon implementations.
 

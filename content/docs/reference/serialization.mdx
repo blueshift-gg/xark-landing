@@ -19,8 +19,8 @@ lot of "why doesn't this verify" confusion.
 
 | File | Encoding | Produced by | Contents |
 | --- | --- | --- | --- |
-| `proving_key.bin` | native | `setup` | `ProvingKey<Bn254>` |
-| `verifying_key.bin` | native | `setup` | `VerifyingKey<Bn254>` |
+| `pk.bin` | native | `setup` | `ProvingKey<Bn254>` |
+| `vk.bin` | native | `setup` | `VerifyingKey<Bn254>` |
 | `proof.bin` | native | `prove` | `Proof<Bn254>` |
 | `public_inputs.bin` | native | `prove` | the N public scalars |
 | `metadata.json` | JSON | `setup` | circuit hash, `setup_mode`, `production_safe` |
@@ -32,8 +32,20 @@ lot of "why doesn't this verify" confusion.
 
 ## metadata.json and circuit hash
 
-`metadata.json` records a `circuit_hash` that binds the lowering version, the curve and proving
-system, the pinned Noir/ACIR version, the number and identity of public inputs, and the canonical
-ACIR bytes. If any of those change, the hash changes — which is how xark detects that a proof and a
-verifying key belong to different circuits. It also records how the keys were made
-(`setup_mode`, `production_safe`), covered under [The trusted setup](/docs/trust/trusted-setup).
+`circuit_hash` is the **SHA-256 of the circuit's `r1cs.json`**, so it binds the field, the variable
+table (which fixes the number, identity, and order of the public inputs), and every constraint
+(coefficients and variable indices). If the constraint system changes, the hash changes — which is
+how xark detects that a proof and a verifying key belong to different circuits.
+
+`metadata.json` carries that hash alongside key provenance: `protocol`, `curve`, `backend_version`,
+`num_public_inputs`, `num_constraints`, and how the keys were made (`setup_mode`, `production_safe`,
+and — for production keys — `ptau_source` and a `phase2_seed_hash`). The `setup_mode` /
+`production_safe` values are covered under [The trusted setup](/docs/trust/trusted-setup); `export`
+refuses to emit a verifier for a non-`production_safe` key unless you pass `--allow-insecure`.
+
+<Callout title="A convenience check, not tamper-proof">
+`metadata.json` is a plain JSON file next to the keys — nothing signs it or binds it into
+`pk.bin` / `vk.bin`, so anyone who can edit the files can rewrite it. `export` / `prove` read it to
+stop your own slip-ups (e.g. proving circuit B with keys made for circuit A); it is **not** a
+security boundary.
+</Callout>

@@ -34,7 +34,8 @@ Three things are load-bearing:
 - **`A` is already negated.** The exporter writes `−A ‖ B ‖ C` so the on-chain check is a single
   product of pairings with no in-circuit negation.
 - **Public-input order is the circuit's order.** The N scalars appear in exactly the order
-  `nargo` assigned them — the order `xark inspect` prints. Your program must concatenate them the
+  the circuit declares its `Public<Field>` parameters — the order `xark inspect` prints. Your program
+must concatenate them the
   same way, or verification fails. Each scalar must be canonical (`< r`); a non-canonical input is
   rejected outright.
 

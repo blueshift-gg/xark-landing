@@ -7,7 +7,7 @@ export const siteMetadata: Metadata = {
     default: "xark — prove anything, reveal nothing",
   },
   description:
-    "A Groth16 proving backend for Noir. Prove anything, reveal nothing — verified on Solana through the native alt_bn128 syscalls.",
+    "Full stack zero knowledge programming for Rust. Prove anything, reveal nothing — verified on Solana through the native alt_bn128 syscalls.",
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
     shortcut: "/favicon.svg",
@@ -17,7 +17,7 @@ export const siteMetadata: Metadata = {
     url: "https://xark.blueshift.gg",
     title: "xark — prove anything, reveal nothing",
     description:
-      "A Groth16 proving backend for Noir, verified on Solana.",
+      "A Groth16 proving backend for circuits written in Rust, verified on Solana.",
       images: [
         {
           url: "/meta-image.png",
