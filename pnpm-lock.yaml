@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@blueshift-gg/xark-wasm':
-        specifier: file:vendor/xark-wasm
-        version: file:vendor/xark-wasm
+        specifier: ^0.1.0
+        version: 0.1.0
       '@opennextjs/cloudflare':
         specifier: ^1.20.1
         version: 1.20.1(next@16.1.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(wrangler@4.107.1)
@@ -322,8 +322,8 @@ packages:
     resolution: {integrity: sha512-sl4Bm6yiMNYrZKkqqDFWN0UfnWhlS8ivKxrYl+6t0gCLrqr8y3B2IqZZbFRkfaVVp7C/baApyh71P+LeE1A2sQ==}
     engines: {node: '>=18.0.0'}
 
-  '@blueshift-gg/xark-wasm@file:vendor/xark-wasm':
-    resolution: {directory: vendor/xark-wasm, type: directory}
+  '@blueshift-gg/xark-wasm@0.1.0':
+    resolution: {integrity: sha512-xo5BdLLYMmj84woL2EzxNJevoC3TAnNJVxu2hibLK2qAPAHWEbcay0hOL3DYlSjdEbaspU//qNAA3LPiFZtL6g==}
 
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
@@ -3905,7 +3905,7 @@ snapshots:
 
   '@aws/lambda-invoke-store@0.3.0': {}
 
-  '@blueshift-gg/xark-wasm@file:vendor/xark-wasm': {}
+  '@blueshift-gg/xark-wasm@0.1.0': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 

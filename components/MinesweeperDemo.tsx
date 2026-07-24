@@ -92,7 +92,7 @@ function buildInputs(
   salt: string,
   commitment: string,
   cells: FloodCell[],
-): string {
+): Record<string, string> {
   const revealed = new Array<number>(CELLS).fill(0);
   const isMine = new Array<number>(CELLS).fill(0);
   const count = new Array<number>(CELLS).fill(0);
@@ -109,7 +109,7 @@ function buildInputs(
   for (let i = 0; i < CELLS; i++) inputs[`revealed[${i}]`] = String(revealed[i]);
   for (let i = 0; i < CELLS; i++) inputs[`is_mine[${i}]`] = String(isMine[i]);
   for (let i = 0; i < CELLS; i++) inputs[`count[${i}]`] = String(count[i]);
-  return JSON.stringify(inputs);
+  return inputs;
 }
 
 /** Prove + produce a RevealSet for a list of flood cells. */
