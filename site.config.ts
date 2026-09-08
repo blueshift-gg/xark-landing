@@ -1,30 +1,29 @@
 import type { Metadata } from "next";
 
+const siteTitle = "xark — prove anything, reveal nothing";
+const siteDescription =
+  "Full stack zero knowledge programming for Rust, verified on Solana.";
+
 export const siteMetadata: Metadata = {
-  metadataBase: new URL("https://xark.blueshift.gg"),
-  title: {
-    template: "%s | xark",
-    default: "xark — prove anything, reveal nothing",
-  },
-  description:
-    "Full stack zero knowledge programming for Rust. Prove anything, reveal nothing — verified on Solana through the native alt_bn128 syscalls.",
+  metadataBase: new URL("https://xark.gg"),
+  title: { template: "%s | xark", default: siteTitle },
+  description: siteDescription,
+  alternates: { canonical: "./" },
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
     shortcut: "/favicon.svg",
   },
   openGraph: {
     type: "website",
-    url: "https://xark.blueshift.gg",
-    title: "xark — prove anything, reveal nothing",
-    description:
-      "A Groth16 proving backend for circuits written in Rust, verified on Solana.",
-      images: [
-        {
-          url: "/meta-image.png",
-          width: 1200,
-          height: 630,
-          alt: "xark — prove anything, reveal nothing",
-        },
-      ],
+    siteName: "xark",
+    url: "./",
+    images: [
+      {
+        url: "/meta-image.png",
+        width: 1800,
+        height: 945,
+        alt: siteTitle,
+      },
+    ],
   },
 };
