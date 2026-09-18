@@ -19,6 +19,10 @@ lot of "why doesn't this verify" confusion.
 
 | File | Encoding | Produced by | Contents |
 | --- | --- | --- | --- |
+| `circuit.xbc` | XBC bytecode | `build` | the DAG-compact circuit — the artifact `prove`/`check` load |
+| `r1cs.json` | JSON | `build` | the flat R1CS (variables + constraints); hashed into `metadata.json` |
+| `circuit.json` | JSON | `build --emit-json` | human-readable IR; off by default (large on big circuits) |
+| `r1cs.min.wcz` | binary | `setup --cache` / `prove --cache` | minimized R1CS cache, so a later prove skips the minimize + validate |
 | `pk.bin` | native | `setup` | `ProvingKey<Bn254>` |
 | `vk.bin` | native | `setup` | `VerifyingKey<Bn254>` |
 | `proof.bin` | native | `prove` | `Proof<Bn254>` |
@@ -29,6 +33,33 @@ lot of "why doesn't this verify" confusion.
 | `proof.solana.bin` | on-chain LE | `export` | 256 B, `−A ‖ B ‖ C` |
 | `public_inputs.solana.bin` | on-chain LE | `export` | N × 32 B, little-endian |
 | `instruction_data.bin` | on-chain LE | `export` | `proof ‖ public_inputs` (what you submit) |
+
+## The circuit artifact and the JIT prover
+
+`circuit.xbc` is **not** a flat list of constraints. xark treats a circuit's functions as reusable
+functions and stores the circuit as a **DAG-compact bytecode** — each distinct function body once,
+plus small `(function, base, plugs)` call records — then expands it on demand at setup/prove time.
+This is the "JIT prover" model, and it is purely a packaging decision: the expanded circuit is
+byte-identical to the flat lowering, and a build-time gate (`XARK_VERIFY`, on for every test build)
+decodes the artifact with an independent decoder and asserts equality, aborting on any divergence.
+
+The practical effect is on artifact size on disk, not on proof cost:
+
+| Circuit | Flat | DAG-compact |
+| --- | --- | --- |
+| ed25519 scalar mult | ~99 MB | ~1.1 MB |
+| secp256k1 ECDSA | 33 MB | 2.4 MB |
+| Keccak | 2.7 MB | 0.8 MB |
+
+Alongside the bytecode, xark runs a **linear-variable-elimination** pass on the R1CS — Gaussian
+elimination that substitutes away every internal variable defined by a linear constraint, to a
+fixpoint. It is satisfiability-preserving in both directions, so it changes the circuit's size (and
+therefore the proving-key and FFT-domain cost) without changing what is proven. `--cache` persists
+the result as `r1cs.min.wcz` so a later `xark prove` reloads it instead of re-deriving it.
+
+`xark inspect <crate>` reports the variable / constraint / public-input counts, and
+`xark profile <crate>` attributes each constraint to its source line, function chain, and kind.
+
 
 ## metadata.json and circuit hash
 
