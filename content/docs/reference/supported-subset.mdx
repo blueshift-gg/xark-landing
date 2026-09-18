@@ -28,7 +28,7 @@ use xark::prelude::*;
 
 /// Prove knowledge of a cube root: `secret^3 == result`.
 pub fn circuit(secret: Private<Field>, result: Public<Field>) {
-    require_eq(secret ^ 3, result);
+    require_eq(secret.pow(3), result);
 }
 ```
 
@@ -36,9 +36,9 @@ pub fn circuit(secret: Private<Field>, result: Public<Field>) {
 
 - **Types:** `Field`; fixed-size arrays `[Field; N]` (nested too); tuples and plain structs of
   `Field`, with **constant** array lengths.
-- **`Field` arithmetic:** `+`, `-`, `*`, unary `-`, `^ n` (exponentiation by a **constant** `n`).
-  Multiplication by a constant is free (folds into a linear combination); only `var * var` emits
-  a gate.
+- **`Field` arithmetic:** `+`, `-`, `*`, `/`, unary `-`, and exponentiation via `x.pow(n)`.
+  Multiplication by a constant is free (folds into a linear combination); only `var * var`
+  emits a gate.
 - **Constants & host integers:** integer literals and `usize`/`u*` values for loop bounds,
   indices, widths — as long as they're compile-time constants.
 - **Control flow, compile-time only:** `if cond { … } else { … }` where `cond` is constant;

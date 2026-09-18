@@ -49,8 +49,8 @@ pub fn my_circuit(secret: Private<Field>, result: Public<Field>) {
 ```
 
 `Private<Field>` / `Public<Field>` mark input visibility; `require_eq` emits a circuit equality
-constraint (not a native `bool`); `Field` supports `+ - * ^` (with `^ n` meaning
-exponentiation).
+constraint (not a native `bool`); `Field` supports `+ - * /`, unary `-`, and exponentiation via
+`x.pow(n)`.
 </Step>
 
 <Step>
