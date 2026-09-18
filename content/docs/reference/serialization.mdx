@@ -17,17 +17,23 @@ lot of "why doesn't this verify" confusion.
 
 ## Artifacts
 
+A normal `xark build` writes **one** circuit file: `circuit.xbc`. The JSON siblings are opt-in via
+`--emit-json`, because serializing them dominates build time (multi-GB on heavy circuits such as
+ed25519) and nothing at prove / check / setup time reads them.
+
 | File | Encoding | Produced by | Contents |
 | --- | --- | --- | --- |
-| `circuit.xbc` | XBC bytecode | `build` | the DAG-compact circuit — the artifact `prove`/`check` load |
-| `r1cs.json` | JSON | `build` | the flat R1CS (variables + constraints); hashed into `metadata.json` |
-| `circuit.json` | JSON | `build --emit-json` | human-readable IR; off by default (large on big circuits) |
+| `circuit.xbc` | XBC bytecode | `build` | the DAG-compact circuit — the **only** circuit file a normal build writes, and what `prove` / `check` / `setup` load |
+| `circuit.json` | JSON | `build --emit-json` | the human-readable primitive / witness program |
+| `r1cs.json` | JSON | `build --emit-json` | the flat R1CS (variables + constraints); pretty-printed at ≤ 1M constraints, compact above |
+| `graph.dot` | DOT | `build --emit-json` | debug graph of the R1CS; written only at ≤ 1M constraints |
+| `profile.json` | JSON | `profile` | per-constraint source / function / kind attribution |
 | `r1cs.min.wcz` | binary | `setup --cache` / `prove --cache` | minimized R1CS cache, so a later prove skips the minimize + validate |
 | `pk.bin` | native | `setup` | `ProvingKey<Bn254>` |
 | `vk.bin` | native | `setup` | `VerifyingKey<Bn254>` |
 | `proof.bin` | native | `prove` | `Proof<Bn254>` |
 | `public_inputs.bin` | native | `prove` | the N public scalars |
-| `metadata.json` | JSON | `setup` | circuit hash, `setup_mode`, `production_safe` |
+| `metadata.json` | JSON | `setup` | circuit fingerprint, `setup_mode`, `production_safe` |
 | `snarkjs-*.json` | JSON | `setup`/`prove` | vk / proof / public, decimal strings |
 | `verifying_key.solana.bin` | on-chain LE | `export` | VK, little-endian |
 | `proof.solana.bin` | on-chain LE | `export` | 256 B, `−A ‖ B ‖ C` |
@@ -60,13 +66,14 @@ the result as `r1cs.min.wcz` so a later `xark prove` reloads it instead of re-de
 `xark inspect <crate>` reports the variable / constraint / public-input counts, and
 `xark profile <crate>` attributes each constraint to its source line, function chain, and kind.
 
-
 ## metadata.json and circuit hash
 
-`circuit_hash` is the **SHA-256 of the circuit's `r1cs.json`**, so it binds the field, the variable
-table (which fixes the number, identity, and order of the public inputs), and every constraint
-(coefficients and variable indices). If the constraint system changes, the hash changes — which is
-how xark detects that a proof and a verifying key belong to different circuits.
+`circuit_hash` is the **SHA-256 of the circuit artifact xark loaded** — the `circuit.xbc` bytes by
+default, or the `r1cs.json` text when one is supplied via `--r1cs` (or is all that exists). Either
+way it binds the field, the variable table (which fixes the number, identity, and order of the
+public inputs), and every constraint (coefficients and variable indices). If the constraint system
+changes, the hash changes — which is how xark detects that a proof and a verifying key belong to
+different circuits.
 
 `metadata.json` carries that hash alongside key provenance: `protocol`, `curve`, `backend_version`,
 `num_public_inputs`, `num_constraints`, and how the keys were made (`setup_mode`, `production_safe`,

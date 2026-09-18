@@ -63,7 +63,7 @@ xark build my-circuit
 Runs `cargo build` on the crate with `xark` itself as the compiler (under one pinned nightly,
 so every dependency is built with matching MIR). The driver finds the circuit entry function,
 extracts its MIR, validates the accepted subset, and lowers it to R1CS. Output lands under
-`target/xark/<name>/` — `circuit.xbc` (the compact circuit), `circuit.json`, and `r1cs.json`.
+`target/xark/<name>/` — `circuit.xbc`, the compact circuit (add `--emit-json` for the JSON siblings).
 </Step>
 
 <Step>

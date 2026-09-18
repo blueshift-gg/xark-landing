@@ -34,6 +34,7 @@ A Groth16 ceremony has two parts, and xark treats them very differently:
 <Step>
 ### Seed it from a phase-1 transcript
 ```sh
+xark build <crate> --emit-json   # ceremony init reads the circuit's r1cs.json
 xark ceremony init --r1cs target/xark/<name>/r1cs.json \
   --ptau-file final.ptau --phase2-seed $SEED --out ceremony/
 ```

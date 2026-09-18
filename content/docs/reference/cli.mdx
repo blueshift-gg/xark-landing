@@ -31,17 +31,18 @@ xark build examples/cube [--out DIR] [--field bn254] [--emit-json]
 
 - `--out <DIR>` — output directory (default `<crate>/target/xark/<pkg-name>/`).
 - `--field <F>` — the field (default `bn254`).
-- `--emit-json` — also write the human-readable `circuit.json`. Off by default: `prove`/`check`
-  load the compact `circuit.xbc`, so a normal build skips the (large, on big circuits) JSON
-  serialization. `r1cs.json` is always written.
+- `--emit-json` — also write the JSON siblings of `circuit.xbc`: the human-readable `circuit.json`
+  and the flat `r1cs.json`, plus `graph.dot` for circuits up to 1,000,000 constraints (larger ones
+  get a compact `r1cs.json` and no graph). Off by default — `prove`/`check`/`setup` all load the
+  compact `circuit.xbc`, and JSON serialization dominates build time on large circuits.
 
 <Files>
   <Folder name="target/xark/<name>" defaultOpen>
     <File name="circuit.xbc" />
-    <File name="r1cs.json" />
-    <File name="circuit.json" />
   </Folder>
 </Files>
+
+`--emit-json` adds `circuit.json`, `r1cs.json`, and `graph.dot`.
 
 ## `xark check <crate-dir>`
 
@@ -188,7 +189,8 @@ xark ceremony verify --ceremony-dir ./ceremony
 xark ceremony finalize --ceremony-dir ./ceremony
 ```
 
-- `init` — seed the ceremony from a `.ptau` transcript and the circuit's `r1cs.json`.
+- `init` — seed the ceremony from a `.ptau` transcript and the circuit's `r1cs.json` (produced by
+  `xark build --emit-json`).
 - `contribute` — apply one contributor's randomness in place (writes a `contribution_NNNN.json`).
 - `verify` — verify the full contribution chain.
 - `finalize` — mark the chain finished and write the final `metadata.json`.
