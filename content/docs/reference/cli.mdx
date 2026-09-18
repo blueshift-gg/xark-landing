@@ -87,6 +87,14 @@ xark setup examples/cube --ptau-file powersOfTau.ptau
   `--insecure-dev-mode`.
 - `--phase2-seed <HEX>` — 32-byte hex seed for the `(γ, δ)` derivation.
 - `--out <DIR>` — output directory (default `target/xark/<name>`).
+- `--cache` — also write the minimized R1CS (`r1cs.min.wcz`) next to the keys, so a later
+  `xark prove` reloads it instead of re-deriving it (skips the minimize + validate, ~25s on a
+  multi-million-constraint circuit). Best for the produce-many-proofs flow; the cache can be
+  hundreds of MB.
+- `--uncompressed` — write the proving key uncompressed (2× on disk) so `prove` skips per-point
+  decompression on load — a large prove-time win. `xark prove` auto-detects either format.
+- `--deterministic-rng <SEED>` — reproducible randomness for regenerating committed test fixtures
+  **only**; trivializes the Groth16 trapdoor. Requires `--insecure-dev-mode`.
 
 <Files>
   <Folder name="target/xark/<name>" defaultOpen>
@@ -108,6 +116,11 @@ xark prove examples/cube --inputs '{"secret": 3, "result": 27}'
 - `--inputs <JSON|FILE>` — circuit inputs as inline JSON `{"name": value, …}` or a path to an
   input file. Array elements use the flat names `xark inspect` prints (e.g. `path[0]`).
 - `--proving-key`, `--r1cs`, `--circuit`, `--out` — override inferred paths.
+- `--cache` — write (on a miss) the minimized `r1cs.min.wcz` so subsequent proves against the same
+  key skip the minimize + validate. A current cache is always used regardless of the flag.
+- `--stream-pk` — stream the proving key from disk instead of loading it fully into RAM; the
+  Groth16 MSMs read it in chunks, so prove peaks at the witness + `h`-poly rather than also
+  holding the key. The proof is identical (still self-verified).
 
 Writes `proof.bin` and `public_inputs.bin`, plus snarkjs-compatible `snarkjs-proof.json` and
 `snarkjs-public.json`, under `target/xark/<name>/`.
@@ -130,6 +143,10 @@ Export a self-contained Solana verifier crate with the verifying key baked in.
 ```sh
 xark export examples/cube --crate-name my-verifier
 ```
+
+- `--crate-name <NAME>` — the generated crate's package name (default `verifier`).
+- `--allow-insecure` — emit a verifier for a key whose `metadata.json` is **not**
+  `production_safe`. Without it, `export` refuses a dev-mode or otherwise unsafe key.
 
 <Files>
   <Folder name="target/xark/verifier" defaultOpen>
