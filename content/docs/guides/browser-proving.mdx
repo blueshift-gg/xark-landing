@@ -1,0 +1,110 @@
+---
+title: Proving in the browser
+description: Generate and verify Groth16 proofs client-side with @blueshift-gg/xark-wasm — no server, no round trip.
+---
+
+The `@blueshift-gg/xark-wasm` package bundles the xark prover as WebAssembly, so a browser (or
+Node, or an edge runtime) can solve a witness and produce a Groth16 proof **entirely in memory**.
+Only the circuit bytecode and keys need to be fetched; the witness never leaves the client.
+
+This is what the [interactive demo on this site](/examples) uses: the secret stays in the page and
+the proof is generated and verified locally.
+
+<Callout title="Prerequisites">
+You need the artifacts `xark build` and `xark setup` produce, served as static files:
+
+```sh
+xark build my-circuit   # → target/xark/<name>/circuit.xbc
+xark setup my-circuit   # → target/xark/<name>/{pk.bin, vk.bin}
+```
+
+`circuit.xbc` is self-contained — it carries both the witness-solver view and the R1CS the proving
+key is keyed to — so it is the only circuit artifact you ship.
+</Callout>
+
+## Install and prove
+
+```sh
+npm install @blueshift-gg/xark-wasm
+```
+
+```js
+import init, { prove, verify } from "@blueshift-gg/xark-wasm";
+
+await init();
+
+const [circuit, pk, vk] = await Promise.all([
+  fetch("/circuit/circuit.xbc").then((r) => r.arrayBuffer()),
+  fetch("/circuit/pk.bin").then((r) => r.arrayBuffer()),
+  fetch("/circuit/vk.bin").then((r) => r.arrayBuffer()),
+]);
+
+const { proof, publicInputs, numPublicInputs } = prove(circuit, pk, {
+  secret: "3",
+  result: "27",
+});
+
+verify(vk, proof, publicInputs); // true
+```
+
+On **Node 20+** there is no `init()` step:
+
+```js
+import { readFileSync } from "node:fs";
+import { prove, verify } from "@blueshift-gg/xark-wasm";
+
+const xbc = readFileSync("examples/cube/target/xark/cube/circuit.xbc");
+const pk = readFileSync("examples/cube/target/xark/cube/pk.bin");
+const vk = readFileSync("examples/cube/target/xark/cube/vk.bin");
+
+const { proof, publicInputs } = prove(xbc, pk, { secret: "3", result: "27" });
+console.log(verify(vk, proof, publicInputs)); // true
+```
+
+Every binary argument accepts a `Uint8Array` **or** an `ArrayBuffer`, so `response.arrayBuffer()`
+and a Node `Buffer` can be passed straight through.
+
+## API
+
+| Function | Does |
+| --- | --- |
+| `prove(circuitXbc, pkBytes, inputs)` | Solve the witness and produce a proof; returns `{ proof, publicInputs, numPublicInputs }` |
+| `verify(vkBytes, proofBytes, publicInputsBytes)` | `true` if valid, `false` if well-formed but not verifying; throws on malformed input |
+| `preload(circuitXbc, pkBytes)` | Parse and cache the circuit + key once |
+| `prove_preloaded(inputs)` | Like `prove`, reusing the cache |
+| `proof_to_snarkjs(proofBytes)` | The snarkjs proof object |
+| `public_inputs_to_snarkjs(publicInputsBytes)` | The snarkjs `public.json` decimal strings |
+
+- **Inputs** are a plain `{ name: value }` object with **decimal strings** (`"3"`, `"-7"`), keyed
+  by the circuit's declared input names. Arrays and compound gadget inputs use the same flat leaf
+  names [`xark inspect`](/docs/reference/cli) prints (`msg[0]`, `pubkey.x.limbs[0]`, …).
+- **Outputs** (`proof`, `publicInputs`) are the canonical compressed bytes — byte-identical to the
+  host's `proof.bin` / `public_inputs.bin` — so the same proof verifies on Solana or in
+  [snarkjs](/docs/reference/snarkjs).
+- `prove` does **not** self-verify (matching snarkjs and arkworks); call `verify` when you want
+  that check. The CLI's `xark prove` does self-verify.
+
+### Preloading
+
+`prove` re-expands the `.xbc` and re-minimizes the R1CS on every call. For repeated proofs against
+the same circuit and key, parse once:
+
+```js
+preload(circuit, pk);
+const a = prove_preloaded({ secret: "3", result: "27" });
+const b = prove_preloaded({ secret: "2", result: "8" });
+```
+
+## Where it runs
+
+Anywhere with Web Crypto: browsers, Node 20+, Cloudflare Workers, Vercel Edge, and Deno. The prover
+is **single-threaded by design** (the arkworks `parallel` feature stays off) so it runs on
+`wasm32-unknown-unknown` hosts without threads. Prover randomness comes from the platform CSPRNG
+(`crypto.getRandomValues`).
+
+<Callout type="warn" title="Experimental, and the keys still have to be trustworthy">
+Browser proving changes *where* the proof is made, not the trust model: a dev-mode key
+(`production_safe: false`) is still forgeable by anyone, in the browser too. Use a key from a real
+[trusted setup](/docs/trust/trusted-setup), and treat xark as unaudited
+([audit status](/docs/trust/formal-proofs-and-audit)).
+</Callout>
