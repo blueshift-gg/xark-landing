@@ -62,7 +62,10 @@ pub fn circuit(secret: Private<Field>, result: Public<Field>) {
 | `&mut x` on a `Field` | a mutable borrow of a `Field` isn't supported | restructure to `x = …` (SSA-style) |
 | `foo(a)` via a trait object / fn pointer | indirect / dynamic calls aren't supported | call the function directly (it gets inlined) |
 | a function that calls itself | recursion isn't supported (no runtime stack) | unroll to a fixed depth, or use a loop with a constant bound |
-| `a == b` expecting a `bool` | `==` would need a native `bool`; a circuit needs a *constraint* | `require_eq(a, b)` |
+| `a == b` as a *statement* | `==` returns a `{0,1}` **wire**, not a constraint — a bare comparison constrains nothing | `require_eq(a, b)` |
+| `a != b` as a *statement* | same: it returns a wire | `require_ne(a, b)` |
+| reading a whole inner array out of a nested one (`grid[i]` as a value) | only *scalar* nested access is modeled | rebuild element-by-element: `for j in 0..M { row[j] = grid[i][j]; }` |
+| `x as u8` on a `Field` | only compile-time integer casts are supported | keep field values as `Field`; use bit gadgets for byte views |
 
 If you hit a rejection not covered here, the diagnostic names the exact construct and source
 line — that message is the source of truth.
@@ -89,6 +92,14 @@ error: witness-dependent control flow is not supported
 note: branch conditions must be compile-time constants (e.g. loop bounds)
 ```
 </Callout>
+
+## Testing a circuit
+
+Circuit crates are tested with **`xark test <crate-dir>`**, not bare `cargo test`: it builds the
+`target/xark/` artifacts first, then runs the crate's tests, which load the built circuit and check
+the witness solves. A rejecting test asserts the solve is `Err`. For a one-off end-to-end run,
+`xark build <crate-dir>` followed by `xark prove <crate-dir> --inputs '{…}'` takes you from source
+to a self-verified proof; see [the CLI](/docs/reference/cli).
 
 See [the CLI](/docs/reference/cli) for the full command surface, and
 [the repo's `subset.md`](https://github.com/blueshift-gg/xark/blob/master/docs/subset.md) for the
