@@ -77,6 +77,11 @@ Honesty about the edges matters as much as the proofs:
   MIR extraction (or a construct slipping past subset validation) is out of scope for the Lean
   proofs. The defence is the pinned nightly, the strict subset validation that rejects everything
   outside the accepted MIR, and the fuzz harness over the lowering.
+- **Not every check is wired into every gadget.** The Lean lemmas for on-curve enforcement exist
+  for all three curves, but the **P-256 (`xark-secp256r1`) gadget does not call one in-circuit**,
+  so an off-curve public key must be validated by the caller. The secp256k1 and Ed25519 gadgets do
+  enforce it. This and the other tracked gaps are enumerated in the repo's
+  [`docs/audit-status.md`](https://github.com/blueshift-gg/xark/blob/master/docs/audit-status.md).
 - **Arkworks Groth16** — used as a dependency; there is no in-repo proof of the prover itself.
 - **The Lean kernel + mathlib**, and the standard Groth16 trusted-setup assumption.
 - **BN254 gives ~100 bits of security** against the best known attacks at this size. If you need
