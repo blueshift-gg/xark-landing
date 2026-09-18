@@ -1,0 +1,4 @@
+{
+  "title": "Gadgets",
+  "pages": ["index", "hashes", "signatures", "commitments", "curves", "arithmetic"]
+}

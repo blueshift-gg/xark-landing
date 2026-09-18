@@ -44,7 +44,7 @@ pub fn circuit(secret: Private<Field>, result: Public<Field>) {
 - **Control flow, compile-time only:** `if cond { … } else { … }` where `cond` is constant;
   `while i < N` / `for i in 0..N` where `N` is constant (loops are fully **unrolled**).
 - **Functions:** ordinary function calls, including across crates — **gadgets are just Rust
-  libraries** (`xark-sha256`, `xark-poseidon`, …). They're inlined.
+  libraries** (`xark-sha256`, `xark-poseidon`, …). They're inlined. See [Gadgets](/docs/gadgets).
 - **Bit / integer gadgets:** `Field::to_bits::<N>()` / `from_bits::<N>()`, comparisons and shifts
   against a native-integer operand, and the gadget crates, all with **constant** widths (a shift
   amount must be a compile-time constant).
@@ -101,6 +101,7 @@ the witness solves. A rejecting test asserts the solve is `Err`. For a one-off e
 `xark build <crate-dir>` followed by `xark prove <crate-dir> --inputs '{…}'` takes you from source
 to a self-verified proof; see [the CLI](/docs/reference/cli).
 
-See [the CLI](/docs/reference/cli) for the full command surface, and
+See [the CLI](/docs/reference/cli) for the full command surface,
+[Gadgets](/docs/gadgets) for the crates you can call, and
 [the repo's `subset.md`](https://github.com/blueshift-gg/xark/blob/master/docs/subset.md) for the
 complete rejection list.

@@ -1,0 +1,198 @@
+---
+title: Hashes
+description: SHA-256, Keccak-256, BLAKE2s, BLAKE3, MiMC, Poseidon, and Poseidon2 — in-circuit, with the shared digest types.
+---
+
+Every hash gadget is a plain Rust crate that the compiler inlines into your circuit. They all
+follow the same shape: build the message from bytes or field elements, get the digest out, and
+`require_eq` it against the public value. The differences are the byte order of the output, the
+message length limits, and the constraint cost.
+
+Each section below is a complete circuit. The `digest` in every one of them is a `Public<Hash>` —
+a 256-bit digest packed into **two** field elements, `hi · 2¹²⁸ + lo` — so a proof exposes two
+public inputs instead of 256.
+
+## The digest types (`xark-hash`)
+
+`xark-hash` is the shared library the byte-oriented hashes agree on. You rarely depend on it
+directly (each hash crate's prelude re-exports what you need), but its two types are what make the
+inputs ergonomic:
+
+| Type | Host form | In-circuit | Use for |
+| --- | --- | --- | --- |
+| `Hash` | `[u8; 32]` | 2 field elements (`hi`, `lo`) | a **runtime** digest — a public input |
+| `Digest` | `[u8; 32]` | 256 bits (`[[Field; 32]; 8]`) | a **compile-time constant** expected digest (SHA-256 only) |
+
+`Hash` is `hi · 2¹²⁸ + lo`, each half a big-endian 16-byte read. Its fields flatten to
+`<name>.hi` / `<name>.lo` for host inputs. `Hash::pack(bits: [Field; 256]) -> Hash` is public, so
+a custom gadget can adopt the same compact public form.
+
+`Digest` keeps all 256 bits and is built from a `[u8; 32]` constant with **zero constraints and
+zero witnesses**:
+
+```rust
+use xark_sha256::prelude::*; // re-exports `Digest`
+
+const EXPECTED: [u8; 32] = [/* known SHA-256 */];
+
+#[circuit]
+pub fn hashes_to(msg: Private<[u8; 3]>) {
+    let expected: Digest = EXPECTED.into();
+    Digest::from(sha256(msg)).require_eq(expected);
+}
+```
+
+Because a `Public<Digest>` would cost 256 public inputs, use it for constants baked into the
+circuit and `Hash` for digests supplied at prove time.
+
+## SHA-256 (`xark-sha256`)
+
+```rust
+use xark_sha256::prelude::*;
+
+#[circuit]
+pub fn sha256(msg: Private<[u8; 3]>, digest: Public<Hash>) {
+    // Qualified: the entry fn shares the gadget's name.
+    require_eq(xark_sha256::sha256(msg), digest);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `sha256::<N_BYTES>` | `(msg: [Field; N_BYTES]) -> [[Field; 32]; 8]` — variable length, FIPS 180-4 padding + Merkle–Damgård chaining |
+| `sha256_block` | `(w: [[Field; 32]; 16]) -> [[Field; 32]; 8]` — one compression from the standard IV, no padding |
+
+- A 32-bit word is `[Field; 32]` in **little-endian** bit order; the message word layout is
+  big-endian per FIPS 180-4, which the variable-length wrapper handles for you.
+- `require_eq(sha256(msg), digest: Hash)` works directly: `xark-hash` permutes the gadget's
+  big-endian word output into `Hash`'s packed order for you.
+- Round constants and constant additions are free (linear combinations); the 64 rounds cost
+  bitwise ANDs plus one cached range decomposition per sum, and rotations shift nothing.
+
+## Keccak-256 (`xark-keccak`)
+
+```rust
+use xark_keccak::prelude::*;
+
+#[circuit]
+pub fn keccak256(msg: Private<[u8; 3]>, digest: Public<Hash>) {
+    require_eq(xark_keccak::keccak256(msg), digest);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `keccak256::<N_BYTES>` | `(msg: [Field; N_BYTES]) -> [[Field; 64]; 4]` — pads with the **0x01** domain byte (Ethereum), not SHA-3's `0x06` |
+| `keccak256_block` | `(block: [[Field; 64]; 17]) -> [[Field; 64]; 4]` — one pre-padded rate block (`r = 1088` bits) |
+| `keccak_f` | `(state: [[Field; 64]; 25]) -> [[Field; 64]; 25]` — the raw permutation |
+
+The state is 25 lanes of 64 little-endian bits. Only χ produces gates (it is the sole AND
+source); θ is XORs and a rotate, ρ/π are free lane re-wiring, and ι XORs a constant. The
+permutation is ~6,400 gates per round × 24 rounds ≈ **154k gates**, so Keccak is the most
+expensive hash here — prefer Poseidon for tree-shaped work.
+
+## BLAKE2s (`xark-blake2s`) and BLAKE3 (`xark-blake3`)
+
+```rust
+use xark_blake2s::prelude::*; // or xark_blake3::prelude::*
+
+#[circuit]
+pub fn blake2s(msg: Private<[u8; 3]>, digest: Public<Hash>) {
+    // `Blake256` bridges the raw word output to `Hash`.
+    require_eq(Blake256(xark_blake2s::blake2s(msg)), digest);
+}
+```
+
+Both expose the same three-layer API:
+
+| Function | BLAKE2s | BLAKE3 |
+| --- | --- | --- |
+| one-shot hash `::<N_BYTES>` | `(msg) -> [[Field; 32]; 8]` | `(msg) -> [[Field; 32]; 8]`, `N_BYTES <= 1024` |
+| single-block helper | `(input_words: [[Field; 32]; 16], input_len_bytes: Field)` | `(input_words, block_len_bytes: Field)` |
+| raw compression | `(h, block, t_low, t_high, f_final)` | `(cv, block, counter_low, counter_high, block_len, flags)` |
+
+- **BLAKE2s** is unkeyed with a fixed 32-byte digest (`h[0] = IV[0] ^ 0x01010020`) and always
+  compresses at least one block.
+- **BLAKE3** here is the **single-chunk** case (up to 1024 bytes); the chaining loop sets
+  `CHUNK_START`/`CHUNK_END`/`ROOT` flags. Multi-chunk BLAKE3 (the binary tree) is not exposed.
+- Wrap the raw output in **`Blake256`** to compare it against a `Public<Hash>`:
+  `require_eq(Blake256(blake2s(msg)), digest)`. (The wrapper exists because
+  `[[Field; 32]; 8]` already carries SHA-256's `Hash` coercion — a conflicting impl would be
+  ambiguous.)
+- Both are built on the verified 32-bit word layer in [`xark-bits`](/docs/gadgets/arithmetic).
+
+## MiMC (`xark-mimc`)
+
+```rust
+use xark_mimc::prelude::*;
+
+#[circuit]
+pub fn mimc_gadget(x: Private<Field>, k: Private<Field>, h: Public<Field>) {
+    require_eq(mimc(x, k), h);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `mimc` | `(x: Field, k: Field) -> Field` — one MiMC-p/p permutation with key addition |
+| `mimc_bn254::<N>` | `(inputs: [Field; N]) -> Field` — Feistel / Miyaguchi–Preneel multi-input sponge |
+
+This is a faithful port of [Noir's MiMC](https://github.com/noir-lang/mimc) and is
+**circomlib-compatible**: S-box exponent 7, 91 rounds, `C[0] = 0`, the remaining constants derived
+from the seed `"mimc"` by iterated Keccak-256. It is verified bit-for-bit against Noir's
+known-answer test:
+
+```text
+mimc_bn254([12, 45, 78, 41])
+  = 18226366069841799622585958305961373004333097209608110160936134895615261821931
+```
+
+## Poseidon (`xark-poseidon`) and Poseidon2 (`xark-poseidon2`)
+
+These are the field-native hashes: inputs and output are `Field` elements, no byte packing, and
+they are the right choice for Merkle trees and in-circuit commitments.
+
+```rust
+use xark_poseidon::prelude::*;
+
+#[circuit]
+pub fn poseidon(a: Private<Field>, b: Private<Field>, out: Public<Field>) {
+    require_eq(hash2(a, b), out);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `hash2` | `(a: Field, b: Field) -> Field` — 2-to-1 compression, the Merkle primitive |
+| `hash::<N>` | `(inputs: [Field; N]) -> Field` — rate-2 sponge with length-domain separation |
+| `permute` | `(state: [Field; 3]) -> [Field; 3]` — the raw width-3 permutation |
+
+Poseidon uses the canonical Horizen Labs BN256 parameters (`t = 3`, `α = 5`, 8 full + 56 partial
+rounds); Poseidon2 uses the [eprint 2023/323](https://eprint.iacr.org/2023/323) round structure
+with the same `t = 3`, 8 + 56 split. Both are transcribed from the reference `zkhash` instances,
+and Poseidon2's full BN254 permutation is machine-checked in Lean (see
+[Formal proofs & audit status](/docs/trust/formal-proofs-and-audit)).
+
+**Cost:** ARK and the MDS/linear layers are constant folds and therefore free. All **240** gates
+come from the `x^5` S-boxes (80 S-boxes × 3 gates).
+
+<Callout type="warn" title="hash2 and hash are not the same function">
+`hash2(a, b)` absorbs `[0, a, b]`; `hash([a, b])` seeds the capacity lane with the length for
+domain separation. Use `hash2` for fixed-arity pairs (and Merkle trees) and `hash` for
+variable-length sponges — never mix a `hash2` tree with a `hash` tree of the same data.
+</Callout>
+
+## Which hash should I use?
+
+| Need | Pick |
+| --- | --- |
+| Merkle trees, commitments, anything in-circuit and field-native | **Poseidon** or **Poseidon2** |
+| Verify an existing SHA-256 digest (Bitcoin, TLS, `sha2`) | `xark-sha256` |
+| Verify an existing Keccak-256 / Ethereum digest | `xark-keccak` |
+| Verify `blake2`/`blake3` data | `xark-blake2s` / `xark-blake3` |
+| Circom/Noir-compatible MiMC | `xark-mimc` |
+
+All of them are inlined into the circuit, so a proof verifies the hash *by recomputing it in R1CS*
+— there is no "hash oracle" the chain has to trust. That is also the design note behind the
+[shielded examples](/docs/guides/examples): the chain never hashes, because the circuit already
+did.

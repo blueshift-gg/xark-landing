@@ -1,0 +1,133 @@
+---
+title: Curves & recursion
+description: Native Grumpkin arithmetic, and the macros that emit a whole curve gadget for you.
+---
+
+Two crates carry the elliptic-curve layer. `xark-grumpkin` gives you native-field Grumpkin
+arithmetic ready to call; `xark-curve` is the macro library that **emits** a complete
+short-Weierstrass or twisted-Edwards gadget (field types, on-curve check, group law,
+double-scalar-mul, host input plumbing) from a parameter block, and is how `xark-secp256k1`,
+`xark-secp256r1`, and `xark-ed25519` are built.
+
+## Grumpkin (`xark-grumpkin`)
+
+```rust
+use xark_grumpkin::prelude::*;
+
+#[circuit]
+pub fn check_msm(
+    s0: Private<Field>,
+    s1: Private<Field>,
+    p0: Private<Affine>,
+    p1: Private<Affine>,
+    out: Public<Affine>,
+) {
+    require_eq(multi_scalar_mul([s0, s1], [[p0.x, p0.y], [p1.x, p1.y]]), [out.x, out.y]);
+}
+```
+
+| Function | Signature | Notes |
+| --- | --- | --- |
+| `ec_add` | `([Field; 2], [Field; 2]) -> [Field; 2]` | incomplete affine add |
+| `ec_double` | `([Field; 2]) -> [Field; 2]` | incomplete affine double |
+| `scalar_mul` | `(bits: [Field; 128], p: [Field; 2]) -> [Field; 2]` | **variable-base**; pins `p` on-curve |
+| `multi_scalar_mul` | `(scalars: [Field; 2], points: [[Field; 2]; 2]) -> [Field; 2]` | `Σ sᵢ·Pᵢ` |
+| `decompose` | `(x: Field) -> [Field; 128]` | boolean-constrained, injective LSB-first bits |
+| `enforce_on_curve` | `([Field; 2])` | asserts `y² = x³ − 17` |
+| `Affine` | `{ x: Field, y: Field }` | transparent input type (host: decimal/hex strings) |
+
+**Why this is cheap.** Grumpkin and BN254 form a 2-cycle: Grumpkin's base field *is* BN254's scalar
+field, which is xark's native `Field`. So coordinates are ordinary field elements and every group
+operation is a handful of native constraints — no non-native limb emulation. That is the whole
+reason the [folding work](/docs/reference/folding-and-recursion) is affordable: a full Nova fold
+step verifies in-circuit in **~9k constraints**, versus millions for non-native EC.
+
+`N_BITS = 128` and `K = 2` are public constants, so the scalar range and MSM arity are part of the
+gadget's shape.
+
+**Incomplete addition.** `ec_add` / `ec_double` cannot represent the point at infinity, so both
+the scalar-mul and MSM routines run an **offset double-and-add**: the accumulator starts at a fixed
+non-identity point `O`, and the accumulated `2^N·O` is removed at the end by adding a precomputed
+correction constant. Every intermediate stays off infinity. In return, each division is a pinned
+`hint_inverse` — at an exceptional case `0 · inv == 1` is unsatisfiable, so a malicious prover
+cannot forge a result at an edge.
+
+<Callout title="Need the point at infinity?">
+For a fold whose accumulator can legitimately start at `∞` (a fresh Nova instance has
+`comm_E = ∞`), use the **flagged-affine complete addition** shown in
+`examples/grumpkin_complete_add`: points are `[x, y, inf]`, and all of `P+∞`, `∞+Q`,
+`P+(−P) = ∞`, `P+P`, and generic `P+Q` are resolved branch-free with `is_zero` gadgets and safe
+conditional inverses. It costs ~24 constraints.
+</Callout>
+
+## Emitting a curve (`xark-curve`)
+
+`xark-curve` is a dependency-free macro crate. The macro emits absolute paths, so the **calling
+crate** must depend on both `xark-curve` and `xark-bignum`:
+
+```toml
+[dependencies]
+xark       = { version = "0.2.1", default-features = false }
+xark-curve  = { version = "0.2.1" }
+xark-bignum = { version = "0.2.1" }
+```
+
+### Short Weierstrass
+
+```rust
+xark_curve::weierstrass! {
+    base   = "0x…",   // base field modulus p
+    scalar = "0x…",   // scalar field (group order) n
+    a      = 0,       // 0 or -3 — selects the doubling numerator 3x² vs 3x² − 3
+    b      = [b0, b1, b2],
+    generators = [    // the incremental-generator points for the comb
+        [x0, x1, x2, y0, y1, y2],
+        // …
+    ],
+    correction = [x0, x1, x2, y0, y1, y2],   // the offset-accumulator correction
+}
+```
+
+This expands to a 3×86-bit field stack built on [`xark-bignum`](/docs/gadgets/arithmetic):
+
+- `Fp` (base field) and `Fq` / `Scalar` (scalar field) as `fp!` limb types,
+- `Point { x: Fp, y: Fp }` with `new`, `add_incomplete`, `double_incomplete`,
+- free `enforce_on_curve`, `ec_add_incomplete`, `ec_double_incomplete`, and
+  `double_scalar_mul_incomplete` (Strauss–Shamir over 256 caller-supplied bits),
+- host-side `order()` and `reduce_scalar(&[u8; 32]) -> [u8; 32]` helpers.
+
+`secp256k1` and `secp256r1` are the two shapes this produces today (`a = 0` and `a = −3`).
+
+### Twisted Edwards
+
+```rust
+xark_curve::edwards! {
+    base   = "…",   // base field modulus p
+    scalar = "…",   // group order L
+    d      = "…",   // the curve constant d
+}
+```
+
+Emits `Fp` / `Fq`, `Point`, the **complete** affine addition (`P + Q` for every pair, including
+`P = Q`, `P = −Q`, and the identity — the denominators `1 ± d·x₁x₂y₁y₂` are never zero for
+`a = −1`), identity, doubling, scalar mul, and double-scalar-mul. `xark-ed25519` is this macro
+plus the fixed basepoint and the EdDSA verification equation.
+
+<Callout title="Adding a curve is a parameter block">
+Because a curve is data for a macro rather than a separately audited backend, adding support for a
+new short-Weierstrass or Edwards curve means supplying the moduli, the `a` coefficient, and the
+precomputed constant tables. The soundness argument is the shared one: the Lean proofs cover the
+limb arithmetic, the incomplete/complete group law, and the double-and-add ladder abstractly, and
+the precomputed tables are validated against the reference implementation in the snapshot tests.
+</Callout>
+
+## Recursion
+
+Grumpkin exists here for a reason: it is the half of the BN254↔Grumpkin cycle that is *native* in
+a BN254 circuit, and that is what makes in-circuit folding verification practical. What is built
+today — IPA accumulator verification, Nova folding steps, a 2-step IVC, the host-side prover, and
+the one capability that still blocks a closed loop — is documented in
+[Folding & recursion](/docs/reference/folding-and-recursion).
+
+For the Merkle-tree use of Grumpkin and Poseidon, see
+[Commitments & Merkle trees](/docs/gadgets/commitments).

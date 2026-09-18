@@ -15,6 +15,7 @@ ordinary Rust crates that lower to the same small constraint set.
 
 <Cards>
   <Card title="Quickstart" href="/docs/quickstart" description="Circuit → proof → on-chain verifier, in six commands." />
+  <Card title="Gadgets" href="/docs/gadgets" description="Hashes, signatures, curves, and AES — the crates you add with cargo." />
   <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the on-chain byte layout." />
   <Card title="The Rust subset xark accepts" href="/docs/reference/supported-subset" description="What lowers to a circuit — and what's rejected before you spend a setup." />
@@ -24,7 +25,7 @@ ordinary Rust crates that lower to the same small constraint set.
 
 - **Gadgets are plain Rust.** No per-gadget backend opcodes, no separate circuit language.
   `xark-sha256`, `xark-poseidon`, `xark-secp256k1` are crates you add with `cargo`, inlined
-  into your circuit at compile time. See [the supported subset](/docs/reference/supported-subset).
+  into your circuit at compile time. See [Gadgets](/docs/gadgets).
 - **It refuses what it can't prove soundly.** Anything outside the accepted Rust subset is
   rejected *eagerly, before any setup or proving cost* — as a real `rustc` diagnostic with a
   source span — never silently mis-proved.

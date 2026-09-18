@@ -1,0 +1,109 @@
+---
+title: Commitments & Merkle trees
+description: Prove membership in a Poseidon Merkle tree, and compute Grumpkin Pedersen hashes and commitments.
+---
+
+The two gadgets on this page are the ones that turn a hash into a *data structure*: a Merkle path
+proves membership without revealing the leaf, and a Pedersen hash gives a collision-resistant
+commitment whose group structure makes it additive — the property folding schemes are built on.
+
+## Merkle membership (`xark-merkle`)
+
+```rust
+use xark_merkle::prelude::*;
+
+#[circuit]
+pub fn merkle(
+    leaf: Private<Field>,
+    siblings: Private<[Field; 4]>,
+    index_bits: Private<[Field; 4]>,
+    root: Public<Field>,
+) {
+    merkle_verify(leaf, siblings, index_bits, root);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `merkle_root::<DEPTH>` | `(leaf: Field, siblings: [Field; DEPTH], index_bits: [Field; DEPTH]) -> Field` |
+| `merkle_verify::<DEPTH>` | the same arguments, plus a final `require_eq` against `root` |
+
+- `siblings` is the authentication path, **leaf level first**.
+- `index_bits` is the leaf position, **LSB-first**: `0` means the running node is the left child,
+  `1` the right. Each bit is boolean-constrained (`b·b == b`) inside the gadget, so a prover
+  cannot smuggle a non-`{0,1}` selector into the sibling mux.
+- Compression is Poseidon's [`hash2`](/docs/gadgets/hashes) — the field-native choice, and the
+  reason a Merkle path here is cheap. `DEPTH` is a const generic, so the tree shape is fixed at
+  compile time.
+
+<Callout title="The chain never hashes">
+This is the design note behind the shielded examples: the circuit proves that a new root correctly
+extends the old one, so an on-chain program only has to store roots and verify proofs. Circuit and
+chain agree **by construction** instead of by carefully matching two Poseidon implementations. See
+[The examples](/docs/guides/examples).
+</Callout>
+
+## Pedersen hash & commitments (`xark-pedersen`)
+
+```rust
+use xark_pedersen::prelude::*;
+
+#[circuit]
+pub fn pedersen(m0: Private<Field>, m1: Private<Field>, hx: Public<Field>, hy: Public<Field>) {
+    let h = pedersen_hash([m0, m1]);
+    require_eq(h[0], hx);
+    require_eq(h[1], hy);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `pedersen_hash` | `(inputs: [Field; 2]) -> [Field; 2]` — an affine Grumpkin point |
+| `scalar_mul` | `(bits: [Field; 128], base: [Field; 2]) -> [Field; 2]` — variable-base scalar mul |
+| `ec_add` / `ec_double` | incomplete affine Grumpkin point arithmetic |
+
+The hash is `H = m₀·G₀ + m₁·G₁` over a fixed, **nothing-up-my-sleeve** generator set: each
+`Gᵢ = hash_to_curve("xark-pedersen:generator:i")`, derived by try-and-increment from
+`x = SHA256(domain)` on Grumpkin and taking the smaller `y`. That fixed, reproducible derivation
+means the generators have no known discrete-log relation — the security requirement a Pedersen
+hash needs. `examples/pedersen` reproduces the derivation with `ark-grumpkin` and checks the
+gadget output against it.
+
+**Why Grumpkin.** Grumpkin's base field is exactly BN254's scalar field, which is xark's native
+`Field`. So a Pedersen hash returns ordinary field elements — no non-native limb arithmetic, and
+each group operation is a handful of constraints. (The same 2-cycle is what makes
+[Grumpkin recursion](/docs/reference/folding-and-recursion) cheap.)
+
+### Ranges and edge cases
+
+- Each input must be a **nonzero** scalar `< 2¹²⁸`. `N_BITS = 128` is a one-line change (plus
+  regenerating the correction constant) if you need wider scalars; the module docs give the exact
+  cost, roughly `12 · N_BITS` gates per scalar.
+- Every division is a `hint_inverse` **pinned** by `denom · inv == 1`. At an exceptional case the
+  denominator is zero and the constraint is unsatisfiable — a malicious prover can never forge a
+  result at an edge. An honest prover can only fail on the negligible fraction of inputs that land
+  on one (the standard incomplete-addition completeness gap).
+- `0·G` is the point at infinity, which the affine representation cannot express, so zero inputs
+  are rejected.
+
+<Callout type="info" title="Commitment = a Pedersen hash you can open">
+`H = m₀·G₀ + m₁·G₁` is a perfectly hiding commitment: with independent generators, the map from
+`(m₀, m₁)` is additively homomorphic, which is what lets folding schemes accumulate instances and
+lets a shielded pool prove value conservation in-circuit. Add a random blinding scalar as a third
+input where hiding matters. The `pedersen_hash` output is a Grumpkin point, so you can feed it
+straight into the [Grumpkin gadgets](/docs/gadgets/curves).
+</Callout>
+
+## Choosing between them
+
+| Need | Use |
+| --- | --- |
+| Membership in a set, cheap to verify | `xark-merkle` (Poseidon) |
+| A commitment with homomorphic / algebraic structure | `xark-pedersen` (Grumpkin) |
+| A hash inside a Merkle tree whose root is stored on-chain | Poseidon — see [the chain never hashes](/docs/guides/examples) |
+| Accumulating many statements (folding / IVC) | Pedersen, for the commitment fold |
+
+Both gadgets are unaudited reference implementations — see
+[Formal proofs & audit status](/docs/trust/formal-proofs-and-audit) for exactly which parts are
+machine-checked (Merkle's per-level sibling mux is proven sound; the embedded-curve group law and
+the non-native limb arithmetic are covered alongside the curves).

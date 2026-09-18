@@ -1,0 +1,160 @@
+---
+title: Bit & big-number arithmetic
+description: The word-level bit layer, non-native (foreign-field) arithmetic, and AES in-circuit.
+---
+
+These three crates are the arithmetic substrate the other gadgets build on — and each is directly
+usable in a circuit. `xark-bits` is the bit/word layer; `xark-bignum` is the foreign-field layer
+that makes non-native curves possible; `xark-aes` is a full symmetric cipher built on bit
+decomposition.
+
+The single-element primitives (`to_bits` / `from_bits`, booleanity, `and` / `or` / `xor` / `not`)
+are `Field` methods, and so are comparisons, shifts, and modulus against a native-integer operand;
+this crate keeps the **word** layers.
+
+## `xark-bits` — words and bits
+
+A 32-bit word is `[Field; 32]` in **little-endian** bit order (bit `i` has weight `2^i`), and a
+64-bit word is `[Field; 64]`. Every op below operates on those arrays. If a word comes from
+`Field::to_bits::<N>()` its bits are already boolean-pinned; if you assemble one by hand, pin each
+bit yourself.
+
+```rust
+use xark_bits::{add32, and32, rotr32, xor32};
+
+#[circuit]
+pub fn word_ops(a: Private<Field>, b: Private<Field>, out: Public<Field>) {
+    let ba = a.to_bits::<32>();      // range-checks a < 2^32
+    let bb = b.to_bits::<32>();
+    let mixed = add32(rotr32(xor32(ba, bb), 7), and32(ba, bb));
+    require_eq(Field::from_bits::<32>(mixed), out);
+}
+```
+
+| Group | Functions |
+| --- | --- |
+| 32-bit bitwise | `and32`, `xor32`, `or32`, `not32` |
+| 32-bit shifts | `rotr32`, `shr32` (rotations/shifts are free re-wiring) |
+| 32-bit modular add | `add32`, `add3(a, b, c)` (carry-chain decomposition) |
+| 64-bit bitwise | `and64`, `xor64`, `not64` |
+| 64-bit shifts | `rotl64`, `rotr64` |
+| conversions | `to_bits64`, `from_bits64` |
+| helpers | `read_n`, `sha256_iv` |
+
+**Cost:** XOR/NOT and rotations/shifts are linear or pure re-wiring and emit **zero** gates;
+`and32` / `and64` cost one gate per bit; `add32` pays a carry decomposition; `to_bits::<N>` costs
+`N` booleanity constraints plus a recomposition. The hashes are all built on this layer, which is
+why the compiler can inline an entire SHA-256 compression and still share the bit arrays.
+
+<Callout title="Why the multi-add trick">
+SHA-256 mixes several 32-bit words with modular addition. Rather than chaining `add32` (33 gates
+each), the gadget sums the terms as **field** elements — free — and decomposes the total **once**
+with the tight bit-width of the sum (a `k`-term 32-bit sum is `< 2^(32 + ⌈log₂ k⌉)`). This is the
+general pattern for cheap additions: stay in the field, reduce once.
+</Callout>
+
+## `xark-bignum` — non-native field arithmetic
+
+A BN254 circuit's `Field` is an `Fr` element. To do arithmetic modulo a *different* prime — a
+secp256k1 coordinate, an Ed25519 coordinate — xark represents the value as little-endian
+**limbs**, does the limb-wise arithmetic, and range-checks the carries so no intermediate term
+wraps the BN254 modulus (which would silently break the integer identity).
+
+```rust
+use xark_bignum::prelude::*;
+
+xark_bignum::fp!(pub Fp, "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+
+#[circuit]
+pub fn mul_mod(a: Private<Fp>, b: Private<Fp>, c: Public<Fp>) {
+    require_eq((a * b).limbs, c.limbs);
+}
+```
+
+### The width-generic core
+
+| Item | Signature / meaning |
+| --- | --- |
+| `Bignum<LIMBS, BITS>` | a value `Σ limb[i]·2^(BITS·i)`, `LIMBS` limbs of `BITS` bits |
+| `Bignum::new(limbs)` | wrap little-endian limbs |
+| `.range_check()` | every limb `∈ [0, 2^BITS)` |
+| `.add(rhs, m)` / `.sub(rhs, comp)` / `.neg(m)` | modular ops (`comp` is `2^(BITS·LIMBS) − m`) |
+| `.mul(rhs, m, m_minus_1)` | modular multiply (a prover-aided `hint_mulmod_divmod` + limb check) |
+| `.inverse(m)` / `.sub2(b, c, m, m_minus_1)` / `.triple(m)` / `.reduce(m)` | remaining ops |
+
+Free functions cover the same ground when you are not using a generated type:
+`range_check_limbs`, `mod_add`, `mod_sub`, `mod_neg`, `mod_mul`, `mul_divmod`, `triple_mod`,
+`reduce_once`, `require_lt`, `is_lt`, `is_ge`, `assert_nonzero_limbs`, `scalar_to_bits`,
+`point_select_affine`. Constants for the shipped curves are public too (`P_25519_L`, `M_K1`,
+`D_25519`, and the secp256k1 lazy helpers).
+
+### The `fp!` macro
+
+```rust
+xark_bignum::fp!(Fp, "0x…");              // ~256-bit prime, default 3 × 86-bit layout
+xark_bignum::fp!(Fp, "0x…", 4, 64);        // explicit geometry
+xark_bignum::fp!(no_host Fp, "0x…");       // skip the host NativeInput impl
+```
+
+It derives the limb split, `m − 1`, and the subtraction complement at compile time, and generates
+a type that forwards `+ - *` (plus unary `-`) and `.inverse()` / `.sub2()` / `.triple()` /
+`.reduce()` / `.assert_canonical()` / `.assert_nonzero()` to the free functions. The default
+`3 × 86` geometry is multiply-optimal over BN254; `4 × 64` is what secp256k1's lazy path uses.
+
+<Callout type="warn" title="Carry budgets are checked at compile time">
+A `(LIMBS, BITS)` choice whose schoolbook column products could overflow BN254 `Fr` is rejected by
+a per-instance const assertion in `mod_mul`. That is a build error, not a silent wrap — the
+gadget cannot be instantiated with a geometry it cannot prove sound.
+</Callout>
+
+`xark-bignum` is shared by the secp256k1, secp256r1, and Ed25519 gadgets, which are otherwise
+parameterizations of [`xark-curve`'s macros](/docs/gadgets/curves).
+
+## `xark-aes` — AES-128/256 in-circuit
+
+The cipher is written in the `Field` subset with **no inverse cipher**: all modes are forward-only,
+because CTR/GCM encryption and decryption are the same XOR against a keystream.
+
+```rust
+use xark_aes::prelude::*;
+
+#[circuit]
+pub fn aes(pt: Private<[u8; 16]>, key: Private<[u8; 16]>, ct: Public<[u8; 16]>) {
+    aes128_constrain(pt, key, ct);
+}
+```
+
+| Function | Signature |
+| --- | --- |
+| `aes128_encrypt` / `aes256_encrypt` | block cipher on `[[Field; 8]; 16]` bytes-of-bits |
+| `aes128_encrypt_bytes` / `aes256_encrypt_bytes` | `([Field; 16], key) -> [Field; 16]` |
+| `aes128_constrain` / `aes256_constrain` | encrypt and `require_eq` every ciphertext byte |
+| `aes128_ctr::<N>` / `aes256_ctr::<N>` | `(msg[N], key, nonce[12]) -> [Field; N]`; 96-bit nonce ‖ big-endian block counter |
+| `aes128_gcm::<A, N>` / `aes256_gcm::<A, N>` | `(aad[A], pt[N], key, nonce[12]) -> (ct[N], tag[16])` — full NIST SP 800-38D |
+| S-box / GF primitives | `sbox`, `gf_mul`, `gf_square`, `gf_inv`, `gf128_mul`, `bytes_to_gf128`, `gf128_to_bytes` |
+
+- A byte is `[Field; 8]` in little-endian bit order; messages are `[Field; N]` **bytes**, which
+  is exactly what a `Private<[u8; N]>` input lowers to, so the ergonomic path is a one-line
+  `aes128_constrain(pt, key, ct)`.
+- The S-box is `affine(inv(b))` with `inv(b) = b^254` computed by an Itoh–Tsujii addition chain.
+  GF(2⁸) squaring is a linear (Frobenius) map, so it is XOR-only; the four general multiplications
+  (64 AND gates each) dominate. There is no lookup table and no advice hint.
+- **GCM** implements the full construction: subkey `H = AES(key, 0¹²⁸)`, `J0 = nonce ‖ 1`, CTR
+  from `inc32(J0)`, and the GHASH tag over `A ‖ pad ‖ C ‖ pad ‖ lengths` in GF(2¹²⁸). The AAD is
+  authenticated but not encrypted — the TLS record-header case. Set `A = 0` for no AAD.
+- Because `A` and `N` are compile-time constants, block counts and counter suffixes are constants;
+  **no counter arithmetic is emitted**.
+
+`xark-aes` is the largest gadget by source size, and its S-box equivalence to FIPS-197's lookup
+table is machine-checked in Lean. See
+[Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).
+
+## Which layer do I want?
+
+| Task | Layer |
+| --- | --- |
+| Integer comparison / shift / mod on a `Field` | `Field` methods (e.g. `x < 100u32`) |
+| Word-level bit manipulation, carry chains, building a custom hash | `xark-bits` |
+| Arithmetic modulo a non-BN254 prime (a foreign curve, RSA, big integers) | `xark-bignum` |
+| AES encryption or authenticated encryption | `xark-aes` |
+| A whole foreign curve | [`xark-curve`](/docs/gadgets/curves) (which builds on `xark-bignum`) |
