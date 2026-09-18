@@ -1,0 +1,85 @@
+---
+title: Folding & recursion
+description: The Nova-style IVC building blocks that ship today — and the one capability gap that blocks a closed loop.
+---
+
+xark's recursion story is built on the **BN254↔Grumpkin 2-cycle**. Grumpkin is
+`y² = x³ − 17` over BN254's scalar field `Fr`, so Grumpkin coordinates are ordinary circuit
+`Field`s and every Grumpkin group operation is a handful of **native** constraints. That makes the
+compute-heavy half of folding verification cheap: a full Nova fold step verifies in-circuit in
+**~9k constraints**, where non-native EC would cost millions.
+
+Everything on this page is verified in the repository's test suite (accept + tamper-reject + a
+Groth16 proof), and is exposed as runnable examples rather than a finished library API. There is
+no closed IVC yet; the last section says exactly what is missing.
+
+## What is built
+
+All of these are `#[circuit]` examples under
+[`examples/`](https://github.com/blueshift-gg/xark/tree/master/examples).
+
+| Example | Verifies | Constraints |
+| --- | --- | --- |
+| `grumpkin_ipa` | a deferred-MSM accumulator claim `Q = Σⱼ sⱼ·Gⱼ` | 12,212 |
+| `grumpkin_ipa_fold` | the full Halo IPA reduction, with in-circuit Poseidon2 Fiat–Shamir | 40,150 |
+| `grumpkin_nova_fold` | one Nova folding step | 8,859 |
+| `grumpkin_ivc` | a 2-step folding IVC (computation + accumulator chains) | 18,200 |
+| `grumpkin_complete_add` | identity-safe complete Grumpkin addition | 24 |
+
+Alongside them, `grumpkin_nova_prover` is the **host-side prover core**: it extracts a Xark R1CS
+`(A, B, C)`, folds committed relaxed instances (with the cross-term `T`), runs a multi-step
+stepping loop, and uses a Grumpkin Pedersen commitment. The tests check that the folded relaxed
+instance satisfies `Az ∘ Bz = u·Cz + E` and that the commitment fold is homomorphic.
+
+## The cycle's field roles
+
+Nova's primary circuit is over `Fr`, so a BN254 Groth16 proof can be its terminal proof. A witness
+in field `K` can be committed homomorphically only with a curve whose **scalar field is `K`**:
+
+- **BN254 G1** (scalar field `Fr`) commits the **primary (`Fr`) witness** — but its coordinates
+  are in `Fq`, which is *non-native* in an `Fr` circuit.
+- **Grumpkin** (scalar field `Fq`) commits the **companion (`Fq`) witness** — its coordinates are
+  in `Fr`, which is *native* in an `Fr` circuit.
+
+So the `Fr` circuit natively folds Grumpkin commitments (`grumpkin_nova_fold`) and **defers** the
+one BN254-G1 scalar multiplication over the primary witness to a small companion circuit over `Fq`
+— the **CycleFold** construction.
+
+This role split is a measured finding, not theory: committing the primary `Fr` witness on Grumpkin
+and folding it **fails**, because with `r·T` large, `r·T mod r ≠ r·T mod q` (Grumpkin's group
+order is `Fq ≠ Fr`) and the `comm_E` fold mismatches. Grumpkin Pedersen is homomorphic over `Fq`,
+confirming the split.
+
+## The one capability gap
+
+The CycleFold companion is a circuit over **`Fq`** — BN254's *base* field. **Xark is `Fr`-native**:
+it compiles to a BN254-`Fr` R1CS for Groth16 and has no over-`Fq` target. So the companion circuit
+is **not buildable in xark today**, and a *closed* IVC loop is not available.
+
+What remains for a closed loop:
+
+1. **CycleFold companion** — an `Fq`-field circuit / proof system. This is the capability gap;
+   it is a new backend target, not an assembly step.
+2. **Self-referential augmented step circuit `F′`** — computation + fold verification + Poseidon2
+   I/O compression, whose own committed instance is folded next step. This is buildable on the
+   `Fr` side; `grumpkin_augmented_step` is the shape.
+3. **Decider** — a terminal SNARK opening the final folded commitment.
+
+The verifier core and the host-side accumulation are done; #1 is genuinely new capability, while
+#2–#3 are systems assembly with every field-matching pitfall already mapped.
+
+<Callout type="warn" title="Experimental">
+Everything here is unaudited research code, and the folding primitives are **not** exposed as a
+supported library API. Treat these examples as measured building blocks and reference
+implementations, not as a production recursion stack. See
+[Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).
+</Callout>
+
+## Where to start
+
+- [Curves & recursion](/docs/gadgets/curves) — the Grumpkin gadget API and the `xark-curve` macros
+  used to build it.
+- [Commitments & Merkle trees](/docs/gadgets/commitments) — the Pedersen commitment the fold uses.
+- `examples/grumpkin_ipa`, `grumpkin_ipa_fold`, `grumpkin_nova_fold`, `grumpkin_ivc`,
+  `grumpkin_nova_prover`, `grumpkin_augmented_step`, `grumpkin_complete_add` — the runnable
+  sources, each with its measurement in the module docs.
