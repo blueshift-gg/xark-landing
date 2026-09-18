@@ -17,12 +17,14 @@ In xark it is regular Rust:
 
 ```rust
 fn circuit(power_level: Private<Field>, bound: Public<Field>) {
-    require_gt(power_level, bound);   // a constraint: this must hold
+    // Treat both values as 32-bit, then constrain `power_level >= bound`.
+    require(power_level.ge::<32>(bound));   // a constraint: this must hold
 }
 ```
 
-`require_gt` is a constraint compiled into the circuit. The proof is
-worthless unless every `require_*` holds for the prover's secret witness.
+`require` turns a comparison wire into a constraint compiled into the circuit. The proof is
+worthless unless every constraint holds for the prover's secret witness. The `::<32>` is
+critical here: a `Field` has no width, so a comparison has to say how many bits it means.
 
 ## Everything becomes arithmetic over a finite field
 
@@ -44,8 +46,8 @@ Two consequences you'll feel:
 
 The **witness** is the full set of values (private + public + all the intermediates) that satisfies
 every constraint. `xark prove` computes it from your inputs (`--inputs`). If your inputs *can't*
-satisfy the circuit (e.g. `power_level = 9000` with `require_gt(power_level, 9000)`), witness
-generation fails — there's nothing to prove.
+satisfy the circuit (e.g. `power_level = 9000` with a constraint requiring it to be strictly greater
+than `9000`), witness generation fails — there's nothing to prove.
 
 ## Rust → MIR → R1CS → proof
 
