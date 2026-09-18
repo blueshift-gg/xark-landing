@@ -73,13 +73,25 @@ line — that message is the source of truth.
 ## Equality is a constraint; ordering needs a width
 
 `Field == Field` and `Field != Field` return a `{0,1}` field *wire* — a circuit value, not a
-host `bool`, so a bare `a == b` statement constrains nothing. To pin the values, use the
-constraint `require_eq(a, b)` (or `require_ne(a, b)`).
+host `bool` — so a bare `a == b` statement constrains nothing. To pin the values, use the
+constraint `require_eq(a, b)` (or `require_ne(a, b)`). Equality is exact at any size, so it needs
+no range check: it costs a couple of constraints rather than an `N`-bit decomposition.
 
-Ordering is different. A circuit can't branch on a witness, and a `Field` has no fixed width to
-order by. Comparisons are therefore explicit and width-bounded: `x < 100u32` takes its width from
-the operand type, and two witnesses compare with `a.lt::<32>(b)`. A bare `Field < Field` is
-deliberately not provided. Equality never needs a range check, so it costs no decomposition.
+Ordering is different. A `Field` is a residue mod `p`, not an integer of a fixed width, so "`a` is
+less than `b`" only means something once you say how many bits the values occupy. A comparison is
+therefore **explicit about its width** and range-checks its witness operand(s) to `< 2ᴺ` before
+comparing. There is no safe default width, so it has to come from one of two places:
+
+- **Against a literal**, the literal's type supplies it: in `x < 100u32`, the `u32` says "treat `x`
+  as a 32-bit value and compare it with 100". `>`, `<=`, `>=` work the same way.
+- **Between two witnesses**, no literal carries a width, so you spell it out: `a.lt::<32>(b)`
+  range-checks **both** operands. `gt`, `le`, `ge` have the same shape.
+
+A bare `Field < Field` is deliberately **not** provided — a silent default (32 bits, say) would be
+a footgun for 64-bit values — and `N` must stay `≤ 252`.
+
+Like equality, a comparison yields a `{0,1}` **wire**: constrain it with `require(x < 100u32)`, or
+use it in a mux.
 
 <Callout title="Check as you write">
 `xark check <crate-dir>` surfaces every rejection as a `rustc` diagnostic with a source span —
