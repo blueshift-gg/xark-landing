@@ -1,18 +1,18 @@
 ---
 title: Gadgets
-description: Hashes, signatures, curves, and arithmetic as ordinary Rust crates — what ships, what it costs, and how to wire one in.
+description: Hashes, signatures, curves, and arithmetic as ordinary Rust crates.
 ---
 
 A **gadget** in xark is just a Rust crate that lowers to the same primitive constraints as
 hand-written circuit code. There is no per-gadget backend opcode and no separate circuit
 language: you add a dependency with `cargo`, call a function inside your `#[circuit]`, and the
-compiler inlines the whole thing — every function in the crate, loops unrolled — into your R1CS.
+compiler inlines the whole thing — every function in the crate, loops unrolled — into R1CS.
 
-That design is why xark's list of supported hashes and curves is a list of **crates** rather than
-a list of built-ins: forking a gadget, pinning a different parameter set, or writing your own is
-ordinary Rust work.
+That design makes it easy to add, extend, and distribute new gadget for xark — it is all just ordinary Rust.
 
-## Adding one
+## Using a gadget
+
+To use a gadget, simply add the gadget crate needed to your Cargo.toml manifest.
 
 ```toml
 # Cargo.toml
@@ -31,10 +31,30 @@ pub fn poseidon(a: Private<Field>, b: Private<Field>, out: Public<Field>) {
 }
 ```
 
-Most gadgets ship a `prelude` that re-exports their own API **and** the xark essentials, so a
-single `use <crate>::prelude::*;` is enough. (The shared libraries — `xark-hash`, `xark-curve`,
-`xark-bits` — expose their items at the crate root instead.) Gadget names can collide with a
-circuit's entry function — qualify the call (`xark_sha256::sha256(msg)`) when they do, as the
+Most gadgets ship a `prelude` module that pulls in two things at once: the gadget's own functions
+and types, and xark's prelude.
+
+```rust
+pub mod prelude {
+    pub use crate::*;          // the gadget's own API
+    pub use xark::prelude::*;  // the xark language items
+}
+```
+
+so one import line covers both:
+
+```rust
+use xark_poseidon::prelude::*;   // == `use xark_poseidon::*;` + `use xark::prelude::*;`
+```
+
+The shared libraries (`xark-hash`, `xark-curve`, `xark-bits`) are the exception: they have no
+`prelude`, and their public items sit directly in the crate's top-level module, so you import them
+by path — `use xark_bits::{and32, xor32};`, `use xark_hash::Hash;`, or the
+`xark_curve::weierstrass!` macro.
+
+One gotcha: a glob import is **shadowed by a local definition of the same name**. If your entry
+function is itself called `sha256`, then `sha256(msg)` inside the circuit calls *your* function,
+not the gadget's — so qualify the gadget call as `xark_sha256::sha256(msg)`, as the
 [example circuits](https://github.com/blueshift-gg/xark/tree/master/examples) do.
 
 <Callout title="BN254 is the only field">
@@ -43,7 +63,7 @@ override the field with `xark build --field <F>`, gadgets that transcribe field-
 (everything in this section) are not valid. Build without the flag.
 </Callout>
 
-## The crates
+## Official gadget crates
 
 | Crate | What it gives you | Page |
 | --- | --- | --- |
