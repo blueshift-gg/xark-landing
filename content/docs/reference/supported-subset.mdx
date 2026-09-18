@@ -45,8 +45,9 @@ pub fn circuit(secret: Private<Field>, result: Public<Field>) {
   `while i < N` / `for i in 0..N` where `N` is constant (loops are fully **unrolled**).
 - **Functions:** ordinary function calls, including across crates — **gadgets are just Rust
   libraries** (`xark-sha256`, `xark-poseidon`, …). They're inlined.
-- **Bit / integer gadgets:** `Field::to_bits::<N>()` / `from_bits::<N>()`, comparisons, and the
-  gadget crates, all with **constant** widths.
+- **Bit / integer gadgets:** `Field::to_bits::<N>()` / `from_bits::<N>()`, comparisons and shifts
+  against a native-integer operand, and the gadget crates, all with **constant** widths (a shift
+  amount must be a compile-time constant).
 
 ## Not supported — and what to do instead
 
@@ -66,12 +67,16 @@ pub fn circuit(secret: Private<Field>, result: Public<Field>) {
 If you hit a rejection not covered here, the diagnostic names the exact construct and source
 line — that message is the source of truth.
 
-## Why `Field` doesn't implement `==` / `Ord`
+## Equality is a constraint; ordering needs a width
 
-Native `==`/`<` return a `bool` the host evaluates — but a circuit can't branch on a witness. So
-equality is an **`require_eq(a, b)` constraint**, and comparisons are explicit width-bounded
-gadgets (`N ≤ 252` so `2^(N+1)` stays under the field order). This keeps every operation's
-circuit meaning unambiguous.
+`Field == Field` and `Field != Field` return a `{0,1}` field *wire* — a circuit value, not a
+host `bool`, so a bare `a == b` statement constrains nothing. To pin the values, use the
+constraint `require_eq(a, b)` (or `require_ne(a, b)`).
+
+Ordering is different. A circuit can't branch on a witness, and a `Field` has no fixed width to
+order by. Comparisons are therefore explicit and width-bounded: `x < 100u32` takes its width from
+the operand type, and two witnesses compare with `a.lt::<32>(b)`. A bare `Field < Field` is
+deliberately not provided. Equality never needs a range check, so it costs no decomposition.
 
 <Callout title="Check as you write">
 `xark check <crate-dir>` surfaces every rejection as a `rustc` diagnostic with a source span —
