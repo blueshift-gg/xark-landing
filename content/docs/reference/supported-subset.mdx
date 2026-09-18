@@ -90,8 +90,18 @@ comparing. There is no safe default width, so it has to come from one of two pla
 A bare `Field < Field` is deliberately **not** provided — a silent default (32 bits, say) would be
 a footgun for 64-bit values — and `N` must stay `≤ 252`.
 
-Like equality, a comparison yields a `{0,1}` **wire**: constrain it with `require(x < 100u32)`, or
-use it in a mux.
+Like equality, a comparison yields a `{0,1}` **wire**. Use it as a constraint with
+`require(x < 100u32)`, or as the selector of a **mux** — a branchless conditional that computes
+both sides and picks one:
+
+```rust
+// max(a, b): if a < b take b, else a
+require_eq(out, a + Field::from(a.lt::<32>(b)) * (b - a));
+```
+
+`Field::from(bool)` reinterprets the comparison wire as a `{0,1}` field element at **zero**
+constraint cost, so the select itself is one multiplication. This is the only way to get
+data-dependent behaviour — an `if` on a witness value is rejected.
 
 <Callout title="Check as you write">
 `xark check <crate-dir>` surfaces every rejection as a `rustc` diagnostic with a source span —
