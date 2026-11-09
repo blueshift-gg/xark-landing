@@ -3,36 +3,33 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import init, {
-  preload,
-  prove_preloaded,
-  verify as wasmVerify,
-} from "@blueshift-gg/xark-wasm";
-import { vkBytes } from "@/circuits/minesweeper/artifacts/vk";
+import { keyHash, vkBytes } from "@/circuits/minesweeper/artifacts/vk";
+import {
+  Cell,
+  Minesweeper,
+  type MinesweeperVerifier,
+} from "@/circuits/minesweeper/artifacts/minesweeper";
 import {
   CELLS,
   CENTER,
   MINES,
   N,
   SAFE,
-  encodePublicInputs,
-  floodCells,
-  genBoard,
-  neighbourCount,
-  packBoard,
-  randSalt,
-  type CellReveal,
-  type FloodCell,
-  type RevealSet,
+  type FromHouse,
+  type Request,
+  type ToHouse,
 } from "@/lib/minesweeper-shared";
-import { poseidon2Hash2 } from "@/lib/poseidon2";
 
 import { smooth } from "@/utils/easings";
 
 // ── constants ───────────────────────────────────────────────────────────────
 
 const SHAKE = [0, -10, 10, -7, 7, -4, 4, 0];
-const VK = vkBytes;
+
+/** A shown cell's neighbour count, by its `Cell` variant. */
+const COUNT: Partial<Record<Cell, number>> = {
+  Clear: 0, One: 1, Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8,
+};
 
 type CellState = {
   revealed: boolean;
@@ -66,75 +63,56 @@ function shortHex(s: string): string {
   }
 }
 
-// ── wasm helpers ────────────────────────────────────────────────────────────
+// ── the player's verifier ───────────────────────────────────────────────────
 
-let wasmReady: Promise<unknown> | null = null;
-function ensureWasm(): Promise<unknown> {
-  if (!wasmReady) wasmReady = init();
-  return wasmReady;
+let verifier: Promise<MinesweeperVerifier> | null = null;
+/** The verifier, made once: it refuses any verifying key but the one `xark setup` made. */
+function loadVerifier(): Promise<MinesweeperVerifier> {
+  verifier ??= Minesweeper.verifier(vkBytes, { keyHash });
+  verifier.catch(() => (verifier = null));
+  return verifier;
 }
 
-/** Load proving artifacts (xbc + pk) once. Code-split chunk, ~200KB. */
-async function loadProvingArtifacts(): Promise<{
-  xbc: Uint8Array;
-  pk: Uint8Array;
-}> {
-  const [{ xbcBytes }, { pkBytes }] = await Promise.all([
-    import("@/circuits/minesweeper/artifacts/xbc"),
-    import("@/circuits/minesweeper/artifacts/pk"),
-  ]);
-  return { xbc: xbcBytes, pk: pkBytes };
+/** The house's worker, and its answers by request. */
+type House = { worker: Worker; ask: (msg: Request) => Promise<FromHouse> };
+
+function startHouse(): House {
+  const worker = new Worker(
+    new URL("../lib/minesweeper.worker.ts", import.meta.url),
+  );
+  const waiting = new Map<number, (msg: FromHouse) => void>();
+  let next = 0;
+  worker.onmessage = (e: MessageEvent<FromHouse>) => {
+    waiting.get(e.data.id)?.(e.data);
+    waiting.delete(e.data.id);
+  };
+  worker.onerror = (e) => {
+    for (const [id, answer] of waiting) answer({ id, type: "error", message: e.message });
+    waiting.clear();
+  };
+  return {
+    worker,
+    ask: (msg) =>
+      new Promise((resolve) => {
+        const id = next++;
+        waiting.set(id, resolve);
+        worker.postMessage({ id, ...msg } satisfies ToHouse);
+      }),
+  };
 }
 
-/** Build circuit inputs from the board + revealed cells. */
-function buildInputs(
-  board: number[],
-  salt: string,
+/**
+ * Whether `proof` proves the house shows `view` of the board it committed to.
+ * The verifier encodes `commitment` and `view` itself, so a verified proof is
+ * bound to exactly what the page then renders.
+ */
+async function verifyReveal(
+  proof: Uint8Array,
   commitment: string,
-  cells: FloodCell[],
-): Record<string, string> {
-  const revealed = new Array<number>(CELLS).fill(0);
-  const isMine = new Array<number>(CELLS).fill(0);
-  const count = new Array<number>(CELLS).fill(0);
-  for (const { r, c, count: nc } of cells) {
-    const i = r * N + c;
-    revealed[i] = 1;
-    isMine[i] = board[i];
-    count[i] = nc;
-  }
-  const inputs: Record<string, string> = {};
-  for (let i = 0; i < CELLS; i++) inputs[`board[${i}]`] = String(board[i]);
-  inputs.salt = salt;
-  inputs.commitment = commitment;
-  for (let i = 0; i < CELLS; i++) inputs[`revealed[${i}]`] = String(revealed[i]);
-  for (let i = 0; i < CELLS; i++) inputs[`is_mine[${i}]`] = String(isMine[i]);
-  for (let i = 0; i < CELLS; i++) inputs[`count[${i}]`] = String(count[i]);
-  return inputs;
-}
-
-/** Prove + produce a RevealSet for a list of flood cells. */
-async function proveCells(
-  board: number[],
-  salt: string,
-  commitment: string,
-  cells: FloodCell[],
-): Promise<RevealSet> {
-  const inputs = buildInputs(board, salt, commitment, cells);
-  const { proof }: { proof: Uint8Array } = prove_preloaded(inputs);
-  const cellReveals: CellReveal[] = cells.map(({ r, c, count: nc }) => ({
-    r,
-    c,
-    isMine: board[r * N + c] === 1,
-    count: nc,
-  }));
-  return { proof: proof.toBase64(), cells: cellReveals };
-}
-
-/** Verify a reveal against the committed board. */
-async function verify(rs: RevealSet, committed: string): Promise<boolean> {
-  await ensureWasm();
-  const publicInputs = encodePublicInputs(committed, rs.cells);
-  return wasmVerify(VK, Uint8Array.fromBase64(rs.proof), publicInputs);
+  view: Cell[],
+): Promise<boolean> {
+  const v = await loadVerifier();
+  return v.verify(proof, { commitment, view });
 }
 
 // ── component ───────────────────────────────────────────────────────────────
@@ -146,44 +124,39 @@ export function MinesweeperDemo() {
   >("loading");
   const [commitment, setCommitment] = useState("0x…");
   const [proofs, setProofs] = useState(0);
-  const [pending, setPending] = useState<
-    | "loading-artifacts"
-    | "preloading"
-    | "proving"
-    | "verifying"
-    | null
-  >(null);
+  const [pending, setPending] = useState<"proving" | "verifying" | null>(null);
+  const [lastMs, setLastMs] = useState<number | null>(null);
 
-  // Board state lives in refs, not React state: no React devtools leakage.
-  const boardRef = useRef<number[] | null>(null);
-  const saltRef = useRef<string | null>(null);
+  // The board itself never reaches the page: it lives in the house's worker.
+  // The page keeps only the commitment every proof must verify against.
+  const houseRef = useRef<House | null>(null);
   const commitRef = useRef<string | null>(null);
+  // Bumped by each new game, so an answer about an older board is dropped.
+  const gameRef = useRef(0);
 
   const inert = status !== "playing" || pending !== null;
   const flagsUsed = cells.filter((c) => c.flagged).length;
 
-  const applyCells = (cells: CellReveal[]) =>
-    setCells((prev) => {
-      const next = prev.slice();
-      for (const cell of cells) {
-        next[cell.r * N + cell.c] = {
-          revealed: true,
-          count: cell.count,
-          mine: cell.isMine,
-          proving: false,
-          flagged: false,
-        };
-      }
-      return next;
-    });
+  /** Show every cell `view` opens. */
+  const applyView = (view: Cell[]) =>
+    setCells((prev) =>
+      prev.map((cell, i) =>
+        view[i] === Cell.Hidden
+          ? { ...cell, proving: false }
+          : {
+              revealed: true,
+              count: COUNT[view[i]] ?? 0,
+              mine: view[i] === Cell.Mine,
+              proving: false,
+              flagged: false,
+            },
+      ),
+    );
 
-  const markProving = (cells: CellReveal[]) =>
+  const markProving = (idx: number) =>
     setCells((prev) => {
       const next = prev.slice();
-      for (const cell of cells) {
-        const i = cell.r * N + cell.c;
-        next[i] = { ...next[i], proving: true };
-      }
+      next[idx] = { ...next[idx], proving: true };
       return next;
     });
 
@@ -192,54 +165,72 @@ export function MinesweeperDemo() {
       prev.map((c) => (c.proving ? { ...c, proving: false } : c)),
     );
 
+  /**
+   * Ask the house to open `cell` (or start a board), and accept the answer only
+   * if its proof verifies against the commitment and it opens that cell.
+   */
+  const play = useCallback(
+    async (house: House, req: Request): Promise<Cell[] | null> => {
+      const game = gameRef.current;
+      setPending("proving");
+      const answer = await house.ask(req);
+      if (game !== gameRef.current) return null;
+      if (answer.type === "error") throw new Error(answer.message);
+      if (answer.type === "board") {
+        commitRef.current = answer.commitment;
+        setCommitment(shortHex(answer.commitment));
+      }
+      const cell = answer.type === "reveal" ? answer.cell : CENTER;
+      setPending("verifying");
+      const ok =
+        answer.view[cell] !== Cell.Hidden &&
+        (await verifyReveal(answer.proof, commitRef.current!, answer.view));
+      if (game !== gameRef.current) return null;
+      setPending(null);
+      if (!ok) return null;
+      setLastMs(answer.ms);
+      setProofs((p) => p + 1);
+      applyView(answer.view);
+      return answer.view;
+    },
+    [],
+  );
+
   const newGame = useCallback(async () => {
+    const house = houseRef.current;
+    if (!house) return;
+    const game = ++gameRef.current;
+    commitRef.current = null;
     setStatus("loading");
     setProofs(0);
     setPending(null);
     setCells(blank());
+    setCommitment("0x…");
     try {
-      // Generate board + salt + commitment locally — no server, no API call.
-      const board = genBoard();
-      const salt = randSalt();
-      const comm = poseidon2Hash2(
-        packBoard(board),
-        BigInt(salt),
-      ).toString();
-      boardRef.current = board;
-      saltRef.current = salt;
-      commitRef.current = comm;
-      setCommitment(shortHex(comm));
-
-      // Load artifacts + preload prover
-      await ensureWasm();
-      setPending("loading-artifacts");
-      const { xbc, pk } = await loadProvingArtifacts();
-      setPending("preloading");
-      preload(xbc, pk);
-
-      // Opening reveal: prove + verify the center cell (guaranteed safe)
-      setPending("proving");
-      const r = Math.floor(CENTER / N);
-      const c = CENTER % N;
-      const opening = await proveCells(board, salt, comm, [
-        { r, c, count: neighbourCount(board, r, c) },
-      ]);
-      setPending("verifying");
-      if (!(await verify(opening, comm)))
-        throw new Error("opening proof invalid");
-      applyCells(opening.cells);
-      setProofs(1);
-      setPending(null);
+      // The house commits to a board and proves the opening reveal: the
+      // centre, guaranteed safe.
+      const view = await play(house, { type: "new" });
+      if (game !== gameRef.current) return;
+      if (!view) throw new Error("opening proof invalid");
       setStatus("playing");
-    } catch {
+    } catch (err) {
+      if (game !== gameRef.current) return;
+      console.error("minesweeper:", err);
       clearProving();
       setPending(null);
       setStatus("error");
     }
-  }, []);
+  }, [play]);
 
   useEffect(() => {
+    const house = startHouse();
+    houseRef.current = house;
     newGame();
+    return () => {
+      house.worker.terminate();
+      houseRef.current = null;
+      gameRef.current++;
+    };
   }, [newGame]);
 
   useEffect(() => {
@@ -253,41 +244,27 @@ export function MinesweeperDemo() {
 
   const open = useCallback(
     async (idx: number) => {
+      const house = houseRef.current;
       if (
+        !house ||
         status !== "playing" ||
         pending !== null ||
         cells[idx].revealed ||
         cells[idx].flagged
       )
         return;
-      const board = boardRef.current!;
-      const salt = saltRef.current!;
-      const comm = commitRef.current!;
-      const r = Math.floor(idx / N);
-      const c = idx % N;
-
-      setPending("proving");
-      markProving([{ r, c, isMine: false, count: 0 }]);
+      markProving(idx);
       try {
-        // Flood locally, then prove + verify
-        const flooded = floodCells(board, r, c);
-        const rs = await proveCells(board, salt, comm, flooded);
-        setPending("verifying");
-        markProving(rs.cells);
-        if (await verify(rs, comm)) {
-          applyCells(rs.cells);
-          setProofs((p) => p + 1);
-          if (rs.cells.some((cell) => cell.isMine)) setStatus("lost");
-        } else {
-          clearProving();
-        }
-      } catch {
+        const view = await play(house, { type: "open", cell: idx });
+        if (!view) clearProving();
+        else if (view.includes(Cell.Mine)) setStatus("lost");
+      } catch (err) {
+        console.error("minesweeper:", err);
         clearProving();
-      } finally {
         setPending(null);
       }
     },
-    [status, pending, cells],
+    [status, pending, cells, play],
   );
 
   const toggleFlag = useCallback(
@@ -446,19 +423,17 @@ export function MinesweeperDemo() {
                     : "xk-ms-msg"
                 }
               >
-                {status === "loading"
-                  ? "Committing a board…"
-                  : pending === "loading-artifacts"
-                    ? "Loading prover…"
-                    : pending === "preloading"
-                      ? "Preparing circuit…"
-                      : pending === "proving"
-                        ? "Generating proof…"
-                        : pending === "verifying"
-                          ? "Verifying proof…"
-                          : status === "error"
-                            ? "Prover unavailable."
-                            : "Proving locally in your browser."}
+                {status === "error"
+                  ? "Prover unavailable."
+                  : status === "loading" && pending !== "verifying"
+                    ? "Committing a board…"
+                    : pending === "proving"
+                      ? "Generating proof…"
+                      : pending === "verifying"
+                        ? "Verifying proof…"
+                        : lastMs !== null
+                          ? `Proved in ${Math.round(lastMs)} ms, in your browser.`
+                          : "Proving locally in your browser."}
               </span>
               {status === "error" ? (
                 <button className="xk-ms-reset" onClick={newGame}>
