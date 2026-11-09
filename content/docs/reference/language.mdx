@@ -1,0 +1,123 @@
+---
+title: The xark crate
+description: What use xark::prelude::* brings into a circuit — Field, inputs, and the require family.
+---
+
+A circuit crate depends on `xark` alone:
+
+```toml
+[dependencies]
+xark = "0.3"
+```
+
+and imports the language with one line:
+
+```rust
+use xark::prelude::*;
+```
+
+## The prelude
+
+| Item | What it is |
+|---|---|
+| `#[circuit]` | Marks the circuit's entry function, and generates a validator of the same name for tests and host code |
+| `Field` | An element of the BN254 scalar field: `+ - * /`, `.pow(n)`, comparisons, `.to_bits::<N>()` |
+| `Private<T>`, `Public<T>` | An input the prover keeps secret, or one the verifier sees |
+| `require`, `require_eq`, `require_ne`, `require_lt`, `require_le`, `require_gt`, `require_ge` | Constraints: the proof exists only if they hold |
+| `bind` | Binds a public input that no constraint uses, such as a recipient a proof is for |
+| `#[input]`, `Input` | Inputs as structs and enums, packed into as few field elements as they fit |
+| `Days`, `Time`, `Timestamp`, `Text`, `Choice`, `Bitfield`, `Country` | Everyday input types for credential-style circuits |
+
+A crate builds one circuit: its single `#[circuit]` function is the entry. Plain functions it calls
+— in the same crate or in gadget crates — are ordinary Rust.
+
+## Inputs
+
+Each parameter of the `#[circuit]` function is an input, `Private<T>` or `Public<T>`. `T` is any
+`Input` type:
+
+- `Field`;
+- `u8`–`u128`, `i8`–`i128` and `bool`, range-checked to their width on entry (an `iN` as its two's
+  complement, a `bool` to 0 or 1);
+- fixed-size arrays of these (`[u8; 32]` is range-checked byte-wise), tuples, and `#[input]`
+  structs and enums;
+- the everyday types above, and gadget types such as a signature or a public key.
+
+Public inputs reach the verifier in the order the circuit declares them; `xark inspect` prints it.
+See [Inputs](/docs/reference/inputs) for `#[input]` and the everyday types.
+
+## Constraints
+
+`require(cond)` takes a circuit `bool`, such as a comparison; `require_eq(a, b)` and its siblings
+take two values. Each emits constraints, so a proof exists only if it holds — it isn't a check the
+prover can skip.
+
+```rust
+require_eq(secret.pow(3), result);
+require(age >= 18);              // `age` a `u8` input
+require_lt(x, 100u32);
+```
+
+`a == b` and `a != b` on their own give a circuit `bool` and constrain nothing; wrap them in
+`require`, or use `require_eq` / `require_ne`. `assert!` and Rust's overflow and bounds checks on
+witness values also become constraints.
+
+A public input that no constraint uses — a recipient, a nonce — isn't tied to the proof until you
+pass it to `bind`. Then the proof verifies only with the value it was made for, so no one can reuse
+it for another (front-run a withdrawal to their own address, say):
+
+```rust
+#[circuit]
+pub fn withdraw(note: Private<Note>, root: Public<Field>, recipient: Public<Field>) {
+    require_eq(note.root(), root);
+    bind(recipient);
+}
+```
+
+`bind` costs one constraint per field element of the value.
+
+## `Field`
+
+A `Field` is a residue modulo BN254's 254-bit scalar prime. It supports `+`, `-`, `*`, `/`, unary
+`-`, compound assignment, and `.pow(n)` for a constant `n`. Multiplication by a constant is free;
+only `var * var` emits a gate. `^` is boolean XOR, not a power: each operand must be 0 or 1.
+
+A `Field` has no width, so ordering, shifts and remainders need one, and it always comes from the
+expression:
+
+- **Against a native integer**, its type supplies the width: `x < 100u32` treats `x` as a 32-bit
+  value and range-checks it; `x >> 3u16` and `x % 8u8` work the same way. `==` needs no width, so
+  `x == 0` works with an untyped literal; an ordering does, so write `x < 5u32`, not `x < 5`.
+- **Between two `Field`s**, there is no integer to carry a width, so you spell it out:
+  `a.lt::<32>(b)`, `gt`, `le`, `ge` range-check **both** operands (`N ≤ 252`).
+
+There is no bare `Field < Field`: a silent default width would be a footgun for 64-bit values.
+A value too wide for the width you state makes the circuit unsatisfiable, never an unsound accept.
+Decompositions are cached per `(value, width)`, so comparing and shifting the same value at the
+same width pays for one range check.
+
+`Field::from(b)` turns a `bool` into a `{0, 1}` field value at no cost, so a comparison can select
+between two values:
+
+```rust
+// max(a, b): if a < b take b, else a
+let max = a + Field::from(a.lt::<32>(b)) * (b - a);
+```
+
+`Field::to_bits::<N>()` and `Field::from_bits::<N>()` convert to and from `N` little-endian bits.
+`Field::from` takes `u8` to `u128`; a wider constant is `Field::from("<decimal>")`.
+
+## Integers
+
+Native `uN` and `iN` values on witnesses work as in Rust: comparisons (signed too), wrapping and
+checked `+ - *`, `/` and `%` (by a witness too), bitwise operations, shifts (by a witness amount
+too), and `as` casts — widening is free, narrowing truncates. An overflow that would panic becomes a
+constraint. Prefer integer inputs over `Field` where a value is an integer: the width is then part
+of the type.
+
+## On the host
+
+Circuit code also runs as plain Rust: `Field` arithmetic, comparisons and gadgets compute their
+values, and a failed `require` panics at its line, so tests and services call the same helpers the
+circuit does. After `xark build`, `xark::prover` loads the built circuit to check and prove inputs
+from Rust. See [Test a circuit](/docs/guides/testing).

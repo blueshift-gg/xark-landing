@@ -29,29 +29,31 @@ Two phases:
 
 ## What this means for the examples
 
-The examples use:
+The examples run:
 
 ```bash
-xark setup --insecure-dev-mode
+xark setup <circuit-dir>
 ```
 
-This derives keys deterministically with **no secrecy at all** — the "toxic waste" is public, so
-anyone can forge proofs. That is completely fine for learning and local testing, and **completely
-unsafe for anything holding value.** The flag is named to make sure you never ship it by accident.
+With no Powers-of-Tau transcript, xark makes the keys itself from OS randomness: a **1-of-1 trusted
+setup**. xark never writes the toxic waste down, so the keys are sound unless whoever ran the
+command kept it — fine for learning and for anything where you're the party everyone trusts
+anyway, but not for a deployment where users shouldn't have to trust the deployer.
 
-For a real deployment, xark runs an actual phase-2 ceremony:
+For that, xark runs an actual phase-2 ceremony:
 
 ```bash
 xark ceremony ...
 ```
 
 with Schnorr proofs-of-knowledge and δ-consistency pairing checks so each contribution is
-verifiable. This is one of the places xark does real work where prototype tooling just hands
-you dev keys — see xark's `docs/trusted-setup.md`.
+verifiable. Every verifier `xark export` generates records which kind of setup its key came from,
+so you can check before you deploy. See [The trusted setup](/docs/trust/trusted-setup).
 
 ## The one rule
 
-> **Never deploy a circuit to mainnet with `--insecure-dev-mode` keys.** Use keys from a ceremony
-> you trust. If you can't point to the ceremony, treat the proofs as forgeable.
+> **Know where your keys came from.** For anything holding value, use keys from a ceremony you
+> trust. If you can't point to the ceremony, treat the proofs as forgeable by whoever made the
+> keys.
 
 Next: [your ZK journey — where to go from here →](/docs/learn-zk/05-your-zk-journey)

@@ -10,13 +10,13 @@ dumps; every one earns its place).
 ## The path
 
 **Step 1 — Run example 01 (today, ~20 min).**
-[`01-over-9000`](/examples). Prove a range, verify it on devnet. Goal: get the toolchain
-working and *feel* the prove → export → verify loop end to end.
+[`01-over-9000`](/examples). Prove a range, then verify it in an in-process Solana VM or on devnet.
+Goal: get the toolchain working and *feel* the build → prove → export → verify loop end to end.
 
 **Step 2 — Learn just enough of xark's Rust subset (a day).**
-You only need the basics: `Field`, `Private`/`Public`, `require_eq`, arrays, functions, and what
-the [supported subset](/docs/reference/supported-subset) accepts. Rewrite example 01 from scratch
-without looking.
+You only need the basics: `Private<T>`/`Public<T>`, integer inputs, `require`, arrays, fixed
+loops, functions, and what the [supported subset](/docs/reference/supported-subset) accepts. Keep
+`xark check` running in your editor. Rewrite example 01 from scratch without looking.
 
 **Step 3 — Build with commitments (example 02).**
 [`02-age-verification`](/examples). This is the leap from "toy proof" to "useful
@@ -42,8 +42,8 @@ first (that's 80% of the design), then the circuit, then the program.
 ## Curated resources
 
 **xark & its Rust subset**
-- [The supported subset](/docs/reference/supported-subset) — what lowers to a circuit and what's
-  rejected. Start here.
+- [The xark crate](/docs/reference/language) and [the supported subset](/docs/reference/supported-subset)
+  — the language, and what lowers to a circuit and what's rejected. Start here.
 - [The xark repo](https://github.com/blueshift-gg/xark) — `gadgets/` for the hash/curve/signature
   crates and `examples/` for runnable circuits.
 
@@ -52,13 +52,10 @@ first (that's 80% of the design), then the circuit, then the program.
   want the math to click.
 - *"Why and How zk-SNARK Works"* (Maksym Petkus) — a longer, patient derivation if you want depth.
 
-**Groth16 / setup**
-- The [snarkjs](https://github.com/iden3/snarkjs) README — walks the setup → prove → verify flow
-  concretely (and xark is snarkjs-compatible, so it transfers directly).
-
 **xark itself**
 - The [xark repo](https://github.com/blueshift-gg/xark) — `docs/architecture.md` for how it fits
-  together, `docs/trusted-setup.md` for ceremonies, `docs/security.md` for the soundness story.
+  together, `docs/security.md` for the soundness story, and [The trusted setup](/docs/trust/trusted-setup)
+  for ceremonies.
 
 ## A note on taste
 
@@ -67,4 +64,4 @@ system, understand their trust assumptions, keep circuits small, and test relent
 real verifier. That's the whole discipline. You already have the pieces — go build something that
 should have been private all along.
 
-← back to [Learn ZK](/docs) · [the examples](/docs)
+← back to [the introduction](/docs) · [the examples](/docs/guides/examples)

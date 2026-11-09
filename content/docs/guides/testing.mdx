@@ -1,0 +1,94 @@
+---
+title: Test a circuit
+description: Call the circuit like a function from cargo test, read the failing line, and reuse circuit code on the host.
+---
+
+A circuit is a Rust crate, and you test it with `cargo test`. This guide shows how to write those
+tests and run them.
+
+## Run the tests
+
+```sh
+xark test my-circuit
+```
+
+`xark test` builds the circuit, then runs the crate's tests in release mode. Arguments after the
+crate directory go to `cargo test` as you'd give them to it: a test-name filter, cargo flags, and
+after `--` the test binary's own.
+
+```sh
+xark test my-circuit accepts      # only tests whose name contains `accepts`
+xark test my-circuit -- --nocapture
+```
+
+Bare `cargo test` works too: a test whose circuit is missing, or older than any source it was built
+from (the crate's `src/` and `Cargo.toml`, and its path dependencies, gadget crates included),
+rebuilds it first with the `xark` on `PATH` (or `$XARK`, if set).
+
+## Call the circuit
+
+`#[circuit]` generates a validator under the circuit's name: the same parameters, each taking
+whatever converts to it. A `Field` takes an integer, a decimal or `0x`-hex string, or an
+`ark_bn254::Fr`; a gadget's input types take their natural form, such as an Ed25519 public key's 32
+bytes or a Grumpkin point's `(x, y)`. It returns `Ok` when the inputs satisfy the circuit:
+
+```rust
+#[test]
+fn accepts_a_cube_root() {
+    cube(3, 27).unwrap();
+    assert!(cube(3, 28).is_err());
+}
+```
+
+To check that the circuit *rejects* something, assert the call is an `Err`. Test the rejections as
+carefully as the happy path: a missing constraint shows up only as a proof that should have failed
+and didn't.
+
+## Read a failure
+
+Inputs that fail a check are reported as the statement that fails — in tests, in `xark prove`, and
+in the TypeScript client alike:
+
+```text
+error: witness does not satisfy the circuit
+
+  src/lib.rs:96:20  id.nationality.require_in(policy.allowed);
+```
+
+Every build writes `sources.json` beside `circuit.xbc` for this: which source line each constraint
+came from. The circuit itself is unchanged by it.
+
+## Reuse circuit code on the host
+
+Circuit code also runs as plain Rust on the host: `Field` arithmetic, comparisons, hints and whole
+gadgets compute their values, and a failed `require` panics at its line. So tests and services call
+the same helpers the circuit does. `zkyc`'s tests make the issuer's commitment with
+`id.commitment()`, the very function the circuit checks it with, and `pubkey.verify(sig, digest)`
+checks an ECDSA signature off-circuit. (Calling the `#[circuit]` function itself still checks the
+circuit through the prover.)
+
+After `xark build`, `xark::prover` loads the built circuit to check and prove inputs from Rust, and
+a circuit crate needs only the `xark` dependency for it. See [Inputs](/docs/reference/inputs) for
+the `<Fn>Inputs` struct it takes.
+
+## Prove with the inputs a test used
+
+To prove end to end from the command line, pass the same values to `xark prove`:
+
+```sh
+xark prove my-circuit --inputs '{"secret": 3, "result": 9}'
+xark prove my-circuit --inputs inputs.json
+```
+
+`--inputs` takes inline JSON or a file: a JSON object, or `name = value` lines. `xark setup` writes
+`inputs.example.json` beside the keys, one entry per input in its natural form, to fill in.
+
+## Check that nothing is left unconstrained
+
+```sh
+xark check my-circuit --inputs '{"secret": 3, "result": 9}'
+```
+
+With `--inputs`, `xark check` builds the circuit, solves the witness from those inputs, and reports
+any derived variable the constraints fail to pin — a value a malicious prover could change without
+breaking a constraint.

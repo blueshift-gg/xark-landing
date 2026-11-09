@@ -6,84 +6,76 @@ description: The files xark writes, and the two encodings — native and on-chai
 xark writes proofs and keys in two encodings, for two audiences. Knowing which is which saves you a
 lot of "why doesn't this verify" confusion.
 
-- **Native (`.bin`)** — Arkworks canonical serialization (`Compress::Yes`, validated on read),
-  byte-for-byte what `ark-groth16` 0.6 produces. This is what `xark verify` reads off-chain, and it
-  is the authoritative form.
-- **On-chain (`.solana.bin`)** — a 32-byte **little-endian**, uncompressed wire format that Solana's
-  `alt_bn128` syscalls consume directly. Different byte order, different compression — see
-  [How verification works](/docs/guides/how-verification-works).
-- **JSON** — snarkjs-compatible, coordinates as decimal strings. See
-  [snarkjs interop](/docs/reference/snarkjs).
+- **Native (`.bin`)** — Arkworks canonical serialization (`Compress::Yes`, validated on read):
+  byte-for-byte what `ark-groth16` 0.6 produces for `VerifyingKey<Bn254>` and `Proof<Bn254>`. This
+  is what `xark verify` and `@blueshift-gg/xark`'s `verify` read off-chain.
+- **On-chain (`.solana.bin`)** — every field element 32 bytes **little-endian**, points
+  uncompressed, G2 as `(c0, c1)`, and a proof as `−A ‖ B ‖ C` (256 bytes). This is what Solana's
+  `alt_bn128` syscalls consume; `xark export` writes it, and a TypeScript client's
+  `proof.toBytes()` is a proof in it. See [How verification works](/docs/guides/how-verification-works).
+
+`xark verify --proof`, `@blueshift-gg/xark`'s `verify` and a client verifier take a proof in either
+form, telling them apart by length (128 bytes compressed, 256 on-chain).
 
 ## Artifacts
 
-A normal `xark build` writes **one** circuit file: `circuit.xbc`. The JSON siblings are opt-in via
-`--emit-json`, because serializing them dominates build time (multi-GB on heavy circuits such as
-ed25519) and nothing at prove / check / setup time reads them.
-
-| File | Encoding | Produced by | Contents |
-| --- | --- | --- | --- |
-| `circuit.xbc` | XBC bytecode | `build` | the DAG-compact circuit — the **only** circuit file a normal build writes, and what `prove` / `check` / `setup` load |
-| `circuit.json` | JSON | `build --emit-json` | the human-readable primitive / witness program |
-| `r1cs.json` | JSON | `build --emit-json` | the flat R1CS (variables + constraints); pretty-printed at ≤ 1M constraints, compact above |
-| `graph.dot` | DOT | `build --emit-json` | debug graph of the R1CS; written only at ≤ 1M constraints |
-| `profile.json` | JSON | `profile` | per-constraint source / function / kind attribution |
-| `r1cs.min.wcz` | binary | `setup --cache` / `prove --cache` | minimized R1CS cache, so a later prove skips the minimize + validate |
-| `pk.bin` | native | `setup` | `ProvingKey<Bn254>` |
-| `vk.bin` | native | `setup` | `VerifyingKey<Bn254>` |
-| `proof.bin` | native | `prove` | `Proof<Bn254>` |
-| `public_inputs.bin` | native | `prove` | the N public scalars |
-| `metadata.json` | JSON | `setup` | circuit fingerprint, `setup_mode`, `production_safe` |
-| `snarkjs-*.json` | JSON | `setup`/`prove` | vk / proof / public, decimal strings |
-| `verifying_key.solana.bin` | on-chain LE | `export` | VK, little-endian |
-| `proof.solana.bin` | on-chain LE | `export` | 256 B, `−A ‖ B ‖ C` |
-| `public_inputs.solana.bin` | on-chain LE | `export` | N × 32 B, little-endian |
-| `instruction_data.bin` | on-chain LE | `export` | `proof ‖ public_inputs` (what you submit) |
-
-## The circuit artifact and the JIT prover
-
-`circuit.xbc` is **not** a flat list of constraints. xark treats a circuit's functions as reusable
-functions and stores the circuit as a **DAG-compact bytecode** — each distinct function body once,
-plus small `(function, base, plugs)` call records — then expands it on demand at setup/prove time.
-This is the "JIT prover" model, and it is purely a packaging decision: the expanded circuit is
-byte-identical to the flat lowering, and a build-time gate (`XARK_VERIFY`, on for every test build)
-decodes the artifact with an independent decoder and asserts equality, aborting on any divergence.
-
-The practical effect is on artifact size on disk, not on proof cost:
-
-| Circuit | Flat | DAG-compact |
+| File | Written by | Contents |
 | --- | --- | --- |
-| ed25519 scalar mult | ~99 MB | ~1.1 MB |
-| secp256k1 ECDSA | 33 MB | 2.4 MB |
-| Keccak | 2.7 MB | 0.8 MB |
+| `circuit.xbc` | `xark build` | the circuit, as DAG-compact bytecode — what every later command loads |
+| `schema.json` | `xark build` | the circuit's inputs: names, types, public or private, and the public inputs in proof order |
+| `sources.json` | `xark build` | which source statement each constraint came from |
+| `digest` | `xark build` | the circuit digest `xark build` prints |
+| `circuit.json`, `r1cs.json` | `xark build --emit-json` | human-readable views, for debugging; nothing reads them back |
+| `profile.json`, `profile.html` | `xark profile` | each constraint's source line, function chain and kind |
+| `pk.bin` / `vk.bin` | `xark setup` | a short header + `ProvingKey<Bn254>` / `VerifyingKey<Bn254>` |
+| `metadata.json` | `xark setup`, `xark ceremony finalize` | how the key was made, and the circuit it was made for |
+| `inputs.example.json` | `xark setup` | every input in its natural form, to fill in for `xark prove` |
+| `r1cs.stream` | `xark setup` (a `minimized` key) | the keyed rows, so `xark prove` skips the minimize |
+| `pk.decoded.bin` | `xark prove --cache` | the proving key with uncompressed points |
+| `proving_key.bin` / `verifying_key.bin` | `xark ceremony` | the same as `pk.bin` / `vk.bin`, from the ceremony |
+| `proof.bin` | `xark prove`, `@blueshift-gg/xark`'s `prove` | `Proof<Bn254>` |
+| `public_inputs.bin` | `xark prove`, `@blueshift-gg/xark`'s `prove` | an 8-byte little-endian count, then each value as 32 bytes little-endian |
+| `verifying_key.solana.bin` | `xark export` | the verifying key, on-chain layout |
+| `proof.solana.bin` | `xark export` | 256 bytes, `−A ‖ B ‖ C` |
+| `public_inputs.solana.bin` | `xark export` | N × 32 bytes, little-endian |
+| `instruction_data.bin` | `xark export` | `proof ‖ public_inputs`, on-chain layout |
 
-Alongside the bytecode, xark runs a **linear-variable-elimination** pass on the R1CS — Gaussian
-elimination that substitutes away every internal variable defined by a linear constraint, to a
-fixpoint. It is satisfiability-preserving in both directions, so it changes the circuit's size (and
-therefore the proving-key and FFT-domain cost) without changing what is proven. `--cache` persists
-the result as `r1cs.min.wcz` so a later `xark prove` reloads it instead of re-deriving it.
+A proving key's header (14 bytes) states whether its points are compressed (the default) or
+uncompressed (`xark setup --uncompressed`), and its QAP domain size. A key with a smooth domain
+(`3·2^k` or `9·2^k` points, the default without a `.ptau`) can be proved against only by xark's
+provers.
 
-`xark inspect <crate>` reports the variable / constraint / public-input counts, and
-`xark profile <crate>` attributes each constraint to its source line, function chain, and kind.
+Public inputs are in exactly the order the circuit declares its public parameters. The verifier
+consumes this order verbatim.
 
-## metadata.json and circuit hash
+## The circuit artifact
 
-`circuit_hash` is the **SHA-256 of the circuit artifact xark loaded** — the `circuit.xbc` bytes by
-default, or the `r1cs.json` text when one is supplied via `--r1cs` (or is all that exists). Either
-way it binds the field, the variable table (which fixes the number, identity, and order of the
-public inputs), and every constraint (coefficients and variable indices). If the constraint system
-changes, the hash changes — which is how xark detects that a proof and a verifying key belong to
-different circuits.
+`circuit.xbc` is **not** a flat list of constraints. A signature circuit is hundreds of thousands
+of constraints built from a handful of routines — a field multiply, a point add or double — run
+thousands of times. So xark stores each repeated piece once as a template, every other occurrence
+as a small call record, and rolls long periodic runs; setup and proving expand it on demand. The
+expanded circuit is exactly the flat one.
 
-`metadata.json` carries that hash alongside key provenance: `protocol`, `curve`, `backend_version`,
-`num_public_inputs`, `num_constraints`, and how the keys were made (`setup_mode`, `production_safe`,
-and — for production keys — `ptau_source` and a `phase2_seed_hash`). The `setup_mode` /
-`production_safe` values are covered under [The trusted setup](/docs/trust/trusted-setup); `export`
-refuses to emit a verifier for a non-`production_safe` key unless you pass `--allow-insecure`.
+| Circuit | Constraints | `circuit.xbc` |
+| --- | ---: | ---: |
+| `ed25519` | 396,912 | 6.2 MB |
+| `secp256k1_ecdsa` | 227,168 | 4.5 MB |
+| `keccak256` | 89,375 | 404 KB |
+
+## metadata.json
+
+`metadata.json` records the circuit a key was made for — `circuit_hash` (the SHA-256 of that
+build's `circuit.xbc`), the circuit `digest`, the constraint and public-input counts — and how the
+key was made: `setup_mode`, `production_safe`, the deterministic seed if one was used, and for a
+`.ptau` setup its `ptau_source` and a `phase2_seed_hash`. It also records the R1CS form, the domain
+size, and the verifying key's SHA-256. The setup modes are covered under
+[The trusted setup](/docs/trust/trusted-setup).
+
+`xark prove`, `xark verify` and `xark export` read it to refuse a key made for another build of the
+circuit, and `xark export` to record how the key was made in the generated crate.
 
 <Callout title="A convenience check, not tamper-proof">
 `metadata.json` is a plain JSON file next to the keys — nothing signs it or binds it into
-`pk.bin` / `vk.bin`, so anyone who can edit the files can rewrite it. `export` / `prove` read it to
-stop your own slip-ups (e.g. proving circuit B with keys made for circuit A); it is **not** a
-security boundary.
+`pk.bin` / `vk.bin`, so anyone who can edit the files can rewrite it. xark reads it to stop your own
+slip-ups (e.g. proving circuit B with keys made for circuit A); it is **not** a security boundary.
 </Callout>

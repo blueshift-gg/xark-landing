@@ -5,125 +5,94 @@ description: What lowers to a circuit — and what's rejected, before you spend 
 
 xark compiles a **restricted subset of Rust** to an arithmetic circuit. You write ordinary Rust
 and `rustc` type-checks it, but only constructs with a well-defined *fixed arithmetic* meaning
-are accepted — everything else is rejected at build time as a real `rustc` diagnostic pointing
-at the source span. It never emits an unsound proof for a construct it doesn't understand.
+are accepted — everything else is rejected at build time with a diagnostic pointing at the source
+line. It never emits a proof for a construct it doesn't understand.
 
 ## The mental model
 
-A circuit is a **fixed system of arithmetic constraints over a finite field**, decided entirely
-at compile time. It has no runtime: no value-dependent control flow, no data-dependent memory
-access, no I/O. Rule of thumb:
+A circuit is a **fixed system of arithmetic constraints over a finite field**. xark builds it by
+compiling your crate to wasm with stable `rustc` and *running* it with every witness value kept
+symbolic: constants, loop counters and indices simply execute (that is the unrolling and
+inlining), and every operation on a witness becomes constraints. Rule of thumb:
 
-> **Everything that decides the *shape* of the circuit — loop lengths, array indices, branch
-> conditions, array sizes — must be a compile-time constant. Only `Field` *values* may depend on
-> the inputs.**
-
-`Field` is the field-element type (BN254 scalar). `Private<Field>`/`Public<Field>` mark input
-visibility. `require_eq(a, b)` emits an equality **constraint** (it does *not* return a native
-`bool`).
+> **Everything that decides the *shape* of the circuit — loop lengths, array sizes, which memory
+> is touched — must be known at compile time, or provably take only a few values. Witness
+> *values* may flow anywhere, including into `if`s.**
 
 ```rust
-#![no_std]
 use xark::prelude::*;
 
 /// Prove knowledge of a cube root: `secret^3 == result`.
-pub fn circuit(secret: Private<Field>, result: Public<Field>) {
+#[circuit]
+pub fn cube(secret: Private<Field>, result: Public<Field>) {
     require_eq(secret.pow(3), result);
 }
 ```
 
 ## Supported
 
-- **Types:** `Field`; fixed-size arrays `[Field; N]` (nested too); tuples and plain structs of
-  `Field`, with **constant** array lengths.
-- **`Field` arithmetic:** `+`, `-`, `*`, `/`, unary `-`, and exponentiation via `x.pow(n)`.
-  Multiplication by a constant is free (folds into a linear combination); only `var * var`
-  emits a gate.
-- **Constants & host integers:** integer literals and `usize`/`u*` values for loop bounds,
-  indices, widths — as long as they're compile-time constants.
-- **Control flow, compile-time only:** `if cond { … } else { … }` where `cond` is constant;
-  `while i < N` / `for i in 0..N` where `N` is constant (loops are fully **unrolled**).
-- **Functions:** ordinary function calls, including across crates — **gadgets are just Rust
-  libraries** (`xark-sha256`, `xark-poseidon`, …). They're inlined. See [Gadgets](/docs/gadgets).
-- **Bit / integer gadgets:** `Field::to_bits::<N>()` / `from_bits::<N>()`, comparisons and shifts
-  against a native-integer operand, and the gadget crates, all with **constant** widths (a shift
-  amount must be a compile-time constant).
+- **Types:** `Field`; `u8`..`u128` and `i8`..`i128`; `bool`; fixed-size arrays (nested too);
+  tuples and structs of these. A circuit parameter is any `Input` type: these, `#[input]`
+  structs, the [everyday types](/docs/reference/inputs), and gadget types. Integer and `bool`
+  inputs are range-checked on entry.
+- **`Field` arithmetic:** `+`, `-`, `*`, `/`, unary `-`, compound assignment (`+=`, …), and
+  `.pow(n)` for a **constant** `n`. Multiplication by a constant is free; only `var * var` emits
+  a gate. `a == b` / `a != b` give a circuit `bool`. Ordering needs a width — see
+  [`Field`](/docs/reference/language#field).
+- **Native integers on witnesses:** comparisons (signed too), wrapping and checked `+ - *`, `/` and
+  `%` (by a witness too), bitwise operations, shifts (by a witness amount too), and `as` casts —
+  widening is free, narrowing truncates, as in Rust.
+- **Control flow:** `if` and `match` on anything (see below); loops with a constant bound, or a
+  witness bound small enough that the loop provably ends (e.g. `0..(x & 3)`); iterators and
+  adapters over arrays and constant ranges; `assert!` and overflow and bounds checks on witnesses,
+  each of which becomes a constraint.
+- **Memory:** `&mut` borrows, slices, `copy_from_slice`, nested-array rows. An index that depends
+  on a witness works when it can take at most 1024 values (`t[(x & 7) as usize]`,
+  `t[x as u8 as usize]`, a `match` lookup table): it becomes a select over every possible slot.
+- **Functions:** ordinary calls, including across crates — **gadgets are just Rust libraries** —
+  plus generics, trait objects, function pointers and recursion, as long as the call target and
+  depth don't depend on a witness.
+- **Bits:** `Field::to_bits::<N>()` / `from_bits::<N>()` and the gadget crates, with **constant**
+  widths.
+
+## Branches on witness values
+
+An `if` (or `match`) whose condition depends on a witness runs **both** arms and selects the
+results. What an arm *requires* binds only when that arm is taken:
+
+- A requirement inside an arm (`require_eq`, `assert!`, checked arithmetic, a range check) holds
+  only when the arm is taken; in the untaken arm it is vacuous. A check you need unconditionally
+  belongs *before* the `if`.
+- An arm that can only panic (an `assert!` that fails, `/ 0`, an out-of-bounds index) is treated
+  as impossible: the circuit requires the condition to go the other way. If both arms panic, the
+  inputs are rejected.
+- A loop whose exit depends on a witness and isn't provably short is refused at build time
+  ("a loop whose exit depends on a witness value can't be unrolled").
 
 ## Not supported — and what to do instead
 
 | You wrote | Why it's rejected | Do this instead |
 |---|---|---|
-| `a += b`, `a -= b`, `a *= b` | compound assignment on `Field` isn't modeled | `a = a + b` |
-| `for x in slice` / iterators | iterator desugaring isn't a circuit operation | `for i in 0..N { let x = arr[i]; }` |
-| `while cond` on a `Field`-derived `cond` | witness-dependent control flow — the loop length would depend on inputs | make the bound a constant |
-| `if secret_field == 0 { … }` | branches can't depend on a witness value | compute both sides and **mux**: `b + cond·(a − b)` with a boolean `cond` |
-| `arr[i]` where `i` is a `Field`/input | witness-dependent indexing can't be lowered | use a constant or loop-counter index; for a data-dependent choice, mux |
+| `while i < n` / `for i in 0..n` with `n` an unbounded witness | the loop length would depend on the witness | bound it with a constant (`for i in 0..MAX { if i < n { … } }`) |
+| `arr[i]` with `i` a wide witness (a `u32`, a `Field`) | a select over more than 1024 slots | narrow the index (`(i & 7) as usize`), or select by hand |
 | `let n = read_len(); [Field; n]` | array length must be constant | use a `const` / const-generic `N` |
-| `&mut x` on a `Field` | a mutable borrow of a `Field` isn't supported | restructure to `x = …` (SSA-style) |
-| `foo(a)` via a trait object / fn pointer | indirect / dynamic calls aren't supported | call the function directly (it gets inlined) |
-| a function that calls itself | recursion isn't supported (no runtime stack) | unroll to a fixed depth, or use a loop with a constant bound |
-| `a == b` as a *statement* | `==` returns a `{0,1}` **wire**, not a constraint — a bare comparison constrains nothing | `require_eq(a, b)` |
-| `a != b` as a *statement* | same: it returns a wire | `require_ne(a, b)` |
-| reading a whole inner array out of a nested one (`grid[i]` as a value) | only *scalar* nested access is modeled | rebuild element-by-element: `for j in 0..M { row[j] = grid[i][j]; }` |
-| `x as u8` on a `Field` | only compile-time integer casts are supported | keep field values as `Field`; use bit gadgets for byte views |
+| `#[circuit] fn c<const N: usize>(xs: Private<[Field; N]>)` | the entry is built once, with fixed sizes | a `const N` for the parameter, or a generic helper called with a fixed `N` |
+| calling through a fn pointer / trait object chosen by a witness | the call target would depend on the witness | branch on the witness and call each function directly |
+| `hash2(k, 0)` where the parameter is a `Field` | Rust never turns a literal into a `Field` argument (`x * 2`, `2 * x`, `x == 0` do work) | `hash2(k, 0.into())` or `Field::from(0)` |
+| `x as u8` on a `Field` | `Field` isn't a primitive integer | `Field::to_bits::<N>()` and recombine, or keep values as `uN` |
+| a memory fill or copy whose size depends on a witness | the memory layout would depend on the witness | use fixed-size buffers |
+| `f32` / `f64` arithmetic on a witness | floats only run on constants | fixed-point integers or `Field` |
+| two `#[circuit]` functions in one crate | a crate builds one circuit | one crate per circuit (workspace members work), sharing plain functions |
 
-If you hit a rejection not covered here, the diagnostic names the exact construct and source
-line — that message is the source of truth.
-
-## Equality is a constraint; ordering needs a width
-
-`Field == Field` and `Field != Field` return a `{0,1}` field *wire* — a circuit value, not a
-host `bool` — so a bare `a == b` statement constrains nothing. To pin the values, use the
-constraint `require_eq(a, b)` (or `require_ne(a, b)`). Equality is exact at any size, so it needs
-no range check: it costs a couple of constraints rather than an `N`-bit decomposition.
-
-Ordering is different. A `Field` is a residue mod `p`, not an integer of a fixed width, so "`a` is
-less than `b`" only means something once you say how many bits the values occupy. A comparison is
-therefore **explicit about its width** and range-checks its witness operand(s) to `< 2ᴺ` before
-comparing. There is no safe default width, so it has to come from one of two places:
-
-- **Against a literal**, the literal's type supplies it: in `x < 100u32`, the `u32` says "treat `x`
-  as a 32-bit value and compare it with 100". `>`, `<=`, `>=` work the same way.
-- **Between two witnesses**, no literal carries a width, so you spell it out: `a.lt::<32>(b)`
-  range-checks **both** operands. `gt`, `le`, `ge` have the same shape.
-
-A bare `Field < Field` is deliberately **not** provided — a silent default (32 bits, say) would be
-a footgun for 64-bit values — and `N` must stay `≤ 252`.
-
-Like equality, a comparison yields a `{0,1}` **wire**. Use it as a constraint with
-`require(x < 100u32)`, or as the selector of a **mux** — a branchless conditional that computes
-both sides and picks one:
-
-```rust
-// max(a, b): if a < b take b, else a
-require_eq(out, a + Field::from(a.lt::<32>(b)) * (b - a));
-```
-
-`Field::from(bool)` reinterprets the comparison wire as a `{0,1}` field element at **zero**
-constraint cost, so the select itself is one multiplication. This is the only way to get
-data-dependent behaviour — an `if` on a witness value is rejected.
+If you hit a rejection not covered here, the diagnostic names the exact construct and source line
+— that message is the source of truth.
 
 <Callout title="Check as you write">
-`xark check <crate-dir>` surfaces every rejection as a `rustc` diagnostic with a source span —
-live in your editor via `rust-analyzer`, or in CI with `--message-format=json`. A violation looks
-like:
-
-```text
-error: witness-dependent control flow is not supported
- --> src/lib.rs:7:5
-note: branch conditions must be compile-time constants (e.g. loop bounds)
-```
+`xark check <crate-dir>` reports every rejection as a compiler diagnostic with a source span —
+live in your editor via `rust-analyzer` (a crate `xark init` made is already set up), or in CI with
+`--message-format=json`. See [the CLI](/docs/reference/cli#xark-check-crate-dir).
 </Callout>
 
-## Testing a circuit
-
-Circuit crates are tested with **`xark test <crate-dir>`**, not bare `cargo test`: it builds the
-`target/xark/` artifacts first, then runs the crate's tests, which load the built circuit and check
-the witness solves. A rejecting test asserts the solve is `Err`. For a one-off end-to-end run,
-`xark build <crate-dir>` followed by `xark prove <crate-dir> --inputs '{…}'` takes you from source
-to a self-verified proof; see [the CLI](/docs/reference/cli).
-
-See [the CLI](/docs/reference/cli) for the full command surface,
-[Gadgets](/docs/gadgets) for the crates you can call, and
-[the repo's `subset.md`](https://github.com/blueshift-gg/xark/blob/master/docs/subset.md) for the
-complete rejection list.
+See [The xark crate](/docs/reference/language) for the language itself,
+[Gadgets](/docs/gadgets) for the crates you can call, and [Test a circuit](/docs/guides/testing)
+for checking that what you wrote means what you meant.

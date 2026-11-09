@@ -1,0 +1,120 @@
+---
+title: TypeScript clients
+description: Generate a typed client from your circuit, then prove in the browser or Node and verify on a server.
+---
+
+`xark client` generates a typed TypeScript client from a circuit's inputs. It proves and verifies
+in Node, the browser or a Worker, with the circuit's own types and helper functions. This guide
+uses `examples/zkyc`, a private credential check against a public policy.
+
+## Generate the client
+
+```sh
+xark client                                  # writes target/xark/<circuit>/<circuit>.ts
+npm install @blueshift-gg/xark@0.3           # the runtime it imports
+```
+
+`xark client` builds the circuit if needed and writes one `.ts` file: a type per enum, an
+interface per `#[input]` struct, the inputs, the public inputs (as given and as decoded), and the
+circuit, which makes its provers and verifiers. The circuit's `schema.json` is inlined, so the file
+has no relative import and needs no project settings. Everything clients share — `Field`, `Proof`,
+loading the WebAssembly prover — comes from `@blueshift-gg/xark/client`.
+
+Each type is the one you'd write by hand:
+
+```ts
+export interface Identity {
+  document: Text;              // a string, at most 31 bytes
+  born: Date;                  // a day, 1900-01-01 to 2100-12-31 (UTC)
+  nationality: Country;        // Country.US, or "US"; "XX" won't compile
+  netWorth: U64;               // bigint | number
+  expires: Date;
+  salt: FieldInput;            // a Field, or an integer
+}
+```
+
+## Prove and verify
+
+A prover and a verifier are separate, each made from a URL serving a copy of
+`target/xark/<circuit>/` or from the files' bytes. A proof travels as its bytes; the verifier
+brings the public inputs it requires:
+
+```ts
+import { Country, Field, Identity, Policy, Zkyc } from "./zkyc";
+
+// In the app: fetches circuit.xbc, pk.bin, sources.json and client.wasm.
+const prover = await Zkyc.prover("/circuits/zkyc/");
+const id = { document: "A1938274", born: new Date("1990-01-01"), nationality: Country.US, netWorth: 1_000_000, expires: new Date("2030-01-01"), salt: new Field(saltBytes) };
+const commitment = Identity.commitment(id); // the circuit's own Rust
+const policy = Policy.default().on(new Date()).minAge(18).nationalities([Country.US, Country.GB, "FR", "DE"]);
+const proof = prover.prove({ id, commitment, policy });
+send(proof.toBytes(), commitment);
+
+// On the server: check it proves the policy you require, not just any.
+const verifier = await Zkyc.verifier(vkBytes); // or a URL, or { verifyingKey, client }
+verifier.verify(bytes, { commitment, policy: required }); // true
+```
+
+Outside a browser, pass the files' bytes instead of a URL:
+`Zkyc.prover({ circuit: readFileSync("…/circuit.xbc"), provingKey: …, client: … })`.
+
+`proof.toBytes()` is the proof as the Solana verifier `xark export` generates reads it (256
+bytes), so a program checks it against public inputs it supplies itself.
+`proof.toBytesCompressed()` is half the size, for anywhere else; a verifier reads either.
+
+## Call the circuit's Rust from TypeScript
+
+`Policy.default().on(…).minAge(18)` and `Identity.commitment(id)` above are the crate's Rust, not a
+TypeScript copy of it. Put `#[input]` on an `impl` block and its methods become client functions,
+typed from their signatures and documented with their doc comments:
+
+```rust
+#[input]
+impl Policy {
+    /// Checked on `today`: the holder's document mustn't have expired by then.
+    pub fn on(self, today: impl Into<Days<1900, 2100>>) -> Policy { … }
+    /// At least `years` old on `today` (set it with `on` first).
+    pub fn min_age(self, years: u16) -> Policy { … }
+}
+```
+
+A trait's `impl` works the same way: `impl Default` gives `Policy.default()`. `xark client` builds
+the crate's host code once more as `client.wasm`, beside `circuit.xbc`; a Rust panic arrives as an
+exception with its message. If your crate's host code doesn't build for wasm, pass
+`--no-functions`.
+
+## Pin the circuit and the key
+
+To be sure the prover runs the circuit the client was generated from, and not whatever a
+deployment serves, pin it:
+
+```ts
+const prover = await Zkyc.prover(url, { digest: Zkyc.digest });  // the digest `xark build` printed
+const verifier = await Zkyc.verifier(vk, { keyHash });           // the sha256 `xark setup` printed
+```
+
+The digest check is one pass over the circuit when the prover is made, not per proof.
+
+## Prove on several threads
+
+Give the prover a worker pool from `@blueshift-gg/xark/pool`:
+
+```ts
+import { createPool } from "@blueshift-gg/xark/pool";
+
+const prover = await Zkyc.prover(url, { pool: await createPool() });
+```
+
+In a browser this needs a cross-origin isolated page
+(`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`), and the
+proving call must run in a Web Worker.
+
+## Handle errors
+
+A mistake names its input before anything reaches the prover
+(`id.document: "…" is longer than 31 bytes`). Errors are typed for a UI to act on: an `InputError`
+carries the input's `path` (`"id.document"`), and a `CheckFailed` the failing statement's `site`
+(`file`, `line`, `col`, `text`).
+
+For the untyped API underneath — proving from `circuit.xbc` and `pk.bin` with a plain object of
+inputs — see [Proving in the browser](/docs/guides/browser-proving).

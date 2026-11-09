@@ -12,8 +12,10 @@ over the circuit, this is *one fixed binary* for every circuit, not one per circ
 
 Determinism comes from pinning everything that touches codegen:
 
-- **Toolchain** — `cargo-build-sbf` from the Anza `stable` channel (a specific `platform-tools` and
-  `rustc`), the only thing that compiles the SBF target.
+- **Toolchain** — the `platform-tools` bundle (the SBF `rustc`, LLVM and linker), pinned explicitly
+  with `cargo-build-sbf --tools-version v1.54`. It's the only thing that determines the SBF code, so
+  it — not the Anza CLI release that provides `cargo-build-sbf` — is what's pinned: two different
+  `cargo-build-sbf` releases given the same `--tools-version` produce byte-identical `.so`s.
 - **Release profile** — `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`,
   `strip = "symbols"`, `incremental = false` — forbidding the two things that break determinism in
   practice: multi-codegen-unit parallelism and incremental builds.
@@ -30,10 +32,12 @@ whose build drifts from it.
 # build the reference verifier
 cargo build-sbf \
   --manifest-path crates/verifier/reference-program/Cargo.toml \
-  --sbf-out-dir build-out/ -- --locked
+  --sbf-out-dir build-out/ \
+  --tools-version v1.54 \
+  -- --locked
 
 # check it against the committed hash
-shasum -a 256 -c crates/verifier/reference-program/expected.sha256
+cd build-out && shasum -a 256 -c ../crates/verifier/reference-program/expected.sha256
 
 # and against what's actually deployed
 solana program dump <PROGRAM_ID> deployed.so
@@ -41,6 +45,11 @@ shasum -a 256 deployed.so
 ```
 
 A mismatch between the deployed program and the reference hash is a security-relevant finding.
+
+The reference program reads its verifying key from an account, which is what lets one binary serve
+every circuit. A program built on an exported verifier crate embeds its key instead; for that, run
+the same recipe on your own program crate — pinned toolchain, release profile, `--locked` — and pin
+*its* hash.
 
 <Callout title="What this does and doesn't catch">
 It catches **source-vs-deployed drift, toolchain drift, and dependency drift** — the deployed bytes
