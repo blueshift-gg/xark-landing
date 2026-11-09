@@ -1,7 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 
 import { keyHash, vkBytes } from "@/circuits/minesweeper/artifacts/vk";
 import {
@@ -61,6 +67,27 @@ function shortHex(s: string): string {
   } catch {
     return "0x…";
   }
+}
+
+/** A cell's place, as a person reads it: 1-based. */
+function place(idx: number): string {
+  return `row ${Math.floor(idx / N) + 1}, column ${(idx % N) + 1}`;
+}
+
+/** What a screen reader says for a cell: where it is and what it shows. */
+function cellLabel(cell: CellState, idx: number): string {
+  const what = cell.proving
+    ? "proving"
+    : cell.revealed && cell.mine
+      ? "mine"
+      : cell.revealed
+        ? cell.count === 0
+          ? "no mines nearby"
+          : `${cell.count} ${cell.count === 1 ? "mine" : "mines"} nearby`
+        : cell.flagged
+          ? "flagged"
+          : "hidden";
+  return `${place(idx)}: ${what}`;
 }
 
 // ── the player's verifier ───────────────────────────────────────────────────
@@ -126,6 +153,12 @@ export function MinesweeperDemo() {
   const [proofs, setProofs] = useState(0);
   const [pending, setPending] = useState<"proving" | "verifying" | null>(null);
   const [lastMs, setLastMs] = useState<number | null>(null);
+  // What the live region last announced: each proof's verdict.
+  const [said, setSaid] = useState("");
+  // The one cell in the tab order (a roving tabindex); arrows move it.
+  const [focusIdx, setFocusIdx] = useState(CENTER);
+  const cellRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const newBoardRef = useRef<HTMLButtonElement | null>(null);
 
   // The board itself never reaches the page: it lives in the house's worker.
   // The page keeps only the commitment every proof must verify against.
@@ -167,10 +200,11 @@ export function MinesweeperDemo() {
 
   /**
    * Ask the house to open `cell` (or start a board), and accept the answer only
-   * if its proof verifies against the commitment and it opens that cell.
+   * if its proof verifies against the commitment and it opens that cell: the
+   * view it showed, `"rejected"`, or `null` for an answer about an older board.
    */
   const play = useCallback(
-    async (house: House, req: Request): Promise<Cell[] | null> => {
+    async (house: House, req: Request): Promise<Cell[] | "rejected" | null> => {
       const game = gameRef.current;
       setPending("proving");
       const answer = await house.ask(req);
@@ -187,7 +221,7 @@ export function MinesweeperDemo() {
         (await verifyReveal(answer.proof, commitRef.current!, answer.view));
       if (game !== gameRef.current) return null;
       setPending(null);
-      if (!ok) return null;
+      if (!ok) return "rejected";
       setLastMs(answer.ms);
       setProofs((p) => p + 1);
       applyView(answer.view);
@@ -211,14 +245,17 @@ export function MinesweeperDemo() {
       // centre, guaranteed safe.
       const view = await play(house, { type: "new" });
       if (game !== gameRef.current) return;
-      if (!view) throw new Error("opening proof invalid");
-      setStatus("playing");
+      if (view !== "rejected" && view !== null) {
+        setStatus("playing");
+        setSaid("New board committed. The centre is open, and its proof verified.");
+      } else throw new Error("opening proof invalid");
     } catch (err) {
       if (game !== gameRef.current) return;
       console.error("minesweeper:", err);
       clearProving();
       setPending(null);
       setStatus("error");
+      setSaid("Prover unavailable.");
     }
   }, [play]);
 
@@ -239,8 +276,11 @@ export function MinesweeperDemo() {
       (n, c) => n + (c.revealed && !c.mine ? 1 : 0),
       0,
     );
-    if (safe === SAFE) setStatus("won");
-  }, [cells, status]);
+    if (safe === SAFE) {
+      setStatus("won");
+      setSaid(`Board cleared. ${proofs} proofs verified.`);
+    }
+  }, [cells, status, proofs]);
 
   const open = useCallback(
     async (idx: number) => {
@@ -256,16 +296,48 @@ export function MinesweeperDemo() {
       markProving(idx);
       try {
         const view = await play(house, { type: "open", cell: idx });
-        if (!view) clearProving();
-        else if (view.includes(Cell.Mine)) setStatus("lost");
+        if (view === null) return;
+        if (view === "rejected") {
+          clearProving();
+          setSaid(`The proof for ${place(idx)} didn't verify, so it stays hidden.`);
+        } else if (view.includes(Cell.Mine)) {
+          setStatus("lost");
+          setSaid(`Proof verified: ${place(idx)} is a mine. Game over.`);
+        } else {
+          const opened = view.filter((c, i) => c !== Cell.Hidden && !cells[i].revealed).length;
+          setSaid(`Proof verified: ${opened} ${opened === 1 ? "cell" : "cells"} opened.`);
+        }
       } catch (err) {
         console.error("minesweeper:", err);
         clearProving();
         setPending(null);
+        setSaid("The prover failed, so the cell stays hidden.");
       }
     },
     [status, pending, cells, play],
   );
+
+  /** Arrow keys move along the board; `F` flags the focused cell. */
+  const onGridKey = (e: KeyboardEvent, idx: number) => {
+    const r = Math.floor(idx / N);
+    const c = idx % N;
+    const to = {
+      ArrowUp: r > 0 ? idx - N : idx,
+      ArrowDown: r < N - 1 ? idx + N : idx,
+      ArrowLeft: c > 0 ? idx - 1 : idx,
+      ArrowRight: c < N - 1 ? idx + 1 : idx,
+      Home: r * N,
+      End: r * N + N - 1,
+    }[e.key];
+    if (to !== undefined) {
+      e.preventDefault();
+      setFocusIdx(to);
+      cellRefs.current[to]?.focus();
+    } else if (e.key === "f" || e.key === "F") {
+      e.preventDefault();
+      toggleFlag(idx);
+    }
+  };
 
   const toggleFlag = useCallback(
     (idx: number) => {
@@ -308,6 +380,10 @@ export function MinesweeperDemo() {
           <span className="xk-dot" /> BOARD COMMITTED
         </span>
       </div>
+
+      <p className="xk-sr" role="status" aria-live="polite">
+        {said}
+      </p>
 
       <AnimatePresence mode="wait">
         {isResult ? (
@@ -353,7 +429,14 @@ export function MinesweeperDemo() {
               >
                 Verify yourself
               </a>
-              <button type="button" className="xk-btn-dark" onClick={newGame}>
+              <button
+                type="button"
+                className="xk-btn-dark"
+                onClick={newGame}
+                // The board, and the cell that had focus, are gone: keep the
+                // keyboard where play goes next.
+                ref={(el) => el?.focus({ preventScroll: true })}
+              >
                 New board
               </button>
             </div>
@@ -374,7 +457,10 @@ export function MinesweeperDemo() {
 
             <div
               className={inert ? "xk-ms-grid is-busy" : "xk-ms-grid"}
-              aria-label="minesweeper board"
+              role="group"
+              aria-label="Minesweeper board, 9 by 9"
+              aria-describedby="xk-ms-keys"
+              aria-busy={pending !== null}
             >
               {cells.map((cell, idx) => {
                 const cls = [
@@ -389,17 +475,26 @@ export function MinesweeperDemo() {
                 ]
                   .filter(Boolean)
                   .join(" ");
+                // Not `disabled`: a disabled button can't hold focus, so the
+                // keyboard would lose its place each time a cell opens.
                 return (
                   <button
                     key={idx}
+                    type="button"
+                    ref={(el) => {
+                      cellRefs.current[idx] = el;
+                    }}
                     className={cls}
+                    tabIndex={idx === focusIdx ? 0 : -1}
+                    onFocus={() => setFocusIdx(idx)}
+                    onKeyDown={(e) => onGridKey(e, idx)}
                     onClick={() => open(idx)}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       toggleFlag(idx);
                     }}
-                    disabled={inert || cell.revealed}
-                    aria-label={`cell ${Math.floor(idx / N)},${idx % N}`}
+                    aria-disabled={inert || cell.revealed}
+                    aria-label={cellLabel(cell, idx)}
                   >
                     {cell.revealed && cell.mine ? (
                       <span className="xk-ms-bomb" />
@@ -414,6 +509,10 @@ export function MinesweeperDemo() {
                 );
               })}
             </div>
+
+            <p id="xk-ms-keys" className="xk-sr">
+              Arrow keys move between cells, Enter opens one, F flags it.
+            </p>
 
             <div className="xk-ms-foot">
               <span
@@ -436,7 +535,7 @@ export function MinesweeperDemo() {
                           : "Proving locally in your browser."}
               </span>
               {status === "error" ? (
-                <button className="xk-ms-reset" onClick={newGame}>
+                <button type="button" className="xk-ms-reset" onClick={newGame}>
                   retry
                 </button>
               ) : (
