@@ -94,7 +94,7 @@ exposes:
 | `verify_strict`, `verify_instruction_data_strict` | also reject non-canonical point encodings |
 | `Proof::from_le_bytes(&[u8; 256])` | read a proof in the on-chain layout |
 | `NUM_PUBLIC_INPUTS`, `VK_BYTES` | the circuit's public-input count; the raw verifying key |
-| `SETUP` | how the embedded key was made: `seeded`, `single-party`, `ceremony` or `unknown` |
+| `SETUP` | how the embedded key was made: `seeded`, `single-party`, `ceremony` (two or more contributors) or `unknown` |
 
 Every function returns `false` on any failure — a non-holding pairing, a malformed point, or a
 non-canonical public input. The underlying `xark-verifier` crate is `#![no_std]` on Solana, so it
