@@ -1,6 +1,6 @@
 ---
 title: The trusted setup
-description: Why Groth16 needs a ceremony, and how xark runs one.
+description: Why Groth16 needs a ceremony, which setup to use when, and how xark runs one.
 ---
 
 Groth16 is fast and its proofs are tiny, but it has one cost: a per-circuit **trusted setup**.
@@ -8,11 +8,29 @@ Producing the keys generates secret randomness — the "toxic waste" `(τ, α, �
 knows it can forge a valid proof for *any* statement, no matter how correct the verifier is. The
 whole game is to generate the keys so that **no single party ever knows that secret**.
 
-<Callout type="warn" title="Dev keys know the secret">
-`xark setup --insecure-dev-mode` derives the keys from a recoverable trapdoor — it prints
-`WARNING: setup_mode = insecure-dev-mode. Do not use in production.` It is for tests and demos only.
-Its `metadata.json` records `production_safe: false`.
-</Callout>
+Knowing `τ` (phase 1) breaks every circuit built on that Powers-of-Tau transcript; knowing
+`(γ, δ)` (phase 2) breaks only the one circuit.
+
+## Three ways to make a key
+
+| How | Command | Sound unless | Verifier `SETUP` |
+| --- | --- | --- | --- |
+| Single party, OS randomness | `xark setup` with no `.ptau` (or the first `xark prove`) | whoever ran it kept the randomness | `single-party` |
+| Single party, on a public phase 1 | `xark setup --ptau-file <file>` | whoever ran it kept the phase-2 seed, or every phase-1 contributor colluded | `single-party` |
+| Multi-party ceremony | `xark ceremony …` | every phase-2 contributor kept their randomness, or every phase-1 contributor colluded | `ceremony` |
+
+A key made without a `.ptau` is a 1-of-1 trusted setup: xark draws the randomness from the OS and
+never writes it down, so the key is sound unless whoever ran `xark setup` kept it. That's fine when
+you are the party everyone has to trust anyway — tests, demos, your own service. For anything where
+users shouldn't have to trust the deployer, run a ceremony.
+
+A **seeded** key (`xark setup --insecure-dev-mode --deterministic-rng <SEED>`) derives the
+randomness from a seed, so anyone who knows the seed can forge proofs. It exists to regenerate test
+fixtures reproducibly and nothing else; its verifier's `SETUP` is `seeded`.
+
+`xark export` exports any key, and records how it was made: the generated crate's `SETUP` constant
+and README say `seeded`, `single-party`, `ceremony`, or `unknown` (no `metadata.json` beside the
+key). A deploy script can refuse a verifier whose `SETUP` it doesn't accept.
 
 ## Two phases
 
@@ -21,12 +39,13 @@ A Groth16 ceremony has two parts, and xark treats them very differently:
 - **Phase 1 — universal, circuit-independent.** The "powers of tau." You should **not** roll your
   own: reuse a large public transcript like the
   [Perpetual Powers of Tau](https://github.com/privacy-scaling-explorations/perpetualpowersoftau),
-  which has hundreds of contributors — a far stronger "at least one was honest" assumption than
-  anything you'd run locally. `xark setup --ptau-file <file>` reads the standard `.ptau` format
-  directly.
+  which has far more contributors — a far stronger "at least one was honest" assumption than
+  anything you'd run locally. xark reads the standard snarkjs `.ptau` format directly. The
+  transcript must cover the circuit: `2^power` at least its constraint count plus public inputs
+  (`xark inspect` prints both); `ceremony init` says how big it needs to be if it's too small.
 - **Phase 2 — circuit-specific.** xark runs this itself; no external prover is in the loop. Each
-  contributor injects fresh secret randomness `δ_i`, publishes a Schnorr proof of their contribution,
-  and the chain is checked with δ-consistency pairing checks.
+  contributor injects fresh secret randomness `δ_i`, publishes a Schnorr proof of their
+  contribution, and the chain is checked with δ-consistency pairing checks.
 
 ## Running the ceremony
 
@@ -34,46 +53,62 @@ A Groth16 ceremony has two parts, and xark treats them very differently:
 <Step>
 ### Seed it from a phase-1 transcript
 ```sh
-xark build <crate> --emit-json   # ceremony init reads the circuit's r1cs.json
-xark ceremony init --r1cs target/xark/<name>/r1cs.json \
-  --ptau-file final.ptau --phase2-seed $SEED --out ceremony/
+xark build my-circuit
+xark ceremony init my-circuit --ptau-file final.ptau --out ceremony/
 ```
+`init` reads the circuit's `circuit.xbc`. `--phase2-seed <HEX>` reproduces byte-identical initial
+keys from the same circuit and `.ptau`.
 </Step>
 <Step>
 ### Each contributor adds randomness
 ```sh
 xark ceremony contribute --ceremony-dir ceremony/ --label alice
 ```
-Every contribution rewrites the keys in place and appends a signed `contribution_NNNN.json`.
+Every contribution rewrites the keys in place and records an attestation.
 </Step>
 <Step>
 ### Anyone verifies the chain
 ```sh
-xark ceremony verify --ceremony-dir ceremony/
+xark ceremony verify my-circuit --ceremony-dir ceremony/ --ptau-file final.ptau
 ```
-Third parties should run this independently against the published transcript.
+This checks the chain, and that the keys are the circuit's — recomputed from `final.ptau` — with
+only δ changed. Third parties should run it independently, each from their own build of the circuit
+and their own copy of the `.ptau`.
 </Step>
 <Step>
 ### Finalize
 ```sh
-xark ceremony finalize --ceremony-dir ceremony/
+xark ceremony finalize my-circuit --ceremony-dir ceremony/ --ptau-file final.ptau
 ```
-Writes the final `metadata.json` with `setup_mode: "phase2-from-ptau+mpc[N contributors]"` and
-`production_safe: true`.
+Verifies once more, then writes `metadata.json` with
+`setup_mode: "phase2-from-ptau+mpc[N contributors]"` and the verifying key's SHA-256.
 </Step>
 </Steps>
 
-## Setup modes at a glance
+The keys are `ceremony/proving_key.bin` and `ceremony/verifying_key.bin`. Prove and export with
+them:
 
-| How the keys were made | `production_safe` | `setup_mode` |
-| --- | :---: | --- |
-| `--insecure-dev-mode` | `false` | `insecure-dev-mode` |
-| `xark setup --ptau-file` | `true` | `phase2-from-ptau` |
-| `xark ceremony …` | `true` | `phase2-from-ptau+mpc[N contributors]` |
+```sh
+xark prove my-circuit --inputs '{"secret": 3, "result": 9}' --proving-key ceremony/proving_key.bin
+xark export my-circuit --verifying-key ceremony/verifying_key.bin
+```
 
 <Callout title="What a real deployment needs">
-A single phase-2 contribution (`setup --ptau-file`) is honest but weak — it trusts one party's `δ`.
-For anything holding value: multiple independent phase-2 contributors, each publishing their
+Fixed entropy, seeds and beacons make *test* runs reproducible; they are not secure. A production
+ceremony needs multiple **independent** phase-1 contributors and a public randomness beacon (or a
+large public transcript); multiple independent phase-2 contributors, each publishing their
 attestation; `xark ceremony verify` run by third parties; and the full transcript published so
 anyone can check it.
 </Callout>
+
+## `metadata.json` at a glance
+
+| How the keys were made | `setup_mode` | `production_safe` |
+| --- | --- | :---: |
+| `xark setup` without a `.ptau` | `insecure-dev-mode` | `false` |
+| `xark setup --ptau-file` | `phase2-from-ptau` | `true` |
+| `xark ceremony finalize` | `phase2-from-ptau+mpc[N contributors]` | `true` |
+
+A seeded key also records its `deterministic_rng_seed`; a `.ptau` setup records `ptau_source` and a
+`phase2_seed_hash` (the seed itself must be discarded right after setup). `metadata.json` is a
+convenience record, not a signature: see [Serialization & artifacts](/docs/reference/serialization#metadatajson).
