@@ -1,4 +1,4 @@
 {
   "title": "Reference",
-  "pages": ["cli", "supported-subset", "serialization", "snarkjs", "folding-and-recursion"]
+  "pages": ["cli", "language", "inputs", "supported-subset", "serialization", "folding-and-recursion"]
 }

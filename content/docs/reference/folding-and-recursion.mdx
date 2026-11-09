@@ -7,9 +7,9 @@ xark's recursion story is built on the **BN254↔Grumpkin 2-cycle**. Grumpkin is
 `y² = x³ − 17` over BN254's scalar field `Fr`, so Grumpkin coordinates are ordinary circuit
 `Field`s and every Grumpkin group operation is a handful of **native** constraints. That makes the
 compute-heavy half of folding verification cheap: a full Nova fold step verifies in-circuit in
-**~9k constraints**, where non-native EC would cost millions.
+**~6k constraints**, where non-native EC would cost millions.
 
-Everything on this page is verified in the repository's test suite (accept + tamper-reject + a
+Everything on this page is verified in the repository's test suite (accept, tamper-reject, and a
 Groth16 proof), and is exposed as runnable examples rather than a finished library API. There is
 no closed IVC yet; the last section says exactly what is missing.
 
@@ -20,13 +20,13 @@ All of these are `#[circuit]` examples under
 
 | Example | Verifies | Constraints |
 | --- | --- | --- |
-| `grumpkin_ipa` | a deferred-MSM accumulator claim `Q = Σⱼ sⱼ·Gⱼ` | 12,212 |
-| `grumpkin_ipa_fold` | the full Halo IPA reduction, with in-circuit Poseidon2 Fiat–Shamir | 40,150 |
-| `grumpkin_nova_fold` | one Nova folding step | 8,859 |
-| `grumpkin_ivc` | a 2-step folding IVC (computation + accumulator chains) | 18,200 |
+| `grumpkin_ipa` | a deferred-MSM accumulator claim `Q = Σⱼ sⱼ·Gⱼ` | 8,188 |
+| `grumpkin_ipa_fold` | the full Halo IPA reduction, with in-circuit Poseidon2 Fiat–Shamir | 26,254 |
+| `grumpkin_nova_fold` | one Nova folding step | 6,191 |
+| `grumpkin_ivc` | a 2-step folding IVC (computation + accumulator chains) | 12,864 |
 | `grumpkin_complete_add` | identity-safe complete Grumpkin addition | 24 |
 
-Alongside them, `grumpkin_nova_prover` is the **host-side prover core**: it extracts a Xark R1CS
+Alongside them, `grumpkin_nova_prover` is the **host-side prover core**: it extracts an xark R1CS
 `(A, B, C)`, folds committed relaxed instances (with the cross-term `T`), runs a multi-step
 stepping loop, and uses a Grumpkin Pedersen commitment. The tests check that the folded relaxed
 instance satisfies `Az ∘ Bz = u·Cz + E` and that the commitment fold is homomorphic.
@@ -52,7 +52,7 @@ confirming the split.
 
 ## The one capability gap
 
-The CycleFold companion is a circuit over **`Fq`** — BN254's *base* field. **Xark is `Fr`-native**:
+The CycleFold companion is a circuit over **`Fq`** — BN254's *base* field. **xark is `Fr`-native**:
 it compiles to a BN254-`Fr` R1CS for Groth16 and has no over-`Fq` target. So the companion circuit
 is **not buildable in xark today**, and a *closed* IVC loop is not available.
 
