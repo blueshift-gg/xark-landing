@@ -1,44 +1,42 @@
 ---
 title: Quickstart
-description: From a Rust circuit to a proof verified on Solana, in six commands.
+description: From a Rust circuit to a proof and a Solana verifier crate, in five steps.
 ---
 
-xark takes a circuit written as ordinary Rust, drives `rustc` to extract its MIR, lowers that
-to R1CS, and proves it with Arkworks Groth16 over BN254 — producing a ~256-byte proof and a
-self-contained Solana verifier. Here is the whole loop.
+In this quickstart you'll write a circuit that proves you know a square root of a public number,
+test it, prove it, and generate the crate a Solana program uses to verify the proof.
 
 <Callout title="Prerequisites">
-xark installs as **two** binaries: `xark` — the CLI, plain **stable** Rust — and `xark-rustc`,
-the `rustc_driver` shim `xark build` runs to extract MIR, which needs a **pinned nightly**.
-Install the nightly, then both crates:
-
-```sh
-rustup toolchain install nightly-2026-05-03 \
-  --profile minimal --component rust-src --component rustc-dev --component llvm-tools
-cargo +nightly-2026-05-03 install xark-rustc   # the MIR driver (pinned nightly)
-cargo install xark-cli                          # the `xark` CLI (stable)
-```
-
-You write **stable Rust** in your circuits — only `xark-rustc` touches nightly. To build the
-on-chain verifier you'll also need the [Anza CLI](https://docs.anza.xyz/cli/install)
+Stable Rust **1.89 or newer** ([rustup](https://rustup.rs)). `xark build` adds the
+`wasm32-unknown-unknown` target with `rustup` the first time it runs. To build the Solana program
+that uses the verifier at the end, you'll also want the [Anza CLI](https://docs.anza.xyz/cli/install)
 (`cargo-build-sbf`).
 </Callout>
 
 <Steps>
 
 <Step>
-### Scaffold a circuit
+### Install the CLI
+
+```sh
+cargo install xark-cli
+xark doctor
+```
+
+`xark doctor` checks your toolchain and tells you how to fix anything that's missing.
+</Step>
+
+<Step>
+### Create a circuit
 
 ```sh
 xark init my-circuit
 ```
 
-Writes a ready-to-edit circuit crate, pre-wired for `rust-analyzer` so subset rejections
-surface inline on save. The starter circuit proves knowledge of a square root —
-`secret * secret == result`:
+This writes a circuit crate that depends on `xark = "0.3"`, set up so `rust-analyzer` shows
+circuit errors inline. Open `my-circuit/src/lib.rs`:
 
 ```rust
-#![cfg_attr(xark, no_std)]
 use xark::prelude::*;
 
 #[circuit]
@@ -46,91 +44,98 @@ pub fn my_circuit(secret: Private<Field>, result: Public<Field>) {
     // prove knowledge of a square root: secret * secret == result
     require_eq(secret * secret, result);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_valid() {
+        my_circuit(2, 4).unwrap(); // 2 * 2 == 4
+    }
+
+    #[test]
+    fn rejects_invalid() {
+        assert!(my_circuit(3, 4).is_err()); // 3 * 3 != 4
+    }
+}
 ```
 
-`Private<Field>` / `Public<Field>` mark input visibility; `require_eq` emits a circuit equality
-constraint (not a native `bool`); `Field` supports `+ - * /`, unary `-`, and exponentiation via
-`x.pow(n)`.
+`secret` is private: only the prover knows it. `result` is public: the verifier sees it.
+`require_eq` is a constraint — the proof exists only if it holds. The tests call the circuit
+like a function, with plain integers for its `Field` inputs.
 </Step>
 
 <Step>
-### Compile the circuit
+### Test it
 
-```sh
-xark build my-circuit
+`xark test` builds the circuit, then runs the crate's tests:
+
+```console
+$ xark test my-circuit
+xark building circuit `my-circuit`
+xark 2 vars, 1 constraints, 0 witness-gen ops
+xark circuit digest 75e3ce529473dfaa2f89a85a0d588228
+...
+test tests::accepts_valid ... ok
+test tests::rejects_invalid ... ok
 ```
 
-Runs `cargo build` on the crate with `xark` itself as the compiler (under one pinned nightly,
-so every dependency is built with matching MIR). The driver finds the circuit entry function,
-extracts its MIR, validates the accepted subset, and lowers it to R1CS. Output lands under
-`target/xark/<name>/` — `circuit.xbc`, the compact circuit (add `--emit-json` for the JSON siblings).
-</Step>
-
-<Step>
-### Inspect what xark sees
-
-```sh
-xark inspect my-circuit
-```
-
-Prints the variable and constraint counts and the **public-input count and order** — the order
-your Solana program must reproduce byte-for-byte. Pass `--json` for machine-readable output.
-</Step>
-
-<Step>
-### Generate proving and verifying keys
-
-```sh
-xark setup my-circuit
-```
-
-<Callout type="warn" title="Dev keys are forgeable">
-With no `.ptau` this produces an **insecure dev key** (single-party randomness) — anyone who
-knows the trapdoor can forge proofs for any statement. Fine for local demos, never for value.
-Real deployments run the [MPC ceremony](/docs/trust/trusted-setup) or derive keys from a
-published `.ptau` with `--ptau-file`.
-</Callout>
-
-Writes `pk.bin`, `vk.bin`, `metadata.json`, and `snarkjs-verification_key.json` under
-`target/xark/<name>/`.
+The whole circuit is one constraint. The digest is a fingerprint of that constraint system: the
+same for every build of this circuit, whichever Rust compiled it.
 </Step>
 
 <Step>
 ### Prove
 
-```sh
-xark prove my-circuit --inputs '{"secret": 2, "result": 4}'
+```console
+$ xark prove my-circuit --inputs '{"secret": 3, "result": 9}'
+...
+✅ Proof produced and self-checked (1 public input(s)).
 ```
 
-Solves the witness from your inputs, then produces and self-verifies a Groth16 proof — a
-witness or lowering bug fails fast instead of shipping a broken proof. Writes `proof.bin` and
-`public_inputs.bin` (plus snarkjs-compatible `snarkjs-proof.json` and `snarkjs-public.json`)
-under `target/xark/<name>/`. `--inputs` takes inline JSON or a path to an input file.
+The first proof also makes the proving and verifying keys. Now try inputs that don't satisfy the
+circuit — xark shows you the line that fails:
+
+```console
+$ xark prove my-circuit --inputs '{"secret": 3, "result": 10}'
+error: witness does not satisfy the circuit
+
+  src/lib.rs:6:16  require_eq(secret * secret, result);
+```
 </Step>
 
 <Step>
-### Verify, then export the on-chain verifier
+### Verify, then export the Solana verifier
 
-```sh
-xark verify my-circuit          # → Proof verified: true
-xark export my-circuit --crate-name my-verifier
+```console
+$ xark verify my-circuit
+✅ Proof verified
+
+$ xark export my-circuit
+...
+✅ On-chain verifier crate ready (verifying key embedded).
 ```
 
-`verify` checks the proof against the verifying key and public inputs. `export` generates
-`target/xark/verifier/` — a self-contained Rust crate with the verifying key baked in at
-compile time, plus a ready-to-submit `instruction_data.bin`.
+`export` writes `my-circuit/my-circuit-verifier/`: a crate with the verifying key embedded,
+and the proof you just made bundled as its self-test.
 </Step>
 
 </Steps>
 
 ## Then, on Solana
 
-The exported crate exposes one function. Your program hands it `proof ‖ public_inputs` and acts
-on the result:
+Your program depends on the generated crate. It reads the 256-byte proof from the instruction
+data and supplies the public inputs it requires itself, from its own state:
 
 ```rust
-if verifier::verify_instruction_data(instruction_data) {
-    // proof valid — act on it
+let Some(proof) = instruction_data.first_chunk::<256>() else {
+    return Err(ProgramError::InvalidInstructionData);
+};
+let proof = my_circuit_verifier::Proof::from_le_bytes(proof);
+let public_inputs: [[u8; 32]; 1] = [/* from your program's state */];
+if !my_circuit_verifier::verify(&proof, &public_inputs) {
+    return Err(ProgramError::InvalidArgument);
 }
 ```
 
@@ -138,14 +143,14 @@ Re-run `xark export` whenever the circuit changes; the generated crate is the on
 updates. For the byte layout and the syscalls behind that one call, see
 [How verification works](/docs/guides/how-verification-works).
 
-<Callout title="Validate as you write">
-`xark check <crate-dir>` runs `rustc`'s frontend *and* xark's subset validator, surfacing every
-rejection as a real `rustc` diagnostic with a source span. With `--message-format=json` it emits
-the same stream as `cargo check`, so your editor shows live rejections on save. `xark init`
-wires this into `rust-analyzer` for you.
+<Callout type="warn" title="Before you deploy">
+The key `xark prove` made is a single-party setup: sound unless whoever ran it kept its
+randomness. xark never writes that randomness down, but a key that holds value should come from a
+setup no single party has to be trusted for. See [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
 <Cards>
-  <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
+  <Card title="Test a circuit" href="/docs/guides/testing" description="Validators, failing lines, and circuit code on the host." />
   <Card title="The CLI, command by command" href="/docs/reference/cli" description="Every subcommand, its flags, and what it writes." />
+  <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
 </Cards>

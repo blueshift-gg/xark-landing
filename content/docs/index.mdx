@@ -3,18 +3,34 @@ title: Introduction
 description: Write zero-knowledge circuits in Rust, prove them with Groth16, verify on Solana.
 ---
 
-xark compiles a circuit written as ordinary Rust into a ~256-byte Groth16 proof and a
+xark compiles a circuit written as ordinary Rust into a 256-byte Groth16 proof and a
 self-contained Solana verifier that checks it through the native `alt_bn128` syscalls.
 A program acts on *"this statement is true"* — an age, a balance, a Merkle membership —
 without ever seeing the private data behind it.
 
-There is no separate circuit DSL: you write a `#![no_std]` Rust function over `Field`
-values, `xark` drives `rustc` to type-check it, extracts its **MIR**, lowers that to R1CS,
-and proves it with Arkworks Groth16 over BN254. Gadgets — hashes, curves, signatures — are
+There is no separate circuit DSL: a circuit is a `#[circuit]` function that stable `rustc`
+compiles to wasm32. xark runs that module with the witness values kept symbolic, lowers what it
+does to R1CS, and proves it with Groth16 over BN254. Gadgets — hashes, curves, signatures — are
 ordinary Rust crates that lower to the same small constraint set.
 
+```rust
+use xark::prelude::*;
+
+/// I know a square root of `result`, and I won't say what it is.
+#[circuit]
+pub fn square_root(secret: Private<Field>, result: Public<Field>) {
+    require_eq(secret * secret, result);
+}
+
+#[test]
+fn only_a_square_root_proves() {
+    square_root(3, 9).unwrap();
+    assert!(square_root(3, 10).is_err());
+}
+```
+
 <Cards>
-  <Card title="Quickstart" href="/docs/quickstart" description="Circuit → proof → on-chain verifier, in six commands." />
+  <Card title="Quickstart" href="/docs/quickstart" description="From cargo install to a Solana verifier crate, in five steps." />
   <Card title="Gadgets" href="/docs/gadgets" description="Hashes, signatures, curves, and AES — the crates you add with cargo." />
   <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the on-chain byte layout." />
@@ -23,18 +39,21 @@ ordinary Rust crates that lower to the same small constraint set.
 
 ## What makes it different
 
-- **Gadgets are plain Rust.** No per-gadget backend opcodes, no separate circuit language.
-  `xark-sha256`, `xark-poseidon`, `xark-secp256k1` are crates you add with `cargo`, inlined
-  into your circuit at compile time. See [Gadgets](/docs/gadgets).
-- **It refuses what it can't prove soundly.** Anything outside the accepted Rust subset is
-  rejected *eagerly, before any setup or proving cost* — as a real `rustc` diagnostic with a
-  source span — never silently mis-proved.
-- **A real trusted setup.** Beyond dev keys, xark runs a multi-contributor phase-2
+- **It's just Rust.** Stable `rustc` (1.89 or newer), your editor, `cargo test`, and crates.
+  `xark-sha256`, `xark-poseidon2`, `xark-secp256k1` are crates you add with `cargo`. See
+  [Gadgets](/docs/gadgets).
+- **Errors point at your code.** Inputs that break the circuit are reported as the line that
+  fails — in tests, at the command line, and in the TypeScript client. Rust the circuit can't
+  express is rejected at its source line before you spend a setup, never silently mis-proved.
+- **Small proofs, cheap verification.** A proof is 256 bytes and verifies on Solana in about
+  77k compute units.
+- **Typed clients.** `xark client` turns your circuit's inputs into a typed TypeScript client that
+  proves and verifies in Node or the browser. See [TypeScript clients](/docs/guides/typescript-clients).
+- **A real trusted setup.** Beyond single-party keys, xark runs a multi-contributor phase-2
   [MPC ceremony](/docs/trust/trusted-setup) with Schnorr proofs of contribution and δ-consistency
   checks.
-- **Machine-checked where it counts.** The gadgets carry [Lean 4 proofs](/docs/trust/formal-proofs-and-audit);
-  the on-chain verifier is checked with Kani; every proof is cross-verified against
-  [snarkjs](/docs/reference/snarkjs).
+- **Machine-checked where it counts.** The core gadgets carry [Lean 4 proofs](/docs/trust/formal-proofs-and-audit)
+  over the constraints they emit, and the on-chain verifier is checked with Kani.
 - **A tiny, `no_std` on-chain verifier** with a [reproducible build](/docs/trust/reproducible-builds)
   you can hash-match against what's actually deployed.
 
