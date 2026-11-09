@@ -8,153 +8,169 @@ usable in a circuit. `xark-bits` is the bit/word layer; `xark-bignum` is the for
 that makes non-native curves possible; `xark-aes` is a full symmetric cipher built on bit
 decomposition.
 
-The single-element primitives (`to_bits` / `from_bits`, booleanity, `and` / `or` / `xor` / `not`)
-are `Field` methods, and so are comparisons, shifts, and modulus against a native-integer operand;
-this crate keeps the **word** layers.
+Single-bit operations (booleanity, `to_bits` / `from_bits`, AND/OR/XOR/NOT on one bit) are methods
+on `xark::Field`, and so are comparisons, shifts and remainders against a native integer; see
+[The xark crate](/docs/reference/language#field). These crates hold the **word** and **limb**
+layers.
 
 ## `xark-bits` — words and bits
 
 A 32-bit word is `[Field; 32]` in **little-endian** bit order (bit `i` has weight `2^i`), and a
-64-bit word is `[Field; 64]`. Every op below operates on those arrays. If a word comes from
-`Field::to_bits::<N>()` its bits are already boolean-pinned; if you assemble one by hand, pin each
-bit yourself.
+64-bit word is `[Field; 64]`. Get one with `Field::to_bits`, which also range-checks the value, and
+turn it back with `Field::from_bits`:
 
 ```rust
+use xark::{circuit, require_eq, Field, Private, Public};
 use xark_bits::{add32, and32, rotr32, xor32};
 
 #[circuit]
 pub fn word_ops(a: Private<Field>, b: Private<Field>, out: Public<Field>) {
-    let ba = a.to_bits::<32>();      // range-checks a < 2^32
+    let ba = a.to_bits::<32>();
     let bb = b.to_bits::<32>();
     let mixed = add32(rotr32(xor32(ba, bb), 7), and32(ba, bb));
     require_eq(Field::from_bits::<32>(mixed), out);
 }
 ```
 
-| Group | Functions |
+| Item | What it does |
 | --- | --- |
-| 32-bit bitwise | `and32`, `xor32`, `or32`, `not32` |
-| 32-bit shifts | `rotr32`, `shr32` (rotations/shifts are free re-wiring) |
-| 32-bit modular add | `add32`, `add3(a, b, c)` (carry-chain decomposition) |
-| 64-bit bitwise | `and64`, `xor64`, `not64` |
-| 64-bit shifts | `rotl64`, `rotr64` |
-| conversions | `to_bits64`, `from_bits64` |
-| helpers | `read_n`, `sha256_iv` |
+| `and32`, `or32`, `xor32`, `not32` | Bitwise operations on 32-bit words |
+| `and64`, `xor64`, `not64` | The same on 64-bit words |
+| `rotr32`, `shr32`, `rotl64`, `rotr64` | Rotations and shifts — rewiring only, no constraints |
+| `add32(a, b)`, `add3(a, b, c)` | Addition mod `2^32` of two or three words |
+| `reduce::<N>(sum)` | The low 32 bits of a field sum below `2^N`, in `N` rows |
+| `xor3`, `maj3`, `chi`, `ch` | One-row bit functions: 3-input XOR, majority, Keccak's χ, SHA-256's choice |
+| `xor3_32`, `xor3_64` | `xor3` bit by bit on a word |
+| `to_bits64`, `from_bits64` | Split a field element into 64 constrained bits, and recompose |
+| `read_n`, `sha256_iv` | Copy word `t` out of a word array; the SHA-256 IV (also BLAKE2s/BLAKE3's) |
 
-**Cost:** XOR/NOT and rotations/shifts are linear or pure re-wiring and emit **zero** gates;
-`and32` / `and64` cost one gate per bit; `add32` pays a carry decomposition; `to_bits::<N>` costs
-`N` booleanity constraints plus a recomposition. The hashes are all built on this layer, which is
-why the compiler can inline an entire SHA-256 compression and still share the bit arrays.
+The bit functions assume their inputs are bits; `chi`, for one, leaves its output free on a non-bit
+input. Feed them words from `to_bits` or from other functions in this crate.
 
-<Callout title="Why the multi-add trick">
-SHA-256 mixes several 32-bit words with modular addition. Rather than chaining `add32` (33 gates
-each), the gadget sums the terms as **field** elements — free — and decomposes the total **once**
-with the tight bit-width of the sum (a `k`-term 32-bit sum is `< 2^(32 + ⌈log₂ k⌉)`). This is the
-general pattern for cheap additions: stay in the field, reduce once.
+**Cost:** the `word_ops` circuit above is 161 constraints (`examples/word_ops`); `a & b` and
+`a ^ b` on two 32-bit values, 128 (`examples/bitwise_basic`).
+
+<Callout title="Stay in the field, reduce once">
+SHA-256 mixes several 32-bit words with modular addition. Rather than chaining `add32`, sum the
+terms as **field** elements — free — and take the low 32 bits **once** with `reduce::<N>`, where
+`N` is the tight bit-width of the sum (a `k`-term 32-bit sum is `< 2^(32 + ⌈log₂ k⌉)`). This is the
+general pattern for cheap additions.
 </Callout>
 
 ## `xark-bignum` — non-native field arithmetic
 
 A BN254 circuit's `Field` is an `Fr` element. To do arithmetic modulo a *different* prime — a
-secp256k1 coordinate, an Ed25519 coordinate — xark represents the value as little-endian
-**limbs**, does the limb-wise arithmetic, and range-checks the carries so no intermediate term
-wraps the BN254 modulus (which would silently break the integer identity).
+secp256k1 coordinate, an Ed25519 coordinate, an RSA modulus — xark represents the value as
+little-endian **limbs**, does the limb-wise arithmetic, and range-checks the carries so no
+intermediate wraps the BN254 modulus. The limb buffers go up to 32 limbs of 86 bits, room for
+RSA-2048.
+
+`fp!` defines a field-element type from its modulus, with `+`, `-`, `*` and unary `-`:
 
 ```rust
-use xark_bignum::prelude::*;
+use xark::{circuit, require_eq, Field, Private, Public};
 
-xark_bignum::fp!(pub Fp, "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+// A concrete 256-bit prime field (3 × 86-bit limbs), defined by its modulus alone.
+xark_bignum::fp!(El, "41904174945551648470736051755806485464313947085173149");
 
 #[circuit]
-pub fn mul_mod(a: Private<Fp>, b: Private<Fp>, c: Public<Fp>) {
-    require_eq((a * b).limbs, c.limbs);
+pub fn bignum_ops(a: Private<El>, b: Private<El>, out: Public<Field>) {
+    let r = a * b + a - b;
+    require_eq(r.limbs[0], out);
 }
 ```
 
-### The width-generic core
+On the host each `El` input is one whole number; it is split into limbs for you.
 
-| Item | Signature / meaning |
+| Item | What it does |
 | --- | --- |
-| `Bignum<LIMBS, BITS>` | a value `Σ limb[i]·2^(BITS·i)`, `LIMBS` limbs of `BITS` bits |
-| `Bignum::new(limbs)` | wrap little-endian limbs |
-| `.range_check()` | every limb `∈ [0, 2^BITS)` |
-| `.add(rhs, m)` / `.sub(rhs, comp)` / `.neg(m)` | modular ops (`comp` is `2^(BITS·LIMBS) − m`) |
-| `.mul(rhs, m, m_minus_1)` | modular multiply (a prover-aided `hint_mulmod_divmod` + limb check) |
-| `.inverse(m)` / `.sub2(b, c, m, m_minus_1)` / `.triple(m)` / `.reduce(m)` | remaining ops |
+| `fp!(Name, "modulus")` | A field type with operators and `.inverse()`, `.sub2()`, `.triple()`, `.reduce()`. Defaults to 3 × 86-bit limbs; `fp!(Name, "0x…", 4, 64)` picks another layout |
+| `Bignum<LIMBS, BITS>` | Generic limbed number with `mul`, `add`, `sub`, `neg`, `inverse`, `sub2`, `triple`, `reduce`, `range_check`; the modulus is passed in |
+| `mod_mul`, `mod_add`, `mod_sub`, `mod_neg`, `mod_inverse` | The free functions behind them, on `[Field; LIMBS]` |
+| `mul_divmod` | `(⌊a·b / m⌋, a·b mod m)`, both constrained |
+| `sub2`, `triple_mod`, `reduce_once` | Fused `a − b − c`, `3·v`, and one conditional subtraction |
+| `range_check_limbs`, `require_lt`, `is_lt`, `assert_nonzero_limbs` | Limb range checks and comparisons |
+| `modulus_limbs`, `modulus_minus_1`, `complement` | `const fn`s that turn a modulus string into limb constants |
+| `scalar_to_bits`, `one_hot8`, … | Helpers and curve-specific routines the signature gadgets use |
 
-Free functions cover the same ground when you are not using a generated type:
-`range_check_limbs`, `mod_add`, `mod_sub`, `mod_neg`, `mod_mul`, `mul_divmod`, `triple_mod`,
-`reduce_once`, `require_lt`, `is_lt`, `is_ge`, `assert_nonzero_limbs`, `scalar_to_bits`,
-`point_select_affine`. Constants for the shipped curves are public too (`P_25519_L`, `M_K1`,
-`D_25519`, and the secp256k1 lazy helpers).
-
-### The `fp!` macro
-
-```rust
-xark_bignum::fp!(Fp, "0x…");              // ~256-bit prime, default 3 × 86-bit layout
-xark_bignum::fp!(Fp, "0x…", 4, 64);        // explicit geometry
-xark_bignum::fp!(no_host Fp, "0x…");       // skip the host NativeInput impl
-```
-
-It derives the limb split, `m − 1`, and the subtraction complement at compile time, and generates
-a type that forwards `+ - *` (plus unary `-`) and `.inverse()` / `.sub2()` / `.triple()` /
-`.reduce()` / `.assert_canonical()` / `.assert_nonzero()` to the free functions. The default
-`3 × 86` geometry is multiply-optimal over BN254; `4 × 64` is what secp256k1's lazy path uses.
+- Most operations assume canonical operands (`a, b < m`) with range-checked limbs; each function's
+  docs give its precondition.
+- In `xark_bignum::prelude`, `require_lt` is xark's scalar `require_lt`; call the limb version as
+  `xark_bignum::require_lt`.
 
 <Callout type="warn" title="Carry budgets are checked at compile time">
-A `(LIMBS, BITS)` choice whose schoolbook column products could overflow BN254 `Fr` is rejected by
-a per-instance const assertion in `mod_mul`. That is a build error, not a silent wrap — the
-gadget cannot be instantiated with a geometry it cannot prove sound.
+`mod_mul` fails to compile for a `(LIMBS, BITS)` whose column products could wrap the BN254 field.
+That is a build error, not a silent wrap — the gadget can't be instantiated with a geometry it
+can't keep sound.
 </Callout>
 
-`xark-bignum` is shared by the secp256k1, secp256r1, and Ed25519 gadgets, which are otherwise
-parameterizations of [`xark-curve`'s macros](/docs/gadgets/curves).
+| Circuit | Constraints |
+| --- | --- |
+| `a * b + a - b` over a 3 × 86-bit field (`bignum_ops`) | 2,041 |
+| `(a · b) mod m`, 3 × 86 bits, constant modulus (`fp_mul`) | 993 |
+| `(a · b) mod m`, 3 × 86 bits, public modulus (`bignum`) | 1,002 |
+| `(a · b) mod m`, 24 × 86 bits (`bignum_wide`) | 9,763 |
 
 ## `xark-aes` — AES-128/256 in-circuit
 
-The cipher is written in the `Field` subset with **no inverse cipher**: all modes are forward-only,
-because CTR/GCM encryption and decryption are the same XOR against a keystream.
+The block cipher, CTR mode, and authenticated GCM — to prove a ciphertext encrypts a plaintext you
+know, under a key you keep private. AES-128-GCM with 13 bytes of associated data, from
+`examples/aes_gcm`:
 
 ```rust
 use xark_aes::prelude::*;
 
 #[circuit]
-pub fn aes(pt: Private<[u8; 16]>, key: Private<[u8; 16]>, ct: Public<[u8; 16]>) {
-    aes128_constrain(pt, key, ct);
+pub fn aes_gcm(
+    aad: Public<[u8; 13]>, // e.g. a record header — authenticated, not secret
+    pt: Private<[u8; 20]>,
+    key: Private<[u8; 16]>,
+    nonce: Private<[u8; 12]>,
+    ct: Public<[u8; 20]>,
+    tag: Public<[u8; 16]>,
+) {
+    let (c, t) = aes128_gcm::<13, 20>(aad, pt, key, nonce);
+    require_eq(c, ct);
+    require_eq(t, tag);
 }
 ```
 
-| Function | Signature |
+A single block is one call: `aes128_constrain(pt, key, ct)`.
+
+| Item | What it does |
 | --- | --- |
-| `aes128_encrypt` / `aes256_encrypt` | block cipher on `[[Field; 8]; 16]` bytes-of-bits |
-| `aes128_encrypt_bytes` / `aes256_encrypt_bytes` | `([Field; 16], key) -> [Field; 16]` |
-| `aes128_constrain` / `aes256_constrain` | encrypt and `require_eq` every ciphertext byte |
-| `aes128_ctr::<N>` / `aes256_ctr::<N>` | `(msg[N], key, nonce[12]) -> [Field; N]`; 96-bit nonce ‖ big-endian block counter |
-| `aes128_gcm::<A, N>` / `aes256_gcm::<A, N>` | `(aad[A], pt[N], key, nonce[12]) -> (ct[N], tag[16])` — full NIST SP 800-38D |
-| S-box / GF primitives | `sbox`, `gf_mul`, `gf_square`, `gf_inv`, `gf128_mul`, `bytes_to_gf128`, `gf128_to_bytes` |
+| `aes128_gcm::<A, N>(aad, pt, key, nonce)`, `aes256_gcm` | GCM (NIST SP 800-38D) with `A` bytes of AAD and a 96-bit nonce; returns `(ciphertext, tag)` |
+| `aes128_ctr::<N>(msg, key, nonce)`, `aes256_ctr` | CTR mode: keystream block `b` is `AES(key, nonce ‖ be_u32(b))`, counter from 0 |
+| `aes128_encrypt_bytes(pt, key)`, `aes256_encrypt_bytes` | Encrypt one 16-byte block; inputs are bytes, range-checked |
+| `aes128_constrain(pt, key, ct)`, `aes256_constrain` | Encrypt one block and require it equal `ct` |
+| `aes128_encrypt`, `aes256_encrypt` | One block on bytes already split into bits (`[Field; 8]` each) |
+| `gf128_mul`, `bytes_to_gf128`, `gf128_to_bytes` | The GCM field multiply and its bit-order conversions |
+| `sbox` | The AES S-box on one byte's bits |
+| `key_schedule_byte` | One byte of the expanded AES-128 key (for tests) |
 
-- A byte is `[Field; 8]` in little-endian bit order; messages are `[Field; N]` **bytes**, which
-  is exactly what a `Private<[u8; N]>` input lowers to, so the ergonomic path is a one-line
-  `aes128_constrain(pt, key, ct)`.
-- The S-box is `affine(inv(b))` with `inv(b) = b^254` computed by an Itoh–Tsujii addition chain.
-  GF(2⁸) squaring is a linear (Frobenius) map, so it is XOR-only; the four general multiplications
-  (64 AND gates each) dominate. There is no lookup table and no advice hint.
-- **GCM** implements the full construction: subkey `H = AES(key, 0¹²⁸)`, `J0 = nonce ‖ 1`, CTR
-  from `inc32(J0)`, and the GHASH tag over `A ‖ pad ‖ C ‖ pad ‖ lengths` in GF(2¹²⁸). The AAD is
-  authenticated but not encrypted — the TLS record-header case. Set `A = 0` for no AAD.
-- Because `A` and `N` are compile-time constants, block counts and counter suffixes are constants;
-  **no counter arithmetic is emitted**.
+All modes only encrypt; CTR and GCM decryption is the same operation. The lengths `A` and `N` are
+compile-time constants. The block cipher is checked against the FIPS-197 known answers and GHASH
+against the `ghash` crate; the examples check CTR and GCM against the `aes` and `aes-gcm` crates.
 
-`xark-aes` is the largest gadget by source size, and its S-box equivalence to FIPS-197's lookup
-table is machine-checked in Lean. See
+| Circuit | Constraints |
+| --- | --- |
+| AES-128, one block (`aes`) | 15,360 |
+| AES-128-CTR, 20 bytes (`aes_ctr`) | 30,185 |
+| AES-256-CTR, 20 bytes (`aes256_ctr`) | 42,273 |
+| AES-128-GCM, 20 bytes + 13 bytes AAD (`aes_gcm`) | 185,971 |
+| AES-256-GCM, 20 bytes + 13 bytes AAD (`aes256_gcm`) | 209,883 |
+
+Most of GCM's cost is GHASH: each 16-byte block of AAD and ciphertext, and the length block, is one
+`gf128_mul`. The S-box is a select over the constant FIPS-197 table, proven sound in Lean over the
+rows it emits and checked on all 256 inputs; see
 [Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).
 
 ## Which layer do I want?
 
 | Task | Layer |
 | --- | --- |
-| Integer comparison / shift / mod on a `Field` | `Field` methods (e.g. `x < 100u32`) |
+| Integer comparison / shift / remainder | native integer inputs, or `Field` against a native integer (`x < 100u32`) |
 | Word-level bit manipulation, carry chains, building a custom hash | `xark-bits` |
 | Arithmetic modulo a non-BN254 prime (a foreign curve, RSA, big integers) | `xark-bignum` |
 | AES encryption or authenticated encryption | `xark-aes` |
-| A whole foreign curve | [`xark-curve`](/docs/gadgets/curves) (which builds on `xark-bignum`) |
+| A whole foreign curve | [`xark-curve`](/docs/gadgets/curves), which builds on `xark-bignum` |

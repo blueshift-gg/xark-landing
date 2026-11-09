@@ -3,16 +3,23 @@ title: Signatures
 description: Verify secp256k1, secp256r1 (P-256), and Ed25519 signatures inside a Groth16 circuit.
 ---
 
-Signature gadgets let a proof say *"this signature is valid for this public key and this message"*
-without revealing the message or the signer. All three take the same shape — a public key, a
-signature, and a digest — and all three verify the curve algebra in-circuit, so the verifier
-never trusts an oracle.
+Signature gadgets let a proof say *"this signature is valid for this public key and this
+digest"* — and, if you make them private inputs, without revealing the key or the signature. All
+three take the same shape — a public key, a signature, and a digest — and all three verify the
+curve algebra in-circuit, so the verifier never trusts an oracle.
 
 The three crates share a design: the **digest is an input**, not something the gadget hashes. If
 the statement you want is about a *message*, you either hash it with a
-[hash gadget](/docs/gadgets/hashes) inside the same circuit or supply the digest as a witness and
-constrain it. This separation is deliberate — it lets you combine any hash with any curve, and it
-keeps the expensive hash out of the circuit when the digest is already public.
+[hash gadget](/docs/gadgets/hashes) inside the same circuit, or make the digest public so the
+verifier can recompute it from the message. This separation is deliberate — it lets you combine
+any hash with any curve, and it keeps the expensive hash out of the circuit when the digest can be
+public.
+
+| Gadget | Curve | Verification cost |
+| --- | --- | --- |
+| `xark-secp256k1` | secp256k1 (Bitcoin, Ethereum) | 227,168 constraints (`examples/secp256k1_ecdsa`) |
+| `xark-secp256r1` | P-256 (WebAuthn passkeys) | 344,969 constraints (`examples/secp256r1_ecdsa`) |
+| `xark-ed25519` | Ed25519 (Solana keys) | 396,912 constraints (`examples/ed25519`) |
 
 ## secp256k1 ECDSA (`xark-secp256k1`)
 
@@ -27,24 +34,20 @@ pub fn secp256k1_ecdsa(pubkey: Public<Point>, sig: Public<Signature>, digest: Pu
 
 | Type | Host form (bytes) | In-circuit |
 | --- | --- | --- |
-| `Point` | `[u8; 64]` = `x ‖ y`, SEC1 **minus** the `0x04` tag | `{ x, y }`, each two 128-bit halves |
-| `Signature` | `[u8; 64]` = `r ‖ s` | `{ r, s }` |
-| `Scalar` | `[u8; 32]` big-endian | `[lo128, hi128]` |
+| `Point` | `[u8; 64]` = `x ‖ y`, SEC1 **without** the `0x04` tag | 2 field elements per coordinate |
+| `Signature` | `[u8; 64]` = `r ‖ s` | `(r, s)` |
+| `Scalar` | `[u8; 32]` | 2 field elements |
 
-- **`digest` = `int(hash(msg)) mod n`.** Get it from your hash's output with the host helper
-  `reduce_scalar(&[u8; 32]) -> [u8; 32]` (re-exported at the crate root, host-only), or compute it
-  in-circuit.
-- The shipped verifier is **GLV-accelerated**: a 128-window, 4-dimensional Shamir double-scalar
-  multiplication over the λ-endomorphism, at roughly **1.64M constraints**. The endomorphism
-  decomposition is derived in-circuit at zero constraint cost and pinned by an explicit
-  decomposition check.
-- The pubkey is checked on-curve inside `verify`; an off-curve or non-canonical `r`/`s` makes the
-  circuit unsatisfiable. That is what makes the signature non-malleable.
-- The crate also exposes `affine`, the eager 3×86-bit incomplete-affine gadget emitted by
-  [`xark_curve::weierstrass!`](/docs/gadgets/curves), with `Point` / `Fq` / `Fp`,
-  `ec_add_incomplete`, `ec_double_incomplete`, and `double_scalar_mul_incomplete`. It is used by
-  the `ec_incomplete` example and the field-arithmetic snapshot tests; the compact GLV path is
-  what `verify` uses.
+- **`digest` = `int(hash(msg)) mod n`**, computed by the caller. Make it with the host helper
+  `reduce_scalar`: `let digest = reduce_scalar(&Sha256::digest(msg));`.
+- The gadget checks that the public key is on the curve, that `r`, `s` and the digest are below
+  `n`, and that `r` and `s` are nonzero. A wrong signature makes the circuit unsatisfiable.
+- No public key is refused. A valid signature is refused only if its nonce `k` is one of six fixed
+  multiples of the private key (`k ≡ μ·q`; the constants `μ` are listed in the source).
+- `order()` (host only) is the group order `n`. `affine` is a lower-level incomplete-affine curve
+  gadget (`Point`, `ec_add_incomplete`, `ec_double_incomplete`, …), used by `examples/ec_incomplete`.
+
+The example's tests verify real signatures from the `k256` crate.
 
 ## secp256r1 / P-256 ECDSA (`xark-secp256r1`)
 
@@ -57,27 +60,15 @@ pub fn secp256r1_ecdsa(pubkey: Public<Point>, sig: Public<Signature>, digest: Pu
 }
 ```
 
-Identical input types and host forms to secp256k1. The difference is the curve:
+The same input types, host forms and checks as secp256k1: the public key is checked on-curve,
+`r`, `s` and the digest below `n`, `r` and `s` nonzero. The differences:
 
-- P-256 has `a = −3`, so the doubling slope is `(3x² − 3)/2y` rather than `3x²/2y`. Everything
-  else — scalar field, `r`/`s` canonicality and nonzero checks, the incomplete-affine addition —
-  is shared with secp256k1 through [`xark-bignum`](/docs/gadgets/arithmetic).
-- P-256 has no efficient endomorphism, so there is **no GLV variant**; `verify` runs the
-  3×86-bit incomplete-affine double-scalar multiplication. Expect it to be substantially more
-  expensive than secp256k1 — measure with `xark inspect`.
-- The free function `ecdsa_verify(q: Point, r: Scalar, s: Scalar, e: Scalar)` is the core, if you
-  need to call it directly.
+- `ecdsa_verify(q, r, s, e)` is the same check with the signature passed as two scalars.
+- A valid signature is refused only if its nonce `k` equals `±q`, the private key or its negation.
 
-<Callout type="warn" title="P-256 does not check the public key on-curve">
-Unlike the secp256k1 and Ed25519 gadgets, the P-256 gadget does **not** currently call an on-curve
-check in-circuit. A `Public<Point>` is a caller-supplied public input, so validate that the key is
-on P-256 out of circuit (or wire in the Lean-proven `enforce_on_curve` yourself) before trusting a
-membership statement about it. This is a tracked follow-up in
-[`docs/audit-status.md`](https://github.com/blueshift-gg/xark/blob/master/docs/audit-status.md).
-</Callout>
-
-This is the curve behind WebAuthn / passkeys and most TLS certificates, which makes it the usual
-choice for "prove I own this Web2 identity" circuits.
+P-256 is the curve WebAuthn passkeys sign with by default, which makes it the usual choice for
+"prove I own this Web2 identity" circuits. The example's tests verify real signatures from the
+`p256` crate.
 
 ## Ed25519 / EdDSA (`xark-ed25519`)
 
@@ -92,62 +83,55 @@ pub fn ed25519(pubkey: Public<PointL>, sig: Public<Signature>, digest: Public<Sc
 
 | Type | Host form (bytes) | Notes |
 | --- | --- | --- |
-| `PointL` | `[u8; 32]` | the **compressed** Ed25519 public key `A` (`y` little-endian + sign bit); decompressed in the host adapter |
+| `PointL` | `[u8; 32]` | the **compressed** Ed25519 public key `A` |
 | `Signature` | `[u8; 64]` | compressed `R (32)` ‖ **big-endian** `S (32)` |
 | `Scalar` | `[u8; 32]` big-endian | the challenge `k = SHA-512(R ‖ A ‖ M) mod L` |
 
-`pubkey.verify(sig, digest)` checks the EdDSA equation `[S]·B == R + [k]·A`. The implementation
-uses a **lazy extended-coordinate** path over 3×85-bit limbs at roughly **2.36M constraints** —
-about half the affine gadget's 4.55M, since the affine version cannot amortize reductions. The
-curve gadget itself is emitted by [`xark_curve::edwards!`](/docs/gadgets/curves); Ed25519's
-addition is **complete** (no exceptional cases), so unlike secp256k1 there is no offset
-accumulator.
+The circuit checks the cofactored equation `[8]·([S]·B − [k]·A − R) = O`, with `A` and `R`
+canonical and on the curve, and `S < L`. The host helpers build the inputs from an
+`ed25519-dalek` signature:
 
-<Callout type="error" title="The challenge hash is your job">
-`digest` is a **witness**, not something the gadget derives. `PointL::verify` proves the algebraic
-EdDSA equation for the `k` you hand it — it does **not** prove `k = SHA-512(R ‖ A ‖ M)`. If your
-statement is "this signature is valid for message `M`", you must constrain `k` yourself (compute
-SHA-512 in-circuit, or otherwise bind it to `M`); otherwise the proof is only about *some*
-challenge. The gadget also range-checks `S < L` and both points' on-curve membership, which
-prevents the usual EdDSA malleability.
-</Callout>
+```rust
+use xark_ed25519::{challenge, scalar_le_to_be};
 
-Host helpers (re-exported at the crate root, host-only, for building test vectors or witness
-inputs):
+let pubkey = sk.verifying_key().to_bytes();
+let raw = sk.sign(MSG).to_bytes(); // R(32) ‖ S(32, little-endian)
+let mut sig = [0u8; 64];
+sig[..32].copy_from_slice(&raw[..32]); // compressed R
+sig[32..].copy_from_slice(&scalar_le_to_be(&raw[32..].try_into().unwrap())); // S big-endian
+
+let r: [u8; 32] = sig[..32].try_into().unwrap();
+let k = challenge(&r, &pubkey, MSG);
+ed25519(pubkey, sig, k).unwrap();
+```
 
 | Helper | Does |
 | --- | --- |
-| `challenge(r, a, msg) -> [u8; 32]` | `SHA-512(R ‖ A ‖ M) mod L`, big-endian |
-| `scalar_le_to_be(le) -> [u8; 32]` | reverses an Ed25519 little-endian signature scalar |
-| `point_be(comp) -> [u8; 64]` | decompresses a compressed point to `x ‖ y` |
-| `base_mul_be`, `base_be` | reference basepoint arithmetic, for vectors |
+| `challenge(r, a, msg)` | host: `k = SHA-512(R ‖ A ‖ M) mod L`, big-endian |
+| `scalar_le_to_be(le)` | host: turn a standard little-endian `S` into the big-endian form `Signature` takes |
+| `point_be`, `base_be`, `base_mul_be` | host: decompress a point; the base point `B`; `[k]·B` |
+| `base()`, `mul_base(k_bits)` | in circuit: the base point and fixed-base scalar multiplication |
+
+<Callout type="error" title="The challenge hash is your job">
+The SHA-512 challenge is **not** computed in the circuit: the prover supplies `k`, and
+`PointL::verify` proves the EdDSA equation for the `k` it's handed. If `k` is public, as above, the
+verifier can recompute it from `R`, `A` and the message to tie the proof to that message. If your
+statement is "this signature is valid for message `M`" and `k` is private, you must bind `k` to `M`
+yourself; otherwise the proof is only about *some* challenge.
+</Callout>
 
 ## The pattern they share
 
-```rust
-#[circuit]
-pub fn owns_identity(
-    pubkey: Public<Point>,        // the identity
-    sig: Public<Signature>,       // a signature over ... 
-    msg: Private<[u8; 32]>,       // ... a private message
-    digest_claim: Public<Scalar>,
-) {
-    // 1. bind the digest to the message with a hash gadget
-    //    (e.g. `require_eq(Digest::from(sha256(msg)), expected)`)
-    // 2. verify the signature algebra
-    pubkey.verify(sig, digest_claim);
-}
-```
-
-Step 2 alone proves possession of a valid signature over *whatever* digest was supplied. Step 1
-is what turns that into a statement about a message. The
-[example circuits](https://github.com/blueshift-gg/xark/tree/master/examples) — `secp256k1_ecdsa`,
-`secp256r1_ecdsa`, `ed25519` — show each half; a real circuit composes them.
+Each example verifies a signature against a public digest, which proves possession of a valid
+signature over *whatever* digest was supplied. To make it a statement about a private message,
+compute the digest from the message inside the same circuit with a
+[hash gadget](/docs/gadgets/hashes) — for ECDSA, `int(hash(msg)) mod n` — and pass that to
+`verify`. Every hash and every signature gadget composes this way, at the sum of their costs.
 
 <Callout type="info" title="What is (and isn't) proven">
-The ECDSA and EdDSA reduction — that a satisfying assignment implies the textbook verification
-equation (FIPS 186-4 / RFC 8032) — is machine-checked in Lean 4, and each gadget's arithmetic
-primitives (non-native modular multiply, point add, the double-and-add ladder, GLV) carry their own
-proofs. See [Formal proofs & audit status](/docs/trust/formal-proofs-and-audit). What remains
-trusted is the usual residue: `rustc`/MIR extraction, Arkworks Groth16, and the pinned constants.
+Each signature gadget's building blocks — the non-native multiplications, range checks, on-curve
+checks, the fused double-and-add steps, and the fake-GLV scalar relations — are proven sound in
+Lean 4 over the rows they emit. How the steps are chained across the scalar-multiplication loop is
+covered by tests, not by a whole-loop proof. See
+[Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).
 </Callout>
