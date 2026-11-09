@@ -3,41 +3,62 @@ title: How verification works
 description: The byte layout, the alt_bn128 pairing check, and the one function your program calls.
 ---
 
-`xark export` gives your Solana program a single entry point:
+`xark export` gives your Solana program a verifier crate with one job:
 
 ```rust
-if verifier::verify_instruction_data(instruction_data) {
-    // proof valid — act on it
+if !my_circuit_verifier::verify(&proof, &public_inputs) {
+    return Err(ProgramError::InvalidArgument);
 }
 ```
 
 This page is what happens underneath — worth understanding, because the *only* thing standing
 between "a proof exists" and "the chain believes it" is the byte layout and one pairing check.
 
-## The instruction data
+## The bytes
 
-Everything the verifier needs (except the verifying key, which is baked into the crate at compile
-time) arrives as one byte string:
+Everything the verifier needs, except the verifying key baked into the crate at compile time, is a
+proof and its public inputs:
 
 ```
-instruction_data =  proof (256 bytes)  ‖  public_inputs (N × 32 bytes)
+proof            =  −A (G1, 64)  ‖  B (G2, 128)  ‖  C (G1, 64)       256 bytes
+public_inputs    =  fr_0 (32)    ‖  fr_1 (32)    ‖  …  ‖  fr_{N-1} (32)
 
-proof            =  A (G1, 64)  ‖  B (G2, 128)  ‖  C (G1, 64)
-public_inputs    =  fr_0 (32)   ‖  fr_1 (32)    ‖  …  ‖  fr_{N-1} (32)
+instruction_data =  proof  ‖  public_inputs
 ```
 
 Three things are load-bearing:
 
-- **Everything is little-endian.** Each `Fq`/`Fr` element is a 32-byte little-endian limb; a G1 point
-  is `x ‖ y`, a G2 point is `x.c0 ‖ x.c1 ‖ y.c0 ‖ y.c1`. This is the wire format Solana's syscalls
-  expect (selected with the `0x80` flag), not Arkworks' native byte order.
-- **`A` is already negated.** The exporter writes `−A ‖ B ‖ C` so the on-chain check is a single
-  product of pairings with no in-circuit negation.
-- **Public-input order is the circuit's order.** The N scalars appear in exactly the order
-  the circuit declares its `Public<Field>` parameters — the order `xark inspect` prints. Your program
-must concatenate them the
-  same way, or verification fails. Each scalar must be canonical (`< r`); a non-canonical input is
-  rejected outright.
+- **Everything is little-endian.** Each `Fq`/`Fr` element is 32 bytes little-endian; a G1 point is
+  `x ‖ y`, a G2 point is `x.c0 ‖ x.c1 ‖ y.c0 ‖ y.c1`, all uncompressed. This is what Solana's
+  `alt_bn128` syscalls consume, not Arkworks' native byte order.
+- **`A` is already negated.** The exporter writes `−A ‖ B ‖ C`, so the on-chain check is a single
+  product of pairings.
+- **Public-input order is the circuit's order.** The N scalars appear in exactly the order the
+  circuit declares its public parameters — the order `xark inspect` prints. Your program must
+  supply them the same way, or verification fails. Each scalar must be canonical (`< r`); a
+  non-canonical input is rejected outright.
+
+## Where the public inputs come from
+
+A proof is bound to the exact public inputs it was made with, so *which* public inputs your
+program checks against is the statement it accepts. Usually they come from the program's own
+state — a policy, a Merkle root, a nullifier — and only the 256-byte proof travels in the
+instruction data:
+
+```rust
+let Some(proof) = instruction_data.first_chunk::<256>() else {
+    return Err(ProgramError::InvalidInstructionData);
+};
+let proof = my_circuit_verifier::Proof::from_le_bytes(proof);
+let public_inputs: [[u8; 32]; 1] = [/* from your program's state */];
+if !my_circuit_verifier::verify(&proof, &public_inputs) {
+    return Err(ProgramError::InvalidArgument);
+}
+```
+
+When the transaction does carry the public inputs too (`proof ‖ public_inputs`),
+`verify_instruction_data(instruction_data)` checks both. Make sure your program then acts only on
+the public inputs it just verified.
 
 ## The check
 
@@ -50,38 +71,58 @@ vk_x = ic[0] + Σ  public_inputs[i] · ic[i+1]          // G1 scalar-muls + adds
 e(−A, B) · e(α, β) · e(vk_x, γ) · e(C, δ)  ==  1       // one 4-pair pairing
 ```
 
-Both steps are native Solana `alt_bn128` syscalls (G1 scalar-mul, G1 add, and a 4-pair pairing over
-768 bytes) via the `solana_nostd_alt_bn128` crate. Off-chain, the same crate falls back to an
-Arkworks reference implementation, so the verifier is testable without a validator.
+Both steps are native Solana `alt_bn128` syscalls (G1 scalar-mul, G1 add, and the pairing) via the
+`solana-nostd-alt-bn128` crate. Off-chain, the same crate falls back to Arkworks, so the verifier is
+testable without a validator.
 
 <Callout title="What this costs">
-The fixed cost is the 4-pair pairing; the variable cost is the `vk_x` linear combination — N G1
-scalar-muls and adds, one per public input. So a circuit's on-chain cost scales with its **number of
-public inputs**, not the size of the computation it proves. xark measures the real per-proof compute
-units in its SBF test suite rather than hard-coding a number.
+One proof with one public input verifies in about **77k compute units** (77,043 CU, measured in
+Mollusk). The fixed cost is the pairing; each public input adds one G1 scalar-mul and add. So a
+circuit's on-chain cost scales with its **number of public inputs**, not the size of the
+computation it proves.
 </Callout>
 
-## The generated API
+## The generated crate
 
-The per-circuit crate `xark export` writes bakes the verifying key in as a `const VERIFIER:
-Verifier<N>` and exposes:
+The crate `xark export` writes embeds the verifying key as a `const VERIFIER: Verifier<N>` and
+exposes:
 
-| Function | Use |
+| Item | Use |
 | --- | --- |
-| `verify_instruction_data(data: &[u8]) -> bool` | the common path — pass `proof ‖ public_inputs` |
-| `verify_instruction_data_strict(data) -> bool` | adds strict non-malleability checks |
-| `verify(proof, &[[u8; 32]; N]) -> bool` | when you already have the pieces split out |
-| `verify_strict(…)` | strict variant |
+| `verify(&Proof, &[[u8; 32]; N]) -> bool` | the proof from the transaction, the public inputs from your program |
+| `verify_instruction_data(&[u8]) -> bool` | `proof ‖ public_inputs`, both from the transaction |
+| `verify_strict`, `verify_instruction_data_strict` | also reject non-canonical point encodings |
+| `Proof::from_le_bytes(&[u8; 256])` | read a proof in the on-chain layout |
+| `NUM_PUBLIC_INPUTS`, `VK_BYTES` | the circuit's public-input count; the raw verifying key |
+| `SETUP` | how the embedded key was made: `seeded`, `single-party`, `ceremony` or `unknown` |
 
-The underlying `xark-verifier` crate is `#![no_std]` and dependency-light, so it drops into a
-Pinocchio or Anchor program the same way. A minimal Pinocchio handler is just:
+Every function returns `false` on any failure — a non-holding pairing, a malformed point, or a
+non-canonical public input. The underlying `xark-verifier` crate is `#![no_std]` on Solana, so it
+drops into a Pinocchio or Anchor program the same way. A deploy script can read `SETUP` and refuse
+a verifier whose key it doesn't accept; see [The trusted setup](/docs/trust/trusted-setup).
 
-```rust
-fn process_instruction(_id: &Address, _accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    if verifier::verify_instruction_data(data) { Ok(()) }
-    else { Err(ProgramError::InvalidInstructionData) }
-}
-```
+<Callout type="warn" title="A proof is not a replay key">
+Groth16 proofs are re-randomizable: anyone holding a valid proof can make a different valid proof of
+the same public inputs, and the `_strict` functions don't change that. Never use proof bytes, or
+their hash, as a replay or "already used" key. Put replay protection in the public inputs — a
+nullifier or nonce the circuit derives from a secret, or the signer the proof is for — and record
+*that* on-chain.
+</Callout>
+
+## Many proofs in one call
+
+`xark_verifier::verify_groth16_batch(vk_bytes, batch, scratch)` checks several proofs of one
+circuit with a single pairing call: `M + 3` pairs instead of `4M`. Measured with one public input:
+
+| Proofs | Batched | One at a time |
+| --- | --- | --- |
+| 1 | 77,560 CU | 77,043 CU |
+| 4 | 168,199 CU | 309,633 CU |
+| 16 | 513,223 CU | ~1,240,000 CU |
+
+A `false` result says some proof in the batch is invalid, not which one. Inside a batch, check each
+entry's nullifier against the others as well as against storage, and read each entry's public
+inputs from the same buffer you verified.
 
 See [Serialization & artifacts](/docs/reference/serialization) for the exact file formats, and
-[Reproducible builds](/docs/trust/reproducible-builds) for verifying the deployed `.so` byte-for-byte.
+[Reproducible builds](/docs/trust/reproducible-builds) for checking a deployed `.so` byte-for-byte.

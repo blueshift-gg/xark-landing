@@ -5,7 +5,8 @@ description: Four worked circuits, easiest to hardest — each built, proved, an
 
 The [xark-examples](https://github.com/blueshift-gg/xark-examples) repo is a difficulty ladder: four
 circuits, each introducing exactly one new idea, and every one is built, proved, and verified
-end-to-end inside an in-process Solana VM (no validator, no network). Read them in order.
+end-to-end inside an in-process Solana VM ([LiteSVM](https://github.com/LiteSVM/litesvm): no
+validator, no network). Read them in order.
 
 <Cards>
   <Card title="01 · Over 9000" href="https://github.com/blueshift-gg/xark-examples/tree/main/01-over-9000" description="Prove a secret number beats a bound. The range-proof primitive, zero public inputs, a Pinocchio verifier." />
@@ -19,9 +20,12 @@ end-to-end inside an in-process Solana VM (no validator, no network). Read them 
 Every example is the same loop from the [Quickstart](/docs/quickstart): a Rust circuit, `xark`
 turning it into a proof and a verifier crate, and a small Solana program that calls
 `verify_instruction_data`. The two shielded examples add one trick worth its own study — **the chain
-never hashes.** All Poseidon happens inside the circuit; it proves that a new Merkle root correctly
+never hashes.** All Poseidon2 hashing happens inside the circuit; it proves that a new Merkle root correctly
 extends the old one, so the on-chain program only stores roots and verifies proofs. Circuit and chain
-agree by construction instead of by carefully matching two Poseidon implementations.
+agree by construction instead of by carefully matching two Poseidon2 implementations.
+
+To run one, `cd 01-over-9000 && just build-program` takes it from circuit to a deployable `.so`;
+the repo's `RUNBOOK.md` has the full toolchain and devnet deployment.
 
 <Callout type="warn">
 The examples are reference implementations for learning — unaudited, not for production. The shielded
