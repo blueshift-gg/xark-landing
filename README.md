@@ -10,52 +10,56 @@ dark, with the xark lime-on-black identity.
 
 ```bash
 pnpm install
-pnpm setup       # builds the circuit + Groth16 keys + copies env templates
-pnpm dev          # http://localhost:3000
+pnpm dev                    # http://localhost:3000
 ```
 
-(Requires Node 20+, pnpm, and the `xark` CLI on PATH.)
-
-## Production secrets
-
-The minesweeper demo encrypts game state into a token using `MINESWEEPER_SECRET`.
-The key is derived from the secret with SHA-256, so any strong random string
-works — hex, base64, or a long passphrase all produce a valid AES-256 key.
-For local dev, `pnpm setup` copies the default from `.dev.vars.example`. For
-production:
+Requires Node 26 or newer and pnpm. The demo's circuit, keys and typed client are
+committed (`circuits/minesweeper/artifacts/`), so nothing else is needed to run it.
+After changing the circuit, rebuild them with the xark 0.3 CLI
+(`cargo install xark-cli --version 0.3.0 --locked`; any stable Rust ≥ 1.89 with the
+`wasm32-unknown-unknown` target):
 
 ```bash
-# Generate a strong secret and set it on the deployed Worker:
-openssl rand -base64 32 | npx wrangler secret put MINESWEEPER_SECRET
+pnpm run setup              # xark build + setup + client, then the artifact modules
+pnpm check:minesweeper      # prove and verify in Node; tampering must be refused
 ```
 
-Wrangler encrypts it and injects it as `process.env.MINESWEEPER_SECRET` at runtime.
+(`pnpm run setup`, not `pnpm setup`: that is pnpm's own command.)
+
+`pnpm dev` and `pnpm build` both bundle with webpack: under Turbopack the prover's
+Web Worker can't fetch xark's wasm.
 
 ## Structure
 
 ```
 src/app/
   (site)/            marketing surfaces (own Header/Footer, scoped landing.css)
-    page.tsx         landing — hero + the "guess the secret" demo
+    page.tsx         landing — hero + the minesweeper demo
     examples/        the four reference circuits
   docs/              Fumadocs docs shell + [[...slug]] renderer
   layout.tsx         root — fonts, dark theme, metadata
   globals.css        Tailwind + Fumadocs theme tokens (black + lime)
 content/docs/        the docs, as MDX (Learn-ZK track + quickstart)
-components/          Wordmark, Header, Footer, GuessDemo (client), mdx
-lib/source.ts        Fumadocs content loader
-source.config.ts     Fumadocs collection config
+components/          Wordmark, Header, Footer, MinesweeperDemo (client), mdx
+circuits/minesweeper the demo's circuit crate, and its built artifacts
+lib/                 Fumadocs loader, the demo's worker and shared types
+scripts/             the artifact generator and the demo's end-to-end check
 ```
 
 ## The demo
 
-The landing hero is **guess-the-secret**: pick a number, "prove" it, and a lime side
-panel reveals what happened — your guess, the commitment (fixed beforehand), the verified
-proof, and the winning number that stays hidden.
+The landing hero is **zero-knowledge minesweeper**: a house commits to a 9×9 board,
+and every cell you open comes with a Groth16 proof that what it shows is the
+committed board's, so the house can't move a mine or lie about a count, and the
+cells you haven't opened stay hidden.
 
-v1 is a client-side visual demo. The honest version proves server-side with the real
-`xark` CLI (the secret + salt never reach the browser) and verifies the proof in-browser
-via snarkjs-wasm — wired behind the same UI. That's the next spike.
+It runs entirely in the browser on [`@blueshift-gg/xark`](https://www.npmjs.com/package/@blueshift-gg/xark)
+0.3. The house is a Web Worker (`lib/minesweeper.worker.ts`) that holds the board and
+proves each reveal with the client `xark client` generated, pinned to the circuit's
+digest; the page never sees the board. The page verifies each proof itself, with a
+verifier pinned to the verifying key's sha256, against the commitment it was given at
+the start and the cells it is about to draw. A reveal proves in about 60 ms on one
+thread. `circuits/minesweeper/README.md` has the circuit and how the artifacts are made.
 
 ## Design
 
