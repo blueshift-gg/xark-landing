@@ -90,11 +90,17 @@ On the host each `El` input is one whole number; it is split into limbs for you.
 | `mul_divmod` | `(⌊a·b / m⌋, a·b mod m)`, both constrained |
 | `sub2`, `triple_mod`, `reduce_once` | Fused `a − b − c`, `3·v`, and one conditional subtraction |
 | `range_check_limbs`, `require_lt`, `is_lt`, `assert_nonzero_limbs` | Limb range checks and comparisons |
+| `minus_one` | `m − 1`, limb by limb, pinned to `m`: the bound `require_lt` takes for `x < m` |
 | `modulus_limbs`, `modulus_minus_1`, `complement` | `const fn`s that turn a modulus string into limb constants |
 | `scalar_to_bits`, `one_hot8`, … | Helpers and curve-specific routines the signature gadgets use |
 
-- Most operations assume canonical operands (`a, b < m`) with range-checked limbs; each function's
-  docs give its precondition.
+- Every operation assumes its operands' limbs are below `2^BITS`: its rows prove the relation it
+  documents only then. Typed inputs (`Bignum`, `fp!` types) are range-checked when they're read,
+  and every operation's result is in range; limbs a circuit builds itself (a `[Field; LIMBS]`
+  parameter, `Bignum::new`) need `range_check_limbs` first.
+- `mod_mul`, `mul_divmod` and `sub2` take the modulus `m` alone and derive their bound `m − 1`.
+- Most operations also assume canonical operands (`a, b < m`); each function's docs give its
+  precondition.
 - In `xark_bignum::prelude`, `require_lt` is xark's scalar `require_lt`; call the limb version as
   `xark_bignum::require_lt`.
 

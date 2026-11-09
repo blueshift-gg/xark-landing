@@ -97,7 +97,7 @@ pub fn blake2s(msg: Private<[u8; 3]>, digest: Public<Hash>) {
 | | BLAKE2s | BLAKE3 |
 | --- | --- | --- |
 | one-shot hash | `blake2s::<N_BYTES>(msg)`: unkeyed BLAKE2s-256 | `blake3::<N_BYTES>(msg)`: the root hash, `N_BYTES <= 1024` |
-| one block | `blake2s_hash_one_block(input_words, input_len_bytes)`, up to 64 bytes | `blake3_hash_one_block(input_words, block_len_bytes)`, up to 64 bytes |
+| one block | `blake2s_hash_one_block::<LEN>(input_words)`, `LEN <= 64` bytes, the rest zero | `blake3_hash_one_block::<LEN>(input_words)`, `LEN <= 64` bytes, the rest zero |
 | compression | `compress(...)`, with counter and final-block flag | `compress(...)`, with counter, block length and flags |
 | matches | `blake2`'s `Blake2s256` | `blake3`'s `hash` |
 | cost (3-byte message vs a public `Hash`) | 20,066 constraints | 13,780 constraints |
