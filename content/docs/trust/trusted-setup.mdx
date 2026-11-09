@@ -29,7 +29,7 @@ A ceremony with one contributor trusts one party too: its randomness also comes 
 adds is a transcript that anyone can check the key against with `xark ceremony verify`, and room
 for more contributors later.
 
-A **seeded** key (`xark setup --insecure-dev-mode --deterministic-rng <SEED>`) derives the
+A **seeded** key (`xark setup --deterministic-rng <SEED>`) derives the
 randomness from a seed, so anyone who knows the seed can forge proofs. It exists to regenerate test
 fixtures reproducibly and nothing else; its verifier's `SETUP` is `seeded`.
 
@@ -110,7 +110,7 @@ anyone can check it.
 
 | How the keys were made | `setup_mode` | `production_safe` |
 | --- | --- | :---: |
-| `xark setup` without a `.ptau` | `insecure-dev-mode` | `false` |
+| `xark setup` without a `.ptau` | `single-party` (`insecure-dev-mode` before 0.3) | `false` |
 | `xark setup --ptau-file` | `phase2-from-ptau` | `true` |
 | `xark ceremony finalize` | `phase2-from-ptau+mpc[N contributors]` | `true` |
 
