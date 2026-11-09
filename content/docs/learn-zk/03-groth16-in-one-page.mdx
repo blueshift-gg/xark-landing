@@ -36,24 +36,26 @@ verify(verifying_key, public_inputs, proof) ->  true / false  (on-chain, in your
 
 The verifier folds the **public inputs** into its check. This is a subtle, important point: a proof
 is bound to the exact public inputs it was made with. Change the recipient in a withdrawal and the
-proof stops verifying — you don't need extra constraints to "lock" a public input; being public
-already binds it. ([Example 03](/examples) relies on this to stop front-running.)
+proof stops verifying. One catch: a public input that no constraint uses — a recipient often is one
+— has to be tied in with `bind(recipient)`, or it isn't bound at all.
+([Example 03](/examples) relies on this to stop front-running.)
 
 ## What xark hands you
 
-- `xark setup` → proving key + verifying key (+ snarkjs-compatible JSON).
-- `xark prove` → `proof.bin` + `public_inputs.bin` (+ snarkjs JSON).
+- `xark setup` → proving key + verifying key.
+- `xark prove` → `proof.bin` + `public_inputs.bin`.
+- `xark client` → a typed TypeScript client that proves and verifies in Node or a browser.
 - `xark export` → a Rust verifier crate with the verifying key baked in, plus
   `instruction_data.bin` = `proof (256 B) || public_inputs (N × 32 B, little-endian)` — the exact
   bytes your program receives.
 
-On-chain, your program does one thing: `verify_instruction_data(data)`. The `alt_bn128` syscalls do
-the heavy lifting.
+On-chain, your program does one thing: call the crate's `verify`. The `alt_bn128` syscalls do the
+heavy lifting.
 
 ## One number to remember
 
-**~256 bytes, verified in ~a few hundred k compute units.** A ZK proof compresses an arbitrarily
-large private computation into that. That compression is the whole reason this is exciting for a
+**256 bytes, verified in about 77k compute units.** A ZK proof compresses an arbitrarily large
+private computation into that. That compression is the whole reason this is exciting for a
 blockchain.
 
 Next: [what a trusted setup is, and why you should care →](/docs/learn-zk/04-trusted-setup-intuition)
