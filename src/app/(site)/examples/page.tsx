@@ -12,8 +12,8 @@ const examples = [
   {
     no: "02",
     name: "Age verification",
-    pi: "2 public inputs",
-    blurb: "Prove 18+ without a birthday. Commitments.",
+    pi: "4 public inputs",
+    blurb: "Prove 18+ without a birthday, for one wallet. Commitments.",
   },
   {
     no: "03",
@@ -24,7 +24,7 @@ const examples = [
   {
     no: "04",
     name: "Shielded transfer",
-    pi: "12 public inputs",
+    pi: "19 public inputs",
     blurb: "Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.",
   },
 ];

@@ -46,7 +46,8 @@ Each is one field element wide, with a natural form in tests, `--inputs`, and th
 client.
 
 - `Days<FROM, TO>`: a day from the start of year `FROM` to the end of `TO` (UTC), in the circuit
-  its day count, just wide enough for the range (`Days<1900, 2100>` is 17 bits). It's
+  its day count, just wide enough for the range (`Days<1900, 2100>` is 17 bits) and checked to be
+  a day in it as it's read (17 bits hold more than the range's 73,414 days). It's
   `"1990-01-01"` in Rust and `--inputs` and a JS `Date` in TypeScript, and any moment of a day is
   that day. `Time<UNIT, FROM, TO>` is the same in other steps (`Time<MINUTE, 2020, 2060>`).
 - `Timestamp`: any moment, as Unix seconds (an `i64`, as Solana's `Clock` and a JS `Date` hold
