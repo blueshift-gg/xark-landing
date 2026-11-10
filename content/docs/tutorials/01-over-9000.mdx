@@ -284,6 +284,7 @@ and `program/src/lib.rs` with:
 
 ```rust title="program/src/lib.rs"
 #![no_std]
+use over_9000_verifier::{Proof, verify};
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
 
 program_entrypoint!(process_instruction);
@@ -291,16 +292,19 @@ pinocchio::nostd_panic_handler!();
 pinocchio::no_allocator!();
 
 fn process_instruction(_program_id: &Address, _accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    // The instruction data is the 256-byte proof and nothing else.
-    if data.len() == 256 && over_9000_verifier::verify_instruction_data(data) {
-        Ok(())
-    } else {
-        Err(ProgramError::InvalidInstructionData)
+    // The instruction data is the 256-byte proof, and nothing else: the circuit has no
+    // public inputs.
+    let proof: &[u8; 256] = data.try_into().map_err(|_| ProgramError::InvalidInstructionData)?;
+    if !verify(&Proof::from_le_bytes(proof), &[]) {
+        return Err(ProgramError::InvalidInstructionData);
     }
+    Ok(())
 }
 ```
 
-The program is one call. With no public inputs, the instruction data is the proof itself.
+The program reads the proof as a `[u8; 256]` and makes one call. `verify` takes the public
+inputs as an array of 32-byte values, one per input, so their number is checked when the program
+compiles. This circuit has none, so it's `&[]`.
 </Step>
 
 <Step>
@@ -388,7 +392,7 @@ $ npx vitest run --reporter=verbose
  ✓ over-9000.test.ts > a proof of 9001 verifies 52ms
  ✓ over-9000.test.ts > 9000 has no proof 47ms
 stdout | over-9000.test.ts > the program accepts the proof, and only the proof
-verified onchain in 74358 CU
+verified onchain in 75948 CU
 
  ✓ over-9000.test.ts > the program accepts the proof, and only the proof 40ms
 
@@ -396,7 +400,7 @@ verified onchain in 74358 CU
       Tests  3 passed (3)
 ```
 
-Your proof was verified onchain, in about 74,000 compute units, and the tampered one was refused.
+Your proof was verified onchain, in about 76,000 compute units, and the tampered one was refused.
 </Step>
 
 </Steps>
