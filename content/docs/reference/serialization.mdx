@@ -1,6 +1,6 @@
 ---
 title: Serialization & artifacts
-description: The files xark writes, and the two encodings — native and on-chain.
+description: The files xark writes, and the two encodings — native and onchain.
 ---
 
 xark writes proofs and keys in two encodings, for two audiences. Knowing which is which saves you a
@@ -9,13 +9,13 @@ lot of "why doesn't this verify" confusion.
 - **Native (`.bin`)** — Arkworks canonical serialization (`Compress::Yes`, validated on read):
   byte-for-byte what `ark-groth16` 0.6 produces for `VerifyingKey<Bn254>` and `Proof<Bn254>`. This
   is what `xark verify` and `@blueshift-gg/xark`'s `verify` read off-chain.
-- **On-chain (`.solana.bin`)** — every field element 32 bytes **little-endian**, points
+- **Onchain (`.solana.bin`)** — every field element 32 bytes **little-endian**, points
   uncompressed, G2 as `(c0, c1)`, and a proof as `−A ‖ B ‖ C` (256 bytes). This is what Solana's
   `alt_bn128` syscalls consume; `xark export` writes it, and a TypeScript client's
   `proof.toBytes()` is a proof in it. See [How verification works](/docs/guides/how-verification-works).
 
 `xark verify --proof`, `@blueshift-gg/xark`'s `verify` and a client verifier take a proof in either
-form, telling them apart by length (128 bytes compressed, 256 on-chain).
+form, telling them apart by length (128 bytes compressed, 256 onchain).
 
 ## Artifacts
 
@@ -35,10 +35,10 @@ form, telling them apart by length (128 bytes compressed, 256 on-chain).
 | `proving_key.bin` / `verifying_key.bin` | `xark ceremony` | the same as `pk.bin` / `vk.bin`, from the ceremony |
 | `proof.bin` | `xark prove`, `@blueshift-gg/xark`'s `prove` | `Proof<Bn254>` |
 | `public_inputs.bin` | `xark prove`, `@blueshift-gg/xark`'s `prove` | an 8-byte little-endian count, then each value as 32 bytes little-endian |
-| `verifying_key.solana.bin` | `xark export` | the verifying key, on-chain layout |
+| `verifying_key.solana.bin` | `xark export` | the verifying key, onchain layout |
 | `proof.solana.bin` | `xark export` | 256 bytes, `−A ‖ B ‖ C` |
 | `public_inputs.solana.bin` | `xark export` | N × 32 bytes, little-endian |
-| `instruction_data.bin` | `xark export` | `proof ‖ public_inputs`, on-chain layout |
+| `instruction_data.bin` | `xark export` | `proof ‖ public_inputs`, onchain layout |
 
 A proving key's header (14 bytes) states whether its points are compressed (the default) or
 uncompressed (`xark setup --uncompressed`), and its QAP domain size. A key with a smooth domain

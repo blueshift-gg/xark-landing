@@ -22,7 +22,7 @@ Every example is the same loop from the [Quickstart](/docs/quickstart): a Rust c
 turning it into a proof and a verifier crate, and a small Solana program that calls that crate's
 `verify`. The two shielded examples add one trick worth its own study — **the chain
 never hashes.** All Poseidon2 hashing happens inside the circuit; it proves that a new Merkle root correctly
-extends the old one, so the on-chain program only stores roots and verifies proofs. Circuit and chain
+extends the old one, so the onchain program only stores roots and verifies proofs. Circuit and chain
 agree by construction instead of by carefully matching two Poseidon2 implementations.
 
 To run one, `cd 01-over-9000 && just build` takes it from circuit to a deployable `.so`, and

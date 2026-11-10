@@ -69,6 +69,8 @@ mean what it says, and it's the range proof under every balance, age or price ch
 See [Integers](/docs/reference/language#integers) and
 [Circuits and constraints](/docs/learn-zk/02-circuits-and-constraints).
 
+<IntegerWidths />
+
 `9000` is a literal, so it's fixed into the circuit. The circuit has no public inputs at all.
 </Step>
 
@@ -318,7 +320,7 @@ the generated verifier calls the `alt_bn128` syscalls the way only a v3 program 
 </Step>
 
 <Step>
-### Verify the proof on-chain
+### Verify the proof onchain
 
 The last test sends the proof to the program in [LiteSVM](https://github.com/LiteSVM/litesvm),
 an in-process Solana VM with the same `alt_bn128` syscalls as mainnet, and no validator or
@@ -370,7 +372,7 @@ test("the program accepts the proof, and only the proof", async () => {
 
   const proof = prover.prove({ powerLevel: 9001 }).toBytes();
   const units = await send(svm, payer, program, proof);
-  console.log(`verified on-chain in ${units} CU`);
+  console.log(`verified onchain in ${units} CU`);
 
   const tampered = proof.slice();
   tampered[0] ^= 1;
@@ -386,7 +388,7 @@ $ npx vitest run --reporter=verbose
  ✓ over-9000.test.ts > a proof of 9001 verifies 52ms
  ✓ over-9000.test.ts > 9000 has no proof 47ms
 stdout | over-9000.test.ts > the program accepts the proof, and only the proof
-verified on-chain in 74358 CU
+verified onchain in 74358 CU
 
  ✓ over-9000.test.ts > the program accepts the proof, and only the proof 40ms
 
@@ -394,7 +396,7 @@ verified on-chain in 74358 CU
       Tests  3 passed (3)
 ```
 
-Your proof was verified on-chain, in about 74,000 compute units, and the tampered one was refused.
+Your proof was verified onchain, in about 74,000 compute units, and the tampered one was refused.
 </Step>
 
 </Steps>

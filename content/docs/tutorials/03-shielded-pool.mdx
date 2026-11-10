@@ -4,7 +4,7 @@ description: Deposit 1 SOL, then withdraw it to a fresh address that no one can 
 ---
 
 In this tutorial you'll build a shielded pool: anyone deposits a fixed amount, and later
-withdraws it to a new address. On-chain, an observer sees a deposit and, separately, a
+withdraws it to a new address. Onchain, an observer sees a deposit and, separately, a
 withdrawal, with nothing to say which deposit it came from. By the end you'll have:
 
 - a **shared crate**, `pool`: the Merkle tree of deposits, as plain Rust a wallet also runs;
@@ -576,7 +576,7 @@ test("a wallet keeps its path as others deposit", () => {
 ```
 
 This is the wallet: `Path.first`, `next` and `update` are the Rust from `pool`, so the paths the
-wallet keeps can't disagree with the circuits. `deposits` is for the on-chain test at the end.
+wallet keeps can't disagree with the circuits. `deposits` is for the onchain test at the end.
 Run it:
 
 ```console
@@ -872,7 +872,7 @@ directly; the Anchor CLI only matters when you deploy.
 </Step>
 
 <Step>
-### Deposit and withdraw on-chain
+### Deposit and withdraw onchain
 
 Back in `app/`, add the Solana packages:
 
@@ -969,7 +969,7 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
       accounts: [writable(pool), signer(depositor), system],
       data: anchorData("deposit", leaf.toBytes(), append.newRoot.toBytes(), proof.toBytes()),
     });
-    console.log(`deposit ${append.index} verified on-chain in ${units} CU`);
+    console.log(`deposit ${append.index} verified onchain in ${units} CU`);
     const path = tip;
     tip = tip.next(leaf);
     return { path, leaf };
@@ -1004,7 +1004,7 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
   await expect(send(svm, relayer, withdraw(thief))).rejects.toThrow(/InvalidProof/);
 
   const units = await send(svm, relayer, withdraw(recipient));
-  console.log(`withdrawal verified on-chain in ${units} CU`);
+  console.log(`withdrawal verified onchain in ${units} CU`);
   expect(svm.getBalance(recipient)).toBe(DENOMINATION - fee);
 
   // The nullifier is spent: the same note can't come out twice.
@@ -1018,11 +1018,11 @@ Run the tests:
 $ npx vitest run --reporter=verbose
  ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2519ms
 stdout | shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
-deposit 0 verified on-chain in 96693 CU
+deposit 0 verified onchain in 96693 CU
 ...
-deposit 1 verified on-chain in 97276 CU
+deposit 1 verified onchain in 97276 CU
 ...
-withdrawal verified on-chain in 121071 CU
+withdrawal verified onchain in 121071 CU
 
  ✓ shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4687ms
 
@@ -1040,7 +1040,7 @@ program tried to create its nullifier account again.
 
 ## What you built
 
-A shielded pool: 1 SOL went in from one wallet and came out at another, and nothing on-chain links
+A shielded pool: 1 SOL went in from one wallet and came out at another, and nothing onchain links
 the two. The new ideas:
 
 - **Merkle paths.** A deposit's commitment is a leaf; a withdrawal proves the note behind *some*

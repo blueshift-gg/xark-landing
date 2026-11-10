@@ -25,13 +25,13 @@ cheaply on Solana," Groth16 is the pragmatic pick.
 After setup you have two keys:
 
 - a **proving key** (big, used off-chain to make proofs), and
-- a **verifying key** (small, embedded in your on-chain program by `xark export`).
+- a **verifying key** (small, embedded in your onchain program by `xark export`).
 
 Then:
 
 ```
 prove(proving_key, public_inputs, witness)  ->  proof         (off-chain, in `xark prove`)
-verify(verifying_key, public_inputs, proof) ->  true / false  (on-chain, in your program)
+verify(verifying_key, public_inputs, proof) ->  true / false  (onchain, in your program)
 ```
 
 The verifier folds the **public inputs** into its check. This is a subtle, important point: a proof
@@ -49,7 +49,7 @@ proof stops verifying. One catch: a public input that no constraint uses — a r
   `instruction_data.bin` = `proof (256 B) || public_inputs (N × 32 B, little-endian)` — the exact
   bytes your program receives.
 
-On-chain, your program does one thing: call the crate's `verify`. The `alt_bn128` syscalls do the
+Onchain, your program does one thing: call the crate's `verify`. The `alt_bn128` syscalls do the
 heavy lifting.
 
 ## One number to remember

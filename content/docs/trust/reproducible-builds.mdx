@@ -1,6 +1,6 @@
 ---
 title: Reproducible builds
-description: Verify that the verifier deployed on-chain is exactly the code you can read.
+description: Verify that the verifier deployed onchain is exactly the code you can read.
 ---
 
 A verifier you can't reproduce is a verifier you have to trust blindly. xark ships a **reference
@@ -54,6 +54,6 @@ the same recipe on your own program crate — pinned toolchain, release profile,
 <Callout title="What this does and doesn't catch">
 It catches **source-vs-deployed drift, toolchain drift, and dependency drift** — the deployed bytes
 are the reviewed bytes. It does **not** catch a compromised pinned toolchain (a backdoored
-`platform-tools` would still hash-match) or a compromised on-chain loader (a property of the Solana
+`platform-tools` would still hash-match) or a compromised onchain loader (a property of the Solana
 runtime, out of scope).
 </Callout>

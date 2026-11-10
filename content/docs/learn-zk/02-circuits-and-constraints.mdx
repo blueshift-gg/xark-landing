@@ -73,7 +73,7 @@ proof
 ```
 
 There is no separate frontend language: **the circuit is ordinary Rust**, compiled by your stable
-`rustc`. xark owns everything after the wasm (xark-IR → R1CS → Groth16 → on-chain verifier). It
+`rustc`. xark owns everything after the wasm (xark-IR → R1CS → Groth16 → onchain verifier). It
 accepts a subset of Rust and *rejects* anything it can't prove soundly, at its source line — that
 rejection is a safety feature, not a limitation to route around.
 

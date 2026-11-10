@@ -4,7 +4,7 @@ description: What is machine-checked, what is tested, and — plainly — what i
 ---
 
 <Callout type="error" title="Not audited. Experimental.">
-xark has **not** been externally audited, and its on-chain verifier has **never** been deployed to
+xark has **not** been externally audited, and its onchain verifier has **never** been deployed to
 mainnet. Everything below is real — but formal proofs and tests are *not* a substitute for an
 external audit. Treat xark as experimental. Don't hold value on it.
 </Callout>
@@ -48,7 +48,7 @@ a gate count matched to a hand-restated model. The audit-status document lists e
 
 ## Bounded-checked with Kani
 
-The on-chain verifier's byte logic — canonicality, fail-closed behavior, strict non-malleability,
+The onchain verifier's byte logic — canonicality, fail-closed behavior, strict non-malleability,
 arity, totality, and pairing-operand assembly — is checked with **Kani bounded model checking**.
 That's a different, complementary guarantee from the Lean proofs: exhaustive within input bounds
 rather than deductive over all inputs.

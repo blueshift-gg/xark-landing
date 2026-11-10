@@ -4,7 +4,7 @@ description: Private payments of any amount, Zcash-style. Notes, a key hierarchy
 ---
 
 In this tutorial you'll build a shielded pool for an SPL token. Anyone can deposit tokens into it,
-pay anyone else any amount inside it, and withdraw. On-chain, an observer sees tokens go in and
+pay anyone else any amount inside it, and withdraw. Onchain, an observer sees tokens go in and
 come out, but never who paid whom, or how much.
 
 [03 · Shielded pool](/docs/tutorials/03-shielded-pool) moved fixed amounts from a deposit to a
@@ -56,7 +56,7 @@ spent (2 notes) + vpub_in  ==  created (2 notes) + vpub_out + fee
 ```
 
 - A **deposit** has `vpub_in > 0`. Its spends are dummies.
-- A **transfer** has `vpub_in = vpub_out = 0`. No tokens move on-chain, except a fee.
+- A **transfer** has `vpub_in = vpub_out = 0`. No tokens move onchain, except a fee.
 - A **withdrawal** has `vpub_out > 0`.
 
 A slot you don't need takes a **dummy**: a note worth 0 that isn't checked against the tree. So
@@ -1025,7 +1025,7 @@ async function prepare(p: Pool, key: Key, spends: [Spend, Spend], outputs: [Outp
 async function transact(p: Pool, user: KeyPairSigner, key: Key, spends: [Spend, Spend], outputs: [Output, Output], moves: Moves = {}) {
   const t = await prepare(p, key, spends, outputs, moves);
   const units = await send(p.svm, user, budget, t.instruction(user));
-  console.log(`transact verified on-chain in ${units} CU`);
+  console.log(`transact verified onchain in ${units} CU`);
   return t.landed();
 }
 ```
@@ -1078,7 +1078,7 @@ test("deposit, pay privately, withdraw, through a relayer", async () => {
   const elsewhere = await tokenAccount(p.svm, p.mint, thief.address, 0n);
   await expect(send(p.svm, thief, budget, withdrawal.instruction(thief, { recipient: elsewhere, relayerToken }))).rejects.toThrow(/InvalidProof/);
   const units = await send(p.svm, relayer, budget, withdrawal.instruction(relayer));
-  console.log(`withdrawal verified on-chain in ${units} CU`);
+  console.log(`withdrawal verified onchain in ${units} CU`);
   withdrawal.landed();
   expect(balance(p.svm, bobToken)).toBe(95n);
   expect(balance(p.svm, p.vault)).toBe(45n); // Alice's change, still shielded
@@ -1113,15 +1113,15 @@ From `app/`:
 ```console
 $ npx vitest run --reporter=verbose
 stdout | shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
-transact verified on-chain in 185006 CU
+transact verified onchain in 185006 CU
 ...
-transact verified on-chain in 180079 CU
+transact verified onchain in 180079 CU
 ...
-withdrawal verified on-chain in 184375 CU
+withdrawal verified onchain in 184375 CU
 
  ✓ shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 3774ms
 stdout | shielded-transfer.test.ts > only a note's owner can spend it
-transact verified on-chain in 180506 CU
+transact verified onchain in 180506 CU
 
  ✓ shielded-transfer.test.ts > only a note's owner can spend it 2062ms
 
@@ -1133,7 +1133,7 @@ Four transactions were proved, each in about a second on the worker pool, and ve
 program in 180,000 to 185,000 compute units. The number varies with the public inputs: across
 runs, up to about 192,000, close to the default limit, so each transaction carries
 `budget`, a limit of 250,000.
-The vault ends at 45: Alice's change, still shielded, with nothing on-chain saying it's hers.
+The vault ends at 45: Alice's change, still shielded, with nothing onchain saying it's hers.
 Mallory's spend was refused before any proof was made.
 </Step>
 
@@ -1142,7 +1142,7 @@ Mallory's spend was refused before any proof was made.
 ## What you built
 
 A shielded pool for any SPL token. Alice deposited, paid Bob privately and kept her change; Bob
-withdrew without ever holding SOL. On-chain there was a deposit into the vault, a withdrawal
+withdrew without ever holding SOL. Onchain there was a deposit into the vault, a withdrawal
 out of it, two fees and three transactions of commitments and nullifiers, with no link between
 the deposit and the withdrawal.
 

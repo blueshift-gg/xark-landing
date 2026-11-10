@@ -197,7 +197,7 @@ commitment.
 ### Bind the proof to the holder's wallet
 
 So far a proof says that *someone* holding this credential is an adult. Anyone who saw it
-on-chain could submit it as their own. To stop that, make the holder's wallet a public input. A
+onchain could submit it as their own. To stop that, make the holder's wallet a public input. A
 Solana address is 32 bytes, which the circuit takes as `xark_hash::Hash`.
 
 Add the import at the top of `src/lib.rs`:
@@ -502,7 +502,7 @@ the commitment from the transaction. A proof made for another day or another wal
 </Step>
 
 <Step>
-### Compute the policy on-chain
+### Compute the policy onchain
 
 The program can't link xark, so it computes `Policy::adult_on(today).born_by` itself, as the
 circuit's `Date` holds it: days since 1900-01-01. Append to `program/src/lib.rs`:
@@ -592,7 +592,7 @@ The program is at `program/target/deploy/age_verification_program.so`.
 </Step>
 
 <Step>
-### Verify the proof on-chain
+### Verify the proof onchain
 
 Back in `app/`, add the Solana packages:
 
@@ -670,7 +670,7 @@ test("the program accepts the proof for its holder, today", async () => {
   const address = new Uint8Array(getAddressEncoder().encode(holder.address));
   const proof = prover.prove({ id, commitment, policy, holder: address }).toBytes();
   const units = await send(svm, payer, verifyAge(program, holder, proof, commitment));
-  console.log(`verified on-chain in ${units} CU`);
+  console.log(`verified onchain in ${units} CU`);
 
   // Someone who copies the proof can't submit it from their own wallet,
   const copycat = await generateKeyPairSigner();
@@ -691,7 +691,7 @@ $ npx vitest run --reporter=verbose
  ✓ age-verification.test.ts > an adult has a proof 118ms
  ✓ age-verification.test.ts > a minor has no proof 171ms
 stdout | age-verification.test.ts > the program accepts the proof for its holder, today
-verified on-chain in 96373 CU
+verified onchain in 96373 CU
 
  ✓ age-verification.test.ts > the program accepts the proof for its holder, today 104ms
 
@@ -699,7 +699,7 @@ verified on-chain in 96373 CU
       Tests  3 passed (3)
 ```
 
-The proof verified on-chain, in about 96,000 compute units, and was refused from another wallet,
+The proof verified onchain, in about 96,000 compute units, and was refused from another wallet,
 for another commitment, and the next day. A proof is for one UTC day: one that lands after
 midnight UTC has to be made again.
 </Step>
