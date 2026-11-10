@@ -29,7 +29,7 @@ fn zkyc(id: Private<Identity>, commitment: Public<Field>, policy: Public<Policy>
 }
 ```
 
-`examples/zkyc` is this circuit in full. `#[input]` also derives `Clone`, `Copy` and `Debug` unless
+zKYC (`examples/zkyc`) is this circuit in full. `#[input]` also derives `Clone`, `Copy` and `Debug` unless
 the type lists them; `#[input(no_derive)]` is for a type with its own. Fields may be gadget types
 too, and `to_fields()` gives a value's field elements, to hash it in one call.
 
