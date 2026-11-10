@@ -618,11 +618,27 @@ The program is Pinocchio, as in 01 to 03, and has three instructions:
   roots, checks the proof against the recipient and relayer accounts, creates a PDA for the
   nullifier hash and pays out. A second withdrawal of the same note finds that PDA and fails.
 
-It's longer than 03's, so you'll write it in pieces. From `xark-pool/`:
+It's longer than 03's, so you'll write it in pieces, in the usual Pinocchio layout:
+
+```text
+program/src/
+├── lib.rs                  the entrypoint
+├── state.rs                the pool's account and the nullifier's
+├── helpers.rs              the account checks the instructions share
+├── instructions/
+│   ├── mod.rs
+│   ├── initialize.rs
+│   ├── deposit.rs
+│   └── withdraw.rs
+└── errors.rs               the program's own errors
+```
+
+From `xark-pool/`:
 
 ```sh
 cd ..
 cargo new --lib program --name shielded-pool
+mkdir program/src/instructions
 ```
 
 Replace `program/Cargo.toml` with:
@@ -651,110 +667,61 @@ solana-address = { version = "2", features = ["curve25519"] }
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
 ```
 
-Instruction data is a one-byte tag, which instruction, then its arguments' bytes in order. Each
-instruction's arguments are a `#[repr(C)]` struct of byte arrays, so the program reads them in
-place, with no parsing and no copying, and refuses data of any other length. Replace
-`program/src/lib.rs` with the entrypoint:
+The first byte of the instruction data is a discriminator, which instruction it is: `0`, `1` or
+`2`. Each instruction's file declares its own, and the entrypoint hands the rest of the data and
+the accounts to that instruction. Replace `program/src/lib.rs` with:
 
 ```rust title="program/src/lib.rs"
 #![no_std]
 
-use deposit_verifier::Proof; // the same type in both verifier crates
-use pinocchio::{
-    AccountView, Address, ProgramResult,
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    program_entrypoint,
-};
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
+
+mod errors;
+mod helpers;
+mod instructions;
+mod state;
+
+pub use errors::*;
+pub use instructions::*;
+
+// Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS
+pub const ID: Address = Address::new_from_array([
+    0xda, 0x07, 0x5c, 0xb2, 0xff, 0x5e, 0xc6, 0x81, 0x76, 0x13, 0xde, 0x53, 0x0b, 0x69, 0x2a, 0x87,
+    0x35, 0x47, 0x77, 0x69, 0xda, 0x47, 0x43, 0x0c, 0xbd, 0x81, 0x54, 0x33, 0x5c, 0x4a, 0x83, 0x27,
+]);
 
 program_entrypoint!(process_instruction);
 pinocchio::nostd_panic_handler!();
 pinocchio::no_allocator!();
 
-const TREE_HEIGHT: u32 = 20;
-const ROOT_HISTORY_SIZE: usize = 16;
-const POOL_SEED: &[u8] = b"pool";
-const NULLIFIER_SEED: &[u8] = b"nullifier";
-
-// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
-// a pool can't be seeded with another tree.
-const EMPTY_ROOT: [u8; 32] = [
-    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
-    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
-];
-
-// The instructions' tags: the first byte of the instruction data.
-const INITIALIZE: u8 = 0;
-const DEPOSIT: u8 = 1;
-const WITHDRAW: u8 = 2;
-
 fn process_instruction(
-    program_id: &Address,
+    _program_id: &Address,
     accounts: &mut [AccountView],
-    data: &[u8],
+    instruction_data: &[u8],
 ) -> ProgramResult {
-    let result = match data.split_first() {
-        Some((&INITIALIZE, args)) => initialize(program_id, accounts, cast(args)?),
-        Some((&DEPOSIT, args)) => deposit(program_id, accounts, cast(args)?),
-        Some((&WITHDRAW, args)) => withdraw(program_id, accounts, cast(args)?),
-        _ => Err(ProgramError::InvalidInstructionData),
-    };
-    if let Err(ProgramError::Custom(code)) = result {
-        log(PoolError::message(code));
+    let result = dispatch(accounts, instruction_data);
+    // The program's own errors log their names, which the test matches.
+    if let Err(error @ ProgramError::Custom(_)) = &result {
+        helpers::log(error.to_str::<ShieldedPoolError>());
     }
     result
 }
 
-/// `[0] ‖ denomination (u64 LE)`
-#[repr(C)]
-struct InitializeArgs {
-    denomination: [u8; 8],
-}
-
-/// `[1] ‖ commitment (32) ‖ new_root (32) ‖ proof (256)`
-#[repr(C)]
-struct DepositArgs {
-    commitment: [u8; 32],
-    new_root: [u8; 32],
-    proof: [u8; 256],
-}
-
-/// `[2] ‖ proof (256) ‖ root (32) ‖ nullifier_hash (32) ‖ fee (u64 LE)`
-#[repr(C)]
-struct WithdrawArgs {
-    proof: [u8; 256],
-    root: [u8; 32],
-    nullifier_hash: [u8; 32],
-    fee: [u8; 8],
-}
-
-/// Plain bytes: `#[repr(C)]`, made only of `u8` arrays, so alignment 1 and every
-/// bit pattern valid. A byte slice of exactly its size can be read as one.
-///
-/// # Safety
-///
-/// The implementor must be `#[repr(C)]` and made only of `u8` arrays.
-unsafe trait Plain: Sized {
-    const LEN: usize = size_of::<Self>();
-}
-
-unsafe impl Plain for InitializeArgs {}
-unsafe impl Plain for DepositArgs {}
-unsafe impl Plain for WithdrawArgs {}
-
-/// The arguments `data` holds, if it is exactly their size.
-fn cast<T: Plain>(data: &[u8]) -> Result<&T, ProgramError> {
-    if data.len() != T::LEN {
-        return Err(ProgramError::InvalidInstructionData);
+fn dispatch(accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramResult {
+    match instruction_data.split_first() {
+        Some((Initialize::DISCRIMINATOR, data)) => {
+            Initialize::try_from((data, accounts))?.process()
+        }
+        Some((Deposit::DISCRIMINATOR, data)) => Deposit::try_from((data, accounts))?.process(),
+        Some((Withdraw::DISCRIMINATOR, data)) => Withdraw::try_from((data, accounts))?.process(),
+        _ => Err(ProgramError::InvalidInstructionData),
     }
-    // SAFETY: `T` is plain bytes (alignment 1) and `data` is exactly its size.
-    Ok(unsafe { &*data.as_ptr().cast::<T>() })
 }
 ```
 
-`EMPTY_ROOT` is the one tree value the program holds itself, and the test at the end checks it
-against the circuit's `Path.first().treeRoot()`. The entrypoint logs the program's own errors by
-name, which you'll write last, so the test can match them.
+`ID` is the program's address. The program checks its accounts against it, so it must be the
+address the program is deployed at; the test at the end deploys it there. The errors it logs are
+the ones you'll write last.
 </Step>
 
 <Step>
@@ -767,64 +734,96 @@ The program owns two kinds of account, each at a PDA:
 | `pool` | `["pool", denomination as u64 LE]` | 536 |
 | `nullifier` | `["nullifier", denomination as u64 LE, nullifier_hash]` | 1 |
 
-Each starts with a tag byte, so one kind can't be passed off as the other. Append the layouts to
-`program/src/lib.rs`:
+Each starts with a tag byte, so one kind can't be passed off as the other. Create
+`program/src/state.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/state.rs"
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
+
+use crate::helpers::writable;
+
+pub const TREE_HEIGHT: u32 = 20;
+pub const ROOT_HISTORY_SIZE: usize = 16;
+pub const POOL_SEED: &[u8] = b"pool";
+pub const NULLIFIER_SEED: &[u8] = b"nullifier";
+
+// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
+// a pool can't be seeded with another tree.
+pub const EMPTY_ROOT: [u8; 32] = [
+    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
+    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+];
+
 /// A pool's account, 536 bytes: tag, bump, 6 reserved bytes, then
 /// `denomination` (u64 LE), `next_index` and `current_root_index` (u32 LE), and
 /// a ring of the 16 most recent roots.
 #[repr(C)]
-struct Pool {
-    tag: u8,
-    bump: u8,
+pub struct Pool {
+    pub tag: u8,
+    pub bump: u8,
     reserved: [u8; 6],
-    denomination: [u8; 8],
+    pub denomination: [u8; 8],
     next_index: [u8; 4],
     current_root_index: [u8; 4],
     roots: [[u8; 32]; ROOT_HISTORY_SIZE],
 }
 
-unsafe impl Plain for Pool {}
 const _: () = assert!(Pool::LEN == 536);
 
 impl Pool {
-    const TAG: u8 = 1;
+    pub const LEN: usize = size_of::<Self>();
+    pub const TAG: u8 = 1;
 
     /// The pool `data` holds, if it is a pool's size and tag.
-    fn from_bytes(data: &[u8]) -> Result<&Pool, ProgramError> {
-        if data.len() != Pool::LEN || data[0] != Pool::TAG {
+    pub fn load(data: &[u8]) -> Result<&Self, ProgramError> {
+        if data.len() != Self::LEN || data[0] != Self::TAG {
             return Err(ProgramError::InvalidAccountData);
         }
-        // SAFETY: `Pool` is plain bytes and `data` is exactly its size.
-        Ok(unsafe { &*data.as_ptr().cast::<Pool>() })
+        // SAFETY: `Pool` is all byte arrays (alignment 1, any bit pattern valid),
+        // and `data` is exactly its size.
+        Ok(unsafe { &*data.as_ptr().cast::<Self>() })
     }
 
-    /// As `from_bytes`, to write; a freshly created account (tag 0) too.
-    fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Pool, ProgramError> {
-        if data.len() != Pool::LEN || (data[0] != Pool::TAG && data[0] != 0) {
+    /// As `load`, to write.
+    pub fn load_mut(data: &mut [u8]) -> Result<&mut Self, ProgramError> {
+        if data.len() != Self::LEN || data[0] != Self::TAG {
             return Err(ProgramError::InvalidAccountData);
         }
         // SAFETY: as above.
-        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Pool>() })
+        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Self>() })
     }
 
-    fn denomination(&self) -> u64 {
+    /// Write a new pool into a freshly created account, which is zeroed: the
+    /// ring's other slots are empty.
+    pub fn init(data: &mut [u8], denomination: [u8; 8], bump: u8) -> ProgramResult {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: as above.
+        let pool = unsafe { &mut *data.as_mut_ptr().cast::<Self>() };
+        pool.tag = Self::TAG;
+        pool.bump = bump;
+        pool.denomination = denomination;
+        pool.roots[0] = EMPTY_ROOT;
+        Ok(())
+    }
+
+    pub fn denomination(&self) -> u64 {
         u64::from_le_bytes(self.denomination)
     }
 
-    fn next_index(&self) -> u32 {
+    pub fn next_index(&self) -> u32 {
         u32::from_le_bytes(self.next_index)
     }
 
-    fn current_root(&self) -> &[u8; 32] {
+    pub fn current_root(&self) -> &[u8; 32] {
         let i = u32::from_le_bytes(self.current_root_index) as usize % ROOT_HISTORY_SIZE;
         &self.roots[i]
     }
 
     /// Remember `root` as the newest in the ring, and advance the tree. The caller
     /// has checked the tree isn't full.
-    fn push_root(&mut self, root: &[u8; 32]) {
+    pub fn push_root(&mut self, root: &[u8; 32]) {
         let i = (u32::from_le_bytes(self.current_root_index) as usize + 1) % ROOT_HISTORY_SIZE;
         self.current_root_index = (i as u32).to_le_bytes();
         self.roots[i] = *root;
@@ -832,84 +831,89 @@ impl Pool {
     }
 
     /// One of the recent roots. The ring's unused slots are zero; no root is.
-    fn knows_root(&self, root: &[u8; 32]) -> bool {
+    pub fn knows_root(&self, root: &[u8; 32]) -> bool {
         root != &[0; 32] && self.roots.contains(root)
     }
 }
 
 /// A spent nullifier's account: one byte, its tag. That it exists is what counts.
-struct Nullifier;
+pub struct Nullifier;
 
 impl Nullifier {
-    const LEN: usize = 1;
-    const TAG: u8 = 2;
+    pub const LEN: usize = 1;
+    pub const TAG: u8 = 2;
 }
 ```
 
-A pool is plain bytes too: every field is a byte array, read little-endian, so the account's data
-is the struct, at any address. The 6 reserved bytes put `denomination` at offset 8, and the roots
-start at 24, which is where the test will read the empty root. The ring keeps 16 roots, so a
-withdrawal proved against the tree a few deposits ago still verifies.
+A pool is plain bytes: every field is a byte array, read little-endian, so the account's data is
+the struct, at any address, and `load` reads it in place, with no parsing and no copying. The 6
+reserved bytes put `denomination` at offset 8, and the roots start at 24, which is where the test
+will read the empty root. The ring keeps 16 roots, so a withdrawal proved against the tree a few
+deposits ago still verifies. `EMPTY_ROOT` is the one tree value the program holds itself, and the
+test checks it against the circuit's `Path.first().treeRoot()`.
 </Step>
 
 <Step>
 ### Check every account
 
 Nothing checks an account for a Pinocchio program: the runtime hands it the accounts the
-transaction names, and anyone can name any account. So each check is written out, one function
-per kind of account. Append:
+transaction names, and anyone can name any account. So each check is written out, once, and each
+instruction's accounts struct calls the ones it needs. Create `program/src/helpers.rs`:
 
-```rust title="program/src/lib.rs"
-/// What each kind of account must be, one function each.
-mod accounts {
-    use super::*;
+```rust title="program/src/helpers.rs"
+use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
-    /// An account the program writes to.
-    pub fn writable(account: &AccountView) -> ProgramResult {
-        if !account.is_writable() {
-            return Err(ProgramError::Immutable);
-        }
-        Ok(())
+/// An account the program writes to.
+pub fn writable(account: &AccountView) -> ProgramResult {
+    if !account.is_writable() {
+        return Err(ProgramError::Immutable);
     }
+    Ok(())
+}
 
-    /// A payer: a signer, writable.
-    pub fn writable_signer(account: &AccountView) -> ProgramResult {
-        if !account.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
-        }
-        writable(account)
+/// A payer: a signer, writable.
+pub fn writable_signer(account: &AccountView) -> ProgramResult {
+    if !account.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
     }
+    writable(account)
+}
 
-    /// The system program, which creates the accounts and moves the deposits.
-    pub fn system_program(account: &AccountView) -> ProgramResult {
-        if account.address() != &pinocchio_system::ID {
-            return Err(ProgramError::IncorrectProgramId);
-        }
-        Ok(())
+/// The system program, which creates the accounts and moves the deposits.
+pub fn system_program(account: &AccountView) -> ProgramResult {
+    if account.address() != &pinocchio_system::ID {
+        return Err(ProgramError::IncorrectProgramId);
     }
+    Ok(())
+}
 
-    /// An account about to be created: owned by the system program, with no data.
-    /// It may already hold lamports, which anyone can send it; creation tops them
-    /// up to rent exemption.
-    pub fn is_uninitialized(account: &AccountView) -> bool {
-        account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
-    }
+/// An account about to be created: owned by the system program, with no data.
+/// It may already hold lamports, which anyone can send it; creation tops them
+/// up to rent exemption.
+pub fn is_uninitialized(account: &AccountView) -> bool {
+    account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
+}
+```
 
-    /// A pool: writable, owned by this program, a pool's size and tag, at the
-    /// address its own denomination and stored bump derive.
-    pub fn pool(program_id: &Address, pool: &AccountView) -> ProgramResult {
-        writable(pool)?;
-        if !pool.owned_by(program_id) {
+The pool's own check reads the pool, so it goes with it. Append to `program/src/state.rs`:
+
+```rust title="program/src/state.rs"
+impl Pool {
+    /// A pool account: writable, owned by this program, a pool's size and tag, at
+    /// the address its own denomination and stored bump derive.
+    pub fn check(account: &AccountView) -> ProgramResult {
+        writable(account)?;
+        if !account.owned_by(&crate::ID) {
             return Err(ProgramError::InvalidAccountOwner);
         }
-        let data = pool.try_borrow()?;
-        let state = Pool::from_bytes(&data)?;
+        let data = account.try_borrow()?;
+        let pool = Self::load(&data)?;
         let address = Address::derive_address(
-            &[POOL_SEED, &state.denomination],
-            Some(state.bump),
-            program_id,
+            &[POOL_SEED, &pool.denomination],
+            Some(pool.bump),
+            &crate::ID,
         );
-        if pool.address() != &address {
+        if account.address() != &address {
             return Err(ProgramError::InvalidSeeds);
         }
         Ok(())
@@ -923,236 +927,489 @@ What each one prevents:
   transaction after the program ran; the check fails it up front, with `Immutable`.
 - **`writable_signer`**: the depositor's lamports, and the rent for a new account, move only with
   their owner's signature, so no one can spend someone else's SOL into the pool.
-- **`system_program`**: the CPIs below call the system program by its address, and the runtime
-  would refuse them with that account missing; the check names the problem first, with
+- **`system_program`**: the CPIs call the system program by its address, and the runtime would
+  refuse them with that account missing; the check names the problem first, with
   `IncorrectProgramId`.
 - **`is_uninitialized`**: an account about to be created doesn't exist yet, so `initialize` can't
   reset a live pool's roots, and a nullifier that exists means its note is spent. It allows
   lamports already at the address, which anyone can send, so no one can block a withdrawal by
   funding its nullifier's address first.
-- **`pool`**: only this program can write an account it owns, so the owner check makes the roots
-  and the index the program's own, not ones someone wrote to look like them. The size and tag tell
-  a pool from a nullifier, and the address ties it to its own denomination and bump.
+- **`Pool::check`**: only this program can write an account it owns, so the owner check makes the
+  roots and the index the program's own, not ones someone wrote to look like them. The size and
+  tag tell a pool from a nullifier, and the address ties it to its own denomination. The bump is
+  the one the pool stored when it was created, so the check is one hash, not a search.
 </Step>
 
 <Step>
 ### Create a pool
 
-Append `initialize`:
+Each instruction is three structs, as in [02](/docs/tutorials/02-zkyc): its accounts, checked as
+they're taken; its instruction data, checked for length; and the instruction, which holds both and
+whose `process` does the work. Create `program/src/instructions/mod.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/instructions/mod.rs"
+pub mod deposit;
+pub mod initialize;
+pub mod withdraw;
+
+pub use deposit::*;
+pub use initialize::*;
+pub use withdraw::*;
+```
+
+Then `program/src/instructions/initialize.rs`:
+
+```rust title="program/src/instructions/initialize.rs"
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+};
+
+use crate::{
+    helpers::{is_uninitialized, system_program, writable, writable_signer},
+    state::{POOL_SEED, Pool},
+};
+
+/// Accounts: the pool (the PDA, not yet created), the authority (pays the
+/// rent), the system program.
+pub struct InitializeAccounts<'a> {
+    pub pool: &'a mut AccountView,
+    pub authority: &'a AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for InitializeAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [pool, authority, system, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        writable_signer(authority)?;
+        system_program(system)?;
+        writable(pool)?;
+        Ok(Self { pool, authority })
+    }
+}
+
+/// Data: denomination (u64 LE).
+pub struct InitializeInstructionData {
+    pub denomination: [u8; 8],
+}
+
+impl TryFrom<&[u8]> for InitializeInstructionData {
+    type Error = ProgramError;
+
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        let denomination = data
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self { denomination })
+    }
+}
+
 /// Create the pool for one denomination, with the empty tree's root.
-fn initialize(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    args: &InitializeArgs,
-) -> ProgramResult {
-    let [pool, authority, system, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    accounts::writable_signer(authority)?;
-    accounts::system_program(system)?;
-    accounts::writable(pool)?;
-    // One pool per denomination, at the canonical bump.
-    let (address, bump) =
-        Address::find_program_address(&[POOL_SEED, &args.denomination], program_id);
-    if pool.address() != &address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-    if !accounts::is_uninitialized(pool) {
-        return Err(ProgramError::AccountAlreadyInitialized);
-    }
+pub struct Initialize<'a> {
+    pub accounts: InitializeAccounts<'a>,
+    pub data: InitializeInstructionData,
+    pub bump: u8,
+}
 
-    let bump = [bump];
-    let seeds = [
-        Seed::from(POOL_SEED),
-        Seed::from(&args.denomination),
-        Seed::from(&bump),
-    ];
-    pinocchio_system::create_account_with_minimum_balance_signed(
-        pool,
-        Pool::LEN,
-        program_id,
-        authority,
-        None,
-        &[Signer::from(&seeds)],
-    )?;
+impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for Initialize<'a> {
+    type Error = ProgramError;
 
-    let mut data = pool.try_borrow_mut()?;
-    let state = Pool::from_bytes_mut(&mut data)?; // created zeroed: the ring is empty
-    state.tag = Pool::TAG;
-    state.bump = bump[0];
-    state.denomination = args.denomination;
-    state.roots[0] = EMPTY_ROOT;
-    Ok(())
+    fn try_from((data, accounts): (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = InitializeAccounts::try_from(accounts)?;
+        let data = InitializeInstructionData::try_from(data)?;
+        // One pool per denomination, at the canonical bump.
+        let (address, bump) =
+            Address::find_program_address(&[POOL_SEED, &data.denomination], &crate::ID);
+        if accounts.pool.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if !is_uninitialized(accounts.pool) {
+            return Err(ProgramError::AccountAlreadyInitialized);
+        }
+        Ok(Self {
+            accounts,
+            data,
+            bump,
+        })
+    }
+}
+
+impl<'a> Initialize<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &0;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let bump = [self.bump];
+        let seeds = [
+            Seed::from(POOL_SEED),
+            Seed::from(&self.data.denomination),
+            Seed::from(&bump),
+        ];
+        pinocchio_system::create_account_with_minimum_balance_signed(
+            self.accounts.pool,
+            Pool::LEN,
+            &crate::ID,
+            self.accounts.authority,
+            None,
+            &[Signer::from(&seeds)],
+        )?;
+        let mut data = self.accounts.pool.try_borrow_mut()?;
+        Pool::init(&mut data, self.data.denomination, self.bump)
+    }
 }
 ```
 
-It takes the denomination's PDA at its canonical bump, the one `find_program_address` returns, so
-there's exactly one pool per denomination: another bump would give another valid address. The
-account is created by a `pinocchio-system` CPI, signed with the pool's seeds, and is zeroed, so
-only the first root in the ring is set. Anyone can create a pool; the empty root is a constant, so
-no one can seed one with another tree.
+The checks, and what they prevent:
+
+- **The data is exactly 8 bytes**, the denomination, so a short or long instruction is refused
+  before anything reads it.
+- **The pool is the denomination's PDA at its canonical bump**, the one `find_program_address`
+  returns. Another bump would give another valid address, and so a second pool for the same
+  amount; this way there's exactly one. The pool stores the bump, and every later check derives
+  the address from it.
+- **The pool doesn't exist yet**, so no one can reinitialize a live pool and wipe its roots.
+
+The account is created by a `pinocchio-system` CPI, signed with the pool's seeds, and is zeroed,
+so `init` sets only the first root in the ring. Anyone can create a pool; the empty root is a
+constant, so no one can seed one with another tree.
 </Step>
 
 <Step>
 ### Deposit
 
-Append `deposit`:
+A deposit's public inputs need a `u64` as a field element, and it logs an event. Both are
+helpers; append to `program/src/helpers.rs`:
 
-```rust title="program/src/lib.rs"
-/// Deposit the denomination and append `commitment`. The proof says `new_root`
-/// is the current tree with `commitment` appended.
-fn deposit(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    args: &DepositArgs,
-) -> ProgramResult {
-    let [pool, depositor, system, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    accounts::pool(program_id, pool)?;
-    accounts::writable_signer(depositor)?;
-    accounts::system_program(system)?;
-
-    let (denomination, index) = {
-        let mut data = pool.try_borrow_mut()?;
-        let state = Pool::from_bytes_mut(&mut data)?;
-        let index = state.next_index();
-        if index >= 1 << TREE_HEIGHT {
-            return Err(PoolError::TreeFull.into());
-        }
-
-        // The deposit circuit's public `Append`, field by field.
-        let public_inputs = [
-            *state.current_root(),
-            args.new_root,
-            args.commitment,
-            field_from_u64(u64::from(index)),
-        ];
-        if !deposit_verifier::verify(&Proof::from_le_bytes(&args.proof), &public_inputs) {
-            return Err(PoolError::InvalidProof.into());
-        }
-        state.push_root(&args.new_root);
-        (state.denomination(), index)
-    };
-
-    pinocchio_system::instructions::Transfer {
-        from: depositor,
-        to: pool,
-        lamports: denomination,
-    }
-    .invoke()?;
-
-    // What a wallet follows the tree by: the commitment and its leaf index.
-    log_data(&[&args.commitment, &index.to_le_bytes()]);
-    Ok(())
-}
-
+```rust title="program/src/helpers.rs"
 /// A u64 as a 32-byte little-endian field element.
-fn field_from_u64(x: u64) -> [u8; 32] {
+pub fn field_from_u64(x: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[..8].copy_from_slice(&x.to_le_bytes());
     out
+}
+
+/// `Program data: <base64> <base64> ..`, one per slice.
+pub fn log_data(data: &[&[u8]]) {
+    #[cfg(target_os = "solana")]
+    // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
+    unsafe {
+        pinocchio::syscalls::sol_log_data(data.as_ptr().cast(), data.len() as u64)
+    };
+    #[cfg(not(target_os = "solana"))]
+    let _ = data;
+}
+```
+
+Create `program/src/instructions/deposit.rs`:
+
+```rust title="program/src/instructions/deposit.rs"
+use deposit_verifier::{Proof, verify};
+use pinocchio::{AccountView, ProgramResult, error::ProgramError};
+use pinocchio_system::instructions::Transfer;
+
+use crate::{
+    ShieldedPoolError,
+    helpers::{field_from_u64, log_data, system_program, writable_signer},
+    state::{Pool, TREE_HEIGHT},
+};
+
+/// Accounts: the pool, the depositor (signs, pays the denomination), the system
+/// program.
+pub struct DepositAccounts<'a> {
+    pub pool: &'a mut AccountView,
+    pub depositor: &'a AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for DepositAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [pool, depositor, system, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        Pool::check(pool)?;
+        writable_signer(depositor)?;
+        system_program(system)?;
+        Ok(Self { pool, depositor })
+    }
+}
+
+/// Data: commitment (32) ‖ new_root (32) ‖ proof (256).
+pub struct DepositInstructionData<'a> {
+    pub commitment: &'a [u8; 32],
+    pub new_root: &'a [u8; 32],
+    pub proof: &'a [u8; 256],
+}
+
+impl<'a> TryFrom<&'a [u8]> for DepositInstructionData<'a> {
+    type Error = ProgramError;
+
+    fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
+        let (commitment, data) = data
+            .split_first_chunk()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let (new_root, proof) = data
+            .split_first_chunk()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let proof = proof
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self {
+            commitment,
+            new_root,
+            proof,
+        })
+    }
+}
+
+/// Deposit the denomination and append `commitment`. The proof says `new_root`
+/// is the current tree with `commitment` appended.
+pub struct Deposit<'a> {
+    pub accounts: DepositAccounts<'a>,
+    pub data: DepositInstructionData<'a>,
+}
+
+impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for Deposit<'a> {
+    type Error = ProgramError;
+
+    fn try_from((data, accounts): (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = DepositAccounts::try_from(accounts)?;
+        let data = DepositInstructionData::try_from(data)?;
+        Ok(Self { accounts, data })
+    }
+}
+
+impl<'a> Deposit<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &1;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let (denomination, index) = {
+            let mut data = self.accounts.pool.try_borrow_mut()?;
+            let pool = Pool::load_mut(&mut data)?;
+            let index = pool.next_index();
+            if index >= 1 << TREE_HEIGHT {
+                return Err(ShieldedPoolError::TreeFull.into());
+            }
+
+            // The deposit circuit's public `Append`, field by field.
+            let public_inputs = [
+                *pool.current_root(),
+                *self.data.new_root,
+                *self.data.commitment,
+                field_from_u64(u64::from(index)),
+            ];
+            if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+                return Err(ShieldedPoolError::InvalidProof.into());
+            }
+            pool.push_root(self.data.new_root);
+            (pool.denomination(), index)
+        };
+
+        Transfer {
+            from: self.accounts.depositor,
+            to: self.accounts.pool,
+            lamports: denomination,
+        }
+        .invoke()?;
+
+        // What a wallet follows the tree by: the commitment and its leaf index.
+        log_data(&[self.data.commitment, &index.to_le_bytes()]);
+        Ok(())
+    }
 }
 ```
 
 The program builds the deposit circuit's `Append` itself: `old_root` and `index` from its own state,
 and only the commitment and the new root from the instruction. A proof holds only for this pool's
-tree as it is now, so the depositor can't append to an older tree, or at another index. Then it
-stores the new root and pulls the denomination from the depositor with a `pinocchio-system`
-transfer, which the depositor's signature authorizes.
+tree as it is now, so the depositor can't append to an older tree, or at another index. The
+other checks:
 
-The `Program data:` log is how a wallet learns of other deposits, to call `update` on its paths.
+- **The data is exactly 320 bytes**, so the proof the verifier reads is the 256 bytes sent.
+- **The tree isn't full.** A tree of height 20 has 2^20 leaves, and the circuit's index can't
+  name another, so the program refuses a deposit it could never let anyone withdraw, with
+  `TreeFull`.
+
+Then it stores the new root and pulls the denomination from the depositor with a
+`pinocchio-system` transfer, which the depositor's signature authorizes. The `Program data:` log
+is how a wallet learns of other deposits, to call `update` on its paths.
 </Step>
 
 <Step>
 ### Withdraw
 
-Append `withdraw`:
+Create `program/src/instructions/withdraw.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/instructions/withdraw.rs"
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+};
+use withdraw_verifier::{Proof, verify};
+
+use crate::{
+    ShieldedPoolError,
+    helpers::{field_from_u64, is_uninitialized, system_program, writable, writable_signer},
+    state::{NULLIFIER_SEED, Nullifier, Pool},
+};
+
+/// Accounts: the pool, the nullifier (the PDA, not yet created), the recipient,
+/// the relayer (signs, pays the rent), the system program.
+pub struct WithdrawAccounts<'a> {
+    pub pool: &'a mut AccountView,
+    pub nullifier: &'a mut AccountView,
+    pub recipient: &'a mut AccountView,
+    pub relayer: &'a mut AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for WithdrawAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [pool, nullifier, recipient, relayer, system, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        Pool::check(pool)?;
+        writable_signer(relayer)?;
+        system_program(system)?;
+        writable(recipient)?;
+        writable(nullifier)?;
+        // The payout moves the pool's lamports: never to the pool's own accounts.
+        if recipient.address() == pool.address() || recipient.address() == nullifier.address() {
+            return Err(ProgramError::InvalidArgument);
+        }
+        Ok(Self {
+            pool,
+            nullifier,
+            recipient,
+            relayer,
+        })
+    }
+}
+
+/// Data: proof (256) ‖ root (32) ‖ nullifier_hash (32) ‖ fee (u64 LE).
+pub struct WithdrawInstructionData<'a> {
+    pub proof: &'a [u8; 256],
+    pub root: &'a [u8; 32],
+    pub nullifier_hash: &'a [u8; 32],
+    pub fee: u64,
+}
+
+impl<'a> TryFrom<&'a [u8]> for WithdrawInstructionData<'a> {
+    type Error = ProgramError;
+
+    fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
+        let (proof, data) = data
+            .split_first_chunk()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let (root, data) = data
+            .split_first_chunk()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let (nullifier_hash, fee) = data
+            .split_first_chunk()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let fee = fee
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self {
+            proof,
+            root,
+            nullifier_hash,
+            fee: u64::from_le_bytes(fee),
+        })
+    }
+}
+
 /// Pay the denomination, less `fee`, to `recipient`, and `fee` to the relayer.
 /// The `nullifier` account is created here: if it exists, the note is spent.
-fn withdraw(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    args: &WithdrawArgs,
-) -> ProgramResult {
-    let [pool, nullifier, recipient, relayer, system, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    accounts::pool(program_id, pool)?;
-    accounts::writable_signer(relayer)?;
-    accounts::system_program(system)?;
-    accounts::writable(recipient)?;
-    accounts::writable(nullifier)?;
-    // The payout below moves the pool's lamports: never to the pool's own accounts.
-    if recipient.address() == pool.address() || recipient.address() == nullifier.address() {
-        return Err(ProgramError::InvalidArgument);
-    }
+pub struct Withdraw<'a> {
+    pub accounts: WithdrawAccounts<'a>,
+    pub data: WithdrawInstructionData<'a>,
+    pub denomination: [u8; 8],
+    pub nullifier_bump: u8,
+}
 
-    let fee = u64::from_le_bytes(args.fee);
-    let denomination = {
-        let data = pool.try_borrow()?;
-        let state = Pool::from_bytes(&data)?;
+impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for Withdraw<'a> {
+    type Error = ProgramError;
 
-        // The nullifier's account, at its canonical bump, per denomination.
-        let seeds = [NULLIFIER_SEED, &state.denomination, &args.nullifier_hash];
-        let (address, bump) = Address::find_program_address(&seeds, program_id);
-        if nullifier.address() != &address {
+    fn try_from((data, accounts): (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = WithdrawAccounts::try_from(accounts)?;
+        let data = WithdrawInstructionData::try_from(data)?;
+        // The nullifier's account, per denomination, at its canonical bump: another
+        // bump would be another address for the same note, to spend it again at.
+        let denomination = Pool::load(&accounts.pool.try_borrow()?)?.denomination;
+        let seeds = [NULLIFIER_SEED, &denomination, data.nullifier_hash];
+        let (address, nullifier_bump) = Address::find_program_address(&seeds, &crate::ID);
+        if accounts.nullifier.address() != &address {
             return Err(ProgramError::InvalidSeeds);
         }
-        if !accounts::is_uninitialized(nullifier) {
-            return Err(PoolError::NullifierSpent.into());
+        if !is_uninitialized(accounts.nullifier) {
+            return Err(ShieldedPoolError::NullifierSpent.into());
         }
-        if fee > state.denomination() {
-            return Err(PoolError::FeeTooHigh.into());
+        Ok(Self {
+            accounts,
+            data,
+            denomination,
+            nullifier_bump,
+        })
+    }
+}
+
+impl<'a> Withdraw<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &2;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let denomination = u64::from_le_bytes(self.denomination);
+        let fee = self.data.fee;
+        if fee > denomination {
+            return Err(ShieldedPoolError::FeeTooHigh.into());
         }
-        if !state.knows_root(&args.root) {
-            return Err(PoolError::UnknownRoot.into());
+        if !Pool::load(&self.accounts.pool.try_borrow()?)?.knows_root(self.data.root) {
+            return Err(ShieldedPoolError::UnknownRoot.into());
         }
 
         // The withdraw circuit's public `Withdrawal`, field by field.
-        let [r_hi, r_lo] = address_halves(recipient.address().as_array());
-        let [l_hi, l_lo] = address_halves(relayer.address().as_array());
+        let [r_hi, r_lo] = address_halves(self.accounts.recipient.address().as_array());
+        let [l_hi, l_lo] = address_halves(self.accounts.relayer.address().as_array());
         let public_inputs = [
-            args.root,
-            args.nullifier_hash,
+            *self.data.root,
+            *self.data.nullifier_hash,
             r_hi,
             r_lo,
             l_hi,
             l_lo,
             field_from_u64(fee),
         ];
-        if !withdraw_verifier::verify(&Proof::from_le_bytes(&args.proof), &public_inputs) {
-            return Err(PoolError::InvalidProof.into());
+        if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+            return Err(ShieldedPoolError::InvalidProof.into());
         }
 
         // Spend the note: create its account, paid by the relayer.
-        let bump = [bump];
+        let bump = [self.nullifier_bump];
         let seeds = [
             Seed::from(NULLIFIER_SEED),
-            Seed::from(&state.denomination),
-            Seed::from(&args.nullifier_hash),
+            Seed::from(&self.denomination),
+            Seed::from(self.data.nullifier_hash),
             Seed::from(&bump),
         ];
         pinocchio_system::create_account_with_minimum_balance_signed(
-            nullifier,
+            self.accounts.nullifier,
             Nullifier::LEN,
-            program_id,
-            relayer,
+            &crate::ID,
+            self.accounts.relayer,
             None,
             &[Signer::from(&seeds)],
         )?;
-        state.denomination()
-    };
-    nullifier.try_borrow_mut()?[0] = Nullifier::TAG;
+        self.accounts.nullifier.try_borrow_mut()?[0] = Nullifier::TAG;
 
-    // The pool is the program's, so its lamports move directly.
-    debit(pool, denomination)?;
-    credit(recipient, denomination - fee)?;
-    credit(relayer, fee)
+        // The pool is the program's, so its lamports move directly.
+        debit(self.accounts.pool, denomination)?;
+        credit(self.accounts.recipient, denomination - fee)?;
+        credit(self.accounts.relayer, fee)
+    }
 }
 
 fn debit(account: &mut AccountView, lamports: u64) -> ProgramResult {
@@ -1186,11 +1443,22 @@ fn address_halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
 }
 ```
 
-The cheap checks come first: the nullifier's address, whether it's spent, the fee and the root,
-before the proof's verification, which is most of the instruction's compute. Then the public inputs: `root` and `nullifier_hash`
-from the instruction, the two addresses from the transaction's accounts and `fee` as the relayer
-sent it. A relayer who swaps the recipient for their own, or raises the fee, has a proof of
-another statement, which fails.
+The cheap checks come first, before the proof's verification, which is most of the instruction's
+compute:
+
+- **The nullifier is the note's PDA, at its canonical bump.** It's seeded by the denomination and
+  the nullifier hash, so each note has one address per pool. A bump from the transaction would
+  let the same note have several addresses, and pay out once at each; `find_program_address`
+  allows only one.
+- **The nullifier doesn't exist yet.** If it does, the note is spent: `NullifierSpent`.
+- **`fee` is at most the denomination**, so the payout can't take more than the note is worth:
+  `FeeTooHigh`.
+- **`root` is one of the pool's recent roots**, so a proof against a tree the pool never had, or
+  had too long ago, is refused: `UnknownRoot`.
+
+Then the public inputs: `root` and `nullifier_hash` from the instruction, the two addresses from
+the transaction's accounts and `fee` as the relayer sent it. A relayer who swaps the recipient for
+their own, or raises the fee, has a proof of another statement, which fails with `InvalidProof`.
 
 Two more checks guard the payout:
 
@@ -1209,43 +1477,68 @@ paid back by `fee`.
 <Step>
 ### Name the errors
 
-Append the errors and the two logs:
+Most failures have a built-in Solana error, as each check above returns: `NotEnoughAccountKeys`,
+`InvalidInstructionData`, `MissingRequiredSignature`, `Immutable`, `IncorrectProgramId`,
+`InvalidAccountOwner`, `InvalidAccountData`, `InvalidSeeds`, `AccountAlreadyInitialized`,
+`InvalidArgument`, `InsufficientFunds` and `ArithmeticOverflow`. Five are the pool's own. Create
+`program/src/errors.rs`:
 
-```rust title="program/src/lib.rs"
-/// The program's own errors, as custom error codes from 6000.
+```rust title="program/src/errors.rs"
+use pinocchio::error::{ProgramError, ToStr};
+
+/// The program's own errors, as `ProgramError::Custom` codes.
 #[derive(Clone, Copy)]
 #[repr(u32)]
-enum PoolError {
-    InvalidProof = 6000,
+pub enum ShieldedPoolError {
+    InvalidProof = 0,
     UnknownRoot,
     FeeTooHigh,
     TreeFull,
     NullifierSpent,
 }
 
-impl From<PoolError> for ProgramError {
-    fn from(error: PoolError) -> Self {
-        ProgramError::Custom(error as u32)
+impl From<ShieldedPoolError> for ProgramError {
+    fn from(e: ShieldedPoolError) -> Self {
+        ProgramError::Custom(e as u32)
     }
 }
 
-impl PoolError {
-    /// What the program logs for error `code`: its name, then what it means.
-    fn message(code: u32) -> &'static str {
-        const MESSAGES: [&str; 5] = [
-            "InvalidProof: invalid proof",
-            "UnknownRoot: unknown or stale merkle root",
-            "FeeTooHigh: fee exceeds denomination",
-            "TreeFull: tree is full",
-            "NullifierSpent: nullifier already spent",
-        ];
-        let index = code.wrapping_sub(PoolError::InvalidProof as u32) as usize;
-        MESSAGES.get(index).copied().unwrap_or("unknown error")
+impl TryFrom<u32> for ShieldedPoolError {
+    type Error = ProgramError;
+
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        match code {
+            0 => Ok(Self::InvalidProof),
+            1 => Ok(Self::UnknownRoot),
+            2 => Ok(Self::FeeTooHigh),
+            3 => Ok(Self::TreeFull),
+            4 => Ok(Self::NullifierSpent),
+            _ => Err(ProgramError::InvalidArgument),
+        }
     }
 }
 
+/// What the entrypoint logs: the name, then what it means.
+impl ToStr for ShieldedPoolError {
+    fn to_str(&self) -> &'static str {
+        match self {
+            Self::InvalidProof => "InvalidProof: invalid proof",
+            Self::UnknownRoot => "UnknownRoot: unknown or stale merkle root",
+            Self::FeeTooHigh => "FeeTooHigh: fee exceeds denomination",
+            Self::TreeFull => "TreeFull: tree is full",
+            Self::NullifierSpent => "NullifierSpent: nullifier already spent",
+        }
+    }
+}
+```
+
+The codes are `0` to `4`, in the order they're declared. `TryFrom<u32>` and `ToStr` let the
+entrypoint turn a code back into its name with `ProgramError::to_str`. Last, the log itself;
+append to `program/src/helpers.rs`:
+
+```rust title="program/src/helpers.rs"
 /// `Program log: <message>`.
-fn log(message: &str) {
+pub fn log(message: &str) {
     #[cfg(target_os = "solana")]
     // SAFETY: the pointer and length are a valid `&str`'s.
     unsafe {
@@ -1254,21 +1547,7 @@ fn log(message: &str) {
     #[cfg(not(target_os = "solana"))]
     let _ = message;
 }
-
-/// `Program data: <base64> <base64> ..`, one per slice.
-fn log_data(data: &[&[u8]]) {
-    #[cfg(target_os = "solana")]
-    // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
-    unsafe {
-        pinocchio::syscalls::sol_log_data(data.as_ptr().cast(), data.len() as u64)
-    };
-    #[cfg(not(target_os = "solana"))]
-    let _ = data;
-}
 ```
-
-Account checks fail with the runtime's standard errors, as `accounts` returns them. The program's
-own five are custom codes from 6000, and the entrypoint logs each one's name.
 </Step>
 
 <Step>
@@ -1278,13 +1557,13 @@ own five are custom codes from 6000, and the entrypoint logs each one's name.
 $ cd program
 $ cargo build-sbf --arch v3
 ...
-   Compiling withdraw-verifier v0.1.0 (.../withdraw/withdraw-verifier)
    Compiling deposit-verifier v0.1.0 (.../deposit/deposit-verifier)
+   Compiling withdraw-verifier v0.1.0 (.../withdraw/withdraw-verifier)
    Compiling solana-instruction-view v2.1.0
    Compiling pinocchio v0.11.2
    Compiling pinocchio-system v0.6.1
    Compiling shielded-pool v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.91s
+    Finished `release` profile [optimized] target(s) in 0.61s
 ```
 
 The program is at `program/target/deploy/shielded_pool.so`. There's no hash of the tree anywhere
@@ -1315,7 +1594,8 @@ import {
 import { FailedTransactionMetadata, LiteSVM } from "litesvm";
 ```
 
-Then add the helpers at the end: 01's `send`, the program's tags, and its instruction data.
+Then add the helpers at the end: 01's `send`, the program's discriminators, and its instruction
+data.
 
 ```ts title="app/shielded-pool.test.ts"
 // Send `instruction` in one transaction, paid by `payer`. Returns the compute
@@ -1336,13 +1616,14 @@ async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction
   return result.computeUnitsConsumed();
 }
 
-// The program's instruction tags.
+// The program's instruction discriminators.
 const INITIALIZE = 0;
 const DEPOSIT = 1;
 const WITHDRAW = 2;
 
-// An instruction's data: its tag, then its arguments' bytes.
-const instructionData = (tag: number, ...args: Uint8Array[]) => new Uint8Array(Buffer.concat([Uint8Array.of(tag), ...args]));
+// An instruction's data: its discriminator, then its arguments' bytes.
+const instructionData = (discriminator: number, ...args: Uint8Array[]) =>
+  new Uint8Array(Buffer.concat([Uint8Array.of(discriminator), ...args]));
 
 // A u64, little-endian, as the program and the PDA seeds read it.
 function u64le(x: bigint) {
@@ -1359,7 +1640,7 @@ accounts are in the order the program destructures them:
 ```ts title="app/shielded-pool.test.ts"
 test("deposit, someone else deposits, withdraw through a relayer, once", async () => {
   const svm = new LiteSVM();
-  const program = (await generateKeyPairSigner()).address;
+  const program = address("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"); // the program's `ID`
   svm.addProgramFromFile(program, "../program/target/deploy/shielded_pool.so");
   const system = { address: address("11111111111111111111111111111111"), role: AccountRole.READONLY };
   const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
@@ -1443,25 +1724,25 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2302ms
+ ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2328ms
 stdout | shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
-initialize in 4459 CU
+initialize in 2988 CU
 ...
-deposit 0 verified onchain in 91559 CU
+deposit 0 verified onchain in 91572 CU
 ...
-deposit 1 verified onchain in 92199 CU
+deposit 1 verified onchain in 92233 CU
 ...
-withdrawal verified onchain in 111243 CU
+withdrawal verified onchain in 111251 CU
 
- ✓ shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4626ms
+ ✓ shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4690ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
 ```
 
-Creating the pool took a few thousand compute units, each deposit about 92,000 and the withdrawal
-about 111,000, proof verification included. `initialize` and `withdraw` vary by 1,500 for each
-extra try `find_program_address` takes to find a bump. Two deposits went in, and the first came
+Creating the pool took about 3,000 compute units, each deposit about 92,000 and the withdrawal
+about 111,000, proof verification included. `withdraw` varies by 1,500 for each extra try
+`find_program_address` takes to find the nullifier's bump. Two deposits went in, and the first came
 out to an address that had never held SOL. The same proof was refused for another recipient with
 `InvalidProof`, and a second withdrawal of the note was refused with `NullifierSpent`, when the
 program found its nullifier account already there.
@@ -1485,7 +1766,7 @@ the two. The new ideas:
   `update` through the generated clients.
 - **The chain never hashes.** The deposit circuit proves the new root, so the program stores roots
   and verifies proofs, and the circuits and the chain can't disagree about a hash.
-- **A Pinocchio program** around the two generated verifier crates: one-byte instruction tags, a
+- **A Pinocchio program** around the two generated verifier crates: a file per instruction, a
   PDA per pool and per nullifier, and every account check written out.
 
 The pool hides *which* deposit a withdrawal spends, not *how much*: every note in a pool is the

@@ -504,6 +504,7 @@ that root, records a receipt and pays. From `xark-claim/`:
 ```sh
 cd ..
 cargo new --lib program --name token-claim-program
+mkdir program/src/instructions
 ```
 
 Replace `program/Cargo.toml` with:
@@ -525,54 +526,391 @@ pinocchio-token = "0.7"
 ```
 
 `pinocchio-system` creates accounts and `pinocchio-token` moves tokens, both through calls to
-those programs. Replace `program/src/lib.rs` with the entrypoint and two helpers:
+those programs. The program is laid out as Pinocchio programs usually are, one file per
+instruction:
+
+```text
+program/src/
+├── lib.rs           the entrypoint: which instruction
+├── state.rs         the distributor's account
+├── errors.rs        the program's own error
+├── helpers.rs       account creation, and a log
+└── instructions/
+    ├── mod.rs
+    ├── initialize.rs
+    └── claim.rs
+```
+
+Replace `program/src/lib.rs` with the entrypoint:
 
 ```rust title="program/src/lib.rs"
 #![no_std]
-use pinocchio::{
-    AccountView, Address, ProgramResult,
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    program_entrypoint,
-    sysvars::{Sysvar, rent::Rent},
-};
-use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer as Lamports};
-use pinocchio_token::instructions::{InitializeAccount3, Transfer};
-use token_claim_verifier::{Proof, verify};
+pub mod errors;
+pub mod helpers;
+pub mod instructions;
+pub mod state;
+
+pub use errors::*;
+pub use instructions::*;
+
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
 
 program_entrypoint!(process_instruction);
 pinocchio::nostd_panic_handler!();
 pinocchio::no_allocator!();
 
-const DISTRIBUTOR_SEED: &[u8] = b"distributor";
-const VAULT_SEED: &[u8] = b"vault";
-const CLAIMED_SEED: &[u8] = b"claimed";
-
-/// The distributor's state: `root` (32 B) ‖ its bump ‖ the vault's bump.
-const DISTRIBUTOR_LEN: usize = 34;
-/// An SPL token account's size.
-const TOKEN_ACCOUNT_LEN: usize = 165;
-
-/// Data: one byte, which instruction, then its arguments.
-/// - `0`, initialize: root (32 B) ‖ total (8 B).
-/// - `1`, claim: proof (256 B) ‖ amount (8 B).
 fn process_instruction(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    // Log the error's name, so a client sees `InvalidProof` and not a bare code.
+    dispatch(program_id, accounts, data).inspect_err(|e| helpers::log(e.to_str::<TokenClaimError>()))
+}
+
+/// The first byte of the data says which instruction; the rest is its arguments.
+fn dispatch(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     match data.split_first() {
-        Some((0, data)) => initialize(program_id, accounts, data),
-        Some((1, data)) => claim(program_id, accounts, data),
+        Some((Initialize::DISCRIMINATOR, data)) => Initialize::try_from((program_id, data, accounts))?.process(),
+        Some((Claim::DISCRIMINATOR, data)) => Claim::try_from((program_id, data, &*accounts))?.process(),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
+```
 
-/// `N` bytes, then a little-endian `u64`, and nothing else.
-fn split<const N: usize>(data: &[u8]) -> Result<(&[u8; N], u64), ProgramError> {
-    let (head, tail) = data.split_first_chunk::<N>().ok_or(ProgramError::InvalidInstructionData)?;
-    let tail: [u8; 8] = tail.try_into().map_err(|_| ProgramError::InvalidInstructionData)?;
-    Ok((head, u64::from_le_bytes(tail)))
+Each instruction will be three structs: its accounts, its instruction data, and the two together,
+with a `process` that does the work. Each is built with `TryFrom`, which runs every check, so
+`process` only ever sees accounts and data that passed. The program takes the address it's
+deployed at as `program_id`, so the test can deploy it anywhere.
+
+The program's state is one account, the distributor. Create `program/src/state.rs`:
+
+```rust title="program/src/state.rs"
+use pinocchio::{AccountView, Address, account::{Ref, RefMut}, error::ProgramError};
+
+pub const DISTRIBUTOR_SEED: &[u8] = b"distributor";
+pub const VAULT_SEED: &[u8] = b"vault";
+pub const CLAIMED_SEED: &[u8] = b"claimed";
+/// An SPL token account's size.
+pub const TOKEN_ACCOUNT_LEN: usize = 165;
+
+/// A list's distributor: its root, its bump and its vault's bump. Every field is
+/// bytes, so the layout has no padding and any address is aligned.
+#[repr(C)]
+pub struct Distributor {
+    pub root: [u8; 32],
+    pub bump: u8,
+    pub vault_bump: u8,
+}
+
+impl Distributor {
+    pub const LEN: usize = size_of::<Self>();
+
+    /// The distributor in `account`: the program's, and of this size.
+    pub fn load<'a>(account: &'a AccountView, program_id: &Address) -> Result<Ref<'a, Self>, ProgramError> {
+        if !account.owned_by(program_id) || account.data_len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: the data is `LEN` bytes, and `Self` is bytes only (alignment 1).
+        Ok(Ref::map(account.try_borrow()?, |data| unsafe { &*(data.as_ptr() as *const Self) }))
+    }
+
+    pub fn load_mut<'a>(account: &'a mut AccountView, program_id: &Address) -> Result<RefMut<'a, Self>, ProgramError> {
+        if !account.owned_by(program_id) || account.data_len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: as in `load`.
+        Ok(RefMut::map(account.try_borrow_mut()?, |data| unsafe { &mut *(data.as_mut_ptr() as *mut Self) }))
+    }
+}
+```
+
+`Distributor` is the account's bytes as a struct: 32 of root, then two bumps, 34 in all. `load`
+is the only way the program reads one, so the owner and size checks run on every read. The bumps
+are stored so that a claim can check the vault's address with one hash, without searching for
+the bump again.
+
+Only one failure is the program's own: a proof that doesn't verify. Everything else it refuses,
+from a missing signature to a receipt that already exists, has a built-in `ProgramError` that
+clients already know. Create `program/src/errors.rs`:
+
+```rust title="program/src/errors.rs"
+use pinocchio::error::{ProgramError, ToStr};
+
+/// The program's own errors. Everything else it refuses is a built-in `ProgramError`.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub enum TokenClaimError {
+    /// The proof doesn't verify for the root, the signer and the amount.
+    InvalidProof = 0,
+}
+
+impl From<TokenClaimError> for ProgramError {
+    fn from(error: TokenClaimError) -> Self {
+        ProgramError::Custom(error as u32)
+    }
+}
+
+impl TryFrom<u32> for TokenClaimError {
+    type Error = ProgramError;
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        match code {
+            0 => Ok(TokenClaimError::InvalidProof),
+            _ => Err(ProgramError::InvalidArgument),
+        }
+    }
+}
+
+impl ToStr for TokenClaimError {
+    fn to_str(&self) -> &'static str {
+        match self {
+            TokenClaimError::InvalidProof => "Error: InvalidProof",
+        }
+    }
+}
+```
+
+`InvalidProof` is custom error 0. `TryFrom<u32>` and `ToStr` let the entrypoint's `to_str` turn
+an error back into its name, built-in or not.
+</Step>
+
+<Step>
+### Create the distributor and its vault
+
+The program keeps its state in [PDAs](https://solana.com/docs/core/pda), addresses derived from
+seeds that only the program can sign for. Create `program/src/instructions/mod.rs`:
+
+```rust title="program/src/instructions/mod.rs"
+pub mod claim;
+pub use claim::*;
+
+pub mod initialize;
+pub use initialize::*;
+```
+
+and `program/src/instructions/initialize.rs`:
+
+```rust title="program/src/instructions/initialize.rs"
+use pinocchio::{AccountView, Address, ProgramResult, cpi::Seed, error::ProgramError};
+use pinocchio_token::instructions::{InitializeAccount3, Transfer};
+
+use crate::{helpers::create, state::{DISTRIBUTOR_SEED, Distributor, TOKEN_ACCOUNT_LEN, VAULT_SEED}};
+
+/// Accounts: authority (signer), distributor, vault, mint, the authority's token
+/// account, the token program, the system program.
+pub struct InitializeAccounts<'a> {
+    pub authority: &'a AccountView,
+    pub distributor: &'a mut AccountView,
+    pub vault: &'a AccountView,
+    pub mint: &'a AccountView,
+    pub authority_token: &'a AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for InitializeAccounts<'a> {
+    type Error = ProgramError;
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [authority, distributor, vault, mint, authority_token, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        if !authority.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        Ok(Self { authority, distributor, vault, mint, authority_token })
+    }
+}
+
+/// `root` (32 B) ‖ `total` (8 B, little-endian).
+pub struct InitializeInstructionData {
+    pub root: [u8; 32],
+    pub total: u64,
+}
+
+impl TryFrom<&[u8]> for InitializeInstructionData {
+    type Error = ProgramError;
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        let (root, total) = data.split_first_chunk::<32>().ok_or(ProgramError::InvalidInstructionData)?;
+        let total: [u8; 8] = total.try_into().map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self { root: *root, total: u64::from_le_bytes(total) })
+    }
+}
+
+pub struct Initialize<'a> {
+    pub program_id: &'a Address,
+    pub accounts: InitializeAccounts<'a>,
+    pub data: InitializeInstructionData,
+    pub bump: u8,
+    pub vault_bump: u8,
+}
+
+impl<'a> TryFrom<(&'a Address, &'a [u8], &'a mut [AccountView])> for Initialize<'a> {
+    type Error = ProgramError;
+    fn try_from((program_id, data, accounts): (&'a Address, &'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = InitializeAccounts::try_from(accounts)?;
+        let data = InitializeInstructionData::try_from(data)?;
+
+        // The distributor, at ["distributor", root]: one per list.
+        let (address, bump) = Address::find_program_address(&[DISTRIBUTOR_SEED, &data.root], program_id);
+        if accounts.distributor.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        // The vault, at ["vault", distributor]: a token account the distributor owns.
+        let (address, vault_bump) = Address::find_program_address(&[VAULT_SEED, accounts.distributor.address().as_ref()], program_id);
+        if accounts.vault.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        Ok(Self { program_id, accounts, data, bump, vault_bump })
+    }
+}
+
+impl<'a> Initialize<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &0;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let Self { program_id, accounts, data, bump, vault_bump } = self;
+
+        let bump_seed = [*bump];
+        let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(&data.root), Seed::from(&bump_seed)];
+        create(accounts.authority, accounts.distributor, Distributor::LEN, program_id, &seeds)?;
+
+        let vault_bump_seed = [*vault_bump];
+        let vault_seeds = [Seed::from(VAULT_SEED), Seed::from(accounts.distributor.address().as_ref()), Seed::from(&vault_bump_seed)];
+        create(accounts.authority, accounts.vault, TOKEN_ACCOUNT_LEN, &pinocchio_token::ID, &vault_seeds)?;
+        InitializeAccount3::new(accounts.vault, accounts.mint, accounts.distributor.address()).invoke()?;
+
+        let mut distributor = Distributor::load_mut(accounts.distributor, program_id)?;
+        distributor.root = data.root;
+        distributor.bump = *bump;
+        distributor.vault_bump = *vault_bump;
+        drop(distributor);
+
+        Transfer::new(accounts.authority_token, accounts.vault, accounts.authority, data.total).invoke()
+    }
+}
+```
+
+The distributor's address comes from the root, so there's one per list, and the claims later
+trust what it holds. `find_program_address` searches for each PDA's bump once, here, and
+`process` stores both. The vault is an SPL token account whose owner is the distributor. No
+wallet holds a key for that address: only this program, signing with the distributor's seeds, can
+move the vault's tokens. The last line funds it, from a token account the authority signs for.
+</Step>
+
+<Step>
+### Pay a claim
+
+Create `program/src/instructions/claim.rs`:
+
+```rust title="program/src/instructions/claim.rs"
+use pinocchio::{AccountView, Address, ProgramResult, cpi::{Seed, Signer}, error::ProgramError};
+use pinocchio_token::instructions::Transfer;
+use token_claim_verifier::{Proof, verify};
+
+use crate::{TokenClaimError, helpers::create, state::{CLAIMED_SEED, DISTRIBUTOR_SEED, Distributor, VAULT_SEED}};
+
+/// Accounts: claimant (signer), distributor, vault, receipt, the claimant's token
+/// account, the token program, the system program.
+pub struct ClaimAccounts<'a> {
+    pub claimant: &'a AccountView,
+    pub distributor: &'a AccountView,
+    pub vault: &'a AccountView,
+    pub receipt: &'a AccountView,
+    pub claimant_token: &'a AccountView,
+}
+
+impl<'a> TryFrom<(&'a Address, &'a [AccountView])> for ClaimAccounts<'a> {
+    type Error = ProgramError;
+    fn try_from((program_id, accounts): (&'a Address, &'a [AccountView])) -> Result<Self, Self::Error> {
+        let [claimant, distributor, vault, receipt, claimant_token, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        if !claimant.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        let vault_bump = Distributor::load(distributor, program_id)?.vault_bump;
+        let vault_address = Address::derive_address(&[VAULT_SEED, distributor.address().as_ref()], Some(vault_bump), program_id);
+        if vault.address() != &vault_address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        Ok(Self { claimant, distributor, vault, receipt, claimant_token })
+    }
+}
+
+/// `proof` (256 B) ‖ `amount` (8 B, little-endian).
+pub struct ClaimInstructionData<'a> {
+    pub proof: &'a [u8; 256],
+    pub amount: u64,
+}
+
+impl<'a> TryFrom<&'a [u8]> for ClaimInstructionData<'a> {
+    type Error = ProgramError;
+    fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
+        let (proof, amount) = data.split_first_chunk::<256>().ok_or(ProgramError::InvalidInstructionData)?;
+        let amount: [u8; 8] = amount.try_into().map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self { proof, amount: u64::from_le_bytes(amount) })
+    }
+}
+
+pub struct Claim<'a> {
+    pub program_id: &'a Address,
+    pub accounts: ClaimAccounts<'a>,
+    pub data: ClaimInstructionData<'a>,
+}
+
+impl<'a> TryFrom<(&'a Address, &'a [u8], &'a [AccountView])> for Claim<'a> {
+    type Error = ProgramError;
+    fn try_from((program_id, data, accounts): (&'a Address, &'a [u8], &'a [AccountView])) -> Result<Self, Self::Error> {
+        Ok(Self {
+            program_id,
+            accounts: ClaimAccounts::try_from((program_id, accounts))?,
+            data: ClaimInstructionData::try_from(data)?,
+        })
+    }
+}
+
+impl<'a> Claim<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &1;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let Self { program_id, accounts, data } = self;
+        let (root, bump) = {
+            let distributor = Distributor::load(accounts.distributor, program_id)?;
+            (distributor.root, distributor.bump)
+        };
+
+        // The root from the distributor, the claimant from the signer, the amount from
+        // the instruction.
+        let public_inputs = public_inputs(&root, accounts.claimant.address().as_array(), data.amount);
+        if !verify(&Proof::from_le_bytes(data.proof), &public_inputs) {
+            return Err(TokenClaimError::InvalidProof.into());
+        }
+
+        // The receipt, at ["claimed", distributor, claimant]: once it exists, this
+        // address has claimed. It must sit at the canonical bump, so it's searched for.
+        let (address, receipt_bump) = Address::find_program_address(
+            &[CLAIMED_SEED, accounts.distributor.address().as_ref(), accounts.claimant.address().as_ref()],
+            program_id,
+        );
+        if accounts.receipt.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if accounts.receipt.owned_by(program_id) {
+            return Err(ProgramError::AccountAlreadyInitialized);
+        }
+        let receipt_bump = [receipt_bump];
+        let receipt_seeds = [
+            Seed::from(CLAIMED_SEED),
+            Seed::from(accounts.distributor.address().as_ref()),
+            Seed::from(accounts.claimant.address().as_ref()),
+            Seed::from(&receipt_bump),
+        ];
+        create(accounts.claimant, accounts.receipt, 0, program_id, &receipt_seeds)?;
+
+        // Pay from the vault, signed by the distributor's seeds.
+        let bump = [bump];
+        let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(&root), Seed::from(&bump)];
+        Transfer::new(accounts.vault, accounts.claimant_token, accounts.distributor, data.amount)
+            .invoke_signed(&[Signer::from(&seeds)])
+    }
 }
 
 /// The circuit's public inputs, in its order: root, claimant.hi, claimant.lo, amount.
-fn public_inputs(root: &[u8; 32], claimant: &[u8; 32], amount: u64) -> [[u8; 32]; 4] {
+pub fn public_inputs(root: &[u8; 32], claimant: &[u8; 32], amount: u64) -> [[u8; 32]; 4] {
     // A `Hash` is two 16-byte halves, each read as a big-endian integer.
     let half = |b: &[u8]| {
         let mut out = [0u8; 32];
@@ -588,142 +926,29 @@ fn public_inputs(root: &[u8; 32], claimant: &[u8; 32], amount: u64) -> [[u8; 32]
 
 `public_inputs` builds the circuit's four inputs from the root, the claimant's address and the
 amount, in the order `xark inspect` printed: the address in two halves, as in 02, and the amount
-as a little-endian field element.
-</Step>
-
-<Step>
-### Create the distributor and its vault
-
-The program keeps its state in [PDAs](https://solana.com/docs/core/pda), addresses derived from
-seeds that only the program can sign for. Append `initialize`:
-
-```rust title="program/src/lib.rs"
-/// Accounts: authority (signer), distributor, vault, mint, the authority's token
-/// account, the token program, the system program.
-fn initialize(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    let (root, total) = split::<32>(data)?;
-    let [authority, distributor, vault, mint, authority_token, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if !authority.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    // The distributor, at ["distributor", root]: one per list.
-    let (address, bump) = Address::find_program_address(&[DISTRIBUTOR_SEED, root], program_id);
-    if distributor.address() != &address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-    let bump = [bump];
-    let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(root), Seed::from(&bump)];
-    create(authority, distributor, DISTRIBUTOR_LEN, program_id, &seeds)?;
-
-    // The vault, at ["vault", distributor]: a token account the distributor owns.
-    let (address, vault_bump) = Address::find_program_address(&[VAULT_SEED, distributor.address().as_ref()], program_id);
-    if vault.address() != &address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-    let vault_bump = [vault_bump];
-    let vault_seeds = [Seed::from(VAULT_SEED), Seed::from(distributor.address().as_ref()), Seed::from(&vault_bump)];
-    create(authority, vault, TOKEN_ACCOUNT_LEN, &pinocchio_token::ID, &vault_seeds)?;
-    InitializeAccount3::new(vault, mint, distributor.address()).invoke()?;
-
-    let mut state = distributor.try_borrow_mut()?;
-    state[..32].copy_from_slice(root);
-    state[32] = bump[0];
-    state[33] = vault_bump[0];
-    drop(state);
-
-    Transfer::new(authority_token, vault, authority, total).invoke()
-}
-```
-
-The distributor's address comes from the root, so there's one per list, and the claims later
-trust what it holds. The vault is an SPL token account whose owner is the distributor. No wallet
-holds a key for that address: only this program, signing with the distributor's seeds, can move
-the vault's tokens. The last line funds it, from a token account the authority signs for.
-</Step>
-
-<Step>
-### Pay a claim
-
-Append `claim`:
-
-```rust title="program/src/lib.rs"
-/// Accounts: claimant (signer), distributor, vault, receipt, the claimant's token
-/// account, the token program, the system program.
-fn claim(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    let (proof, amount) = split::<256>(data)?;
-    let [claimant, distributor, vault, receipt, claimant_token, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if !claimant.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-    // Only `initialize` makes an account of the program's this size.
-    if !distributor.owned_by(program_id) || distributor.data_len() != DISTRIBUTOR_LEN {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    let (root, bump, vault_bump) = {
-        let state = distributor.try_borrow()?;
-        let root: [u8; 32] = state[..32].try_into().unwrap();
-        (root, state[32], state[33])
-    };
-    let vault_address = Address::derive_address(&[VAULT_SEED, distributor.address().as_ref()], Some(vault_bump), program_id);
-    if vault.address() != &vault_address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-
-    // The root from the distributor, the claimant from the signer, the amount from
-    // the instruction.
-    let public_inputs = public_inputs(&root, claimant.address().as_array(), amount);
-    if !verify(&Proof::from_le_bytes(proof), &public_inputs) {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // The receipt, at ["claimed", distributor, claimant]: once it exists, this
-    // address has claimed.
-    let (address, receipt_bump) = Address::find_program_address(
-        &[CLAIMED_SEED, distributor.address().as_ref(), claimant.address().as_ref()],
-        program_id,
-    );
-    if receipt.address() != &address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-    if receipt.owned_by(program_id) {
-        return Err(ProgramError::AccountAlreadyInitialized);
-    }
-    let receipt_bump = [receipt_bump];
-    let receipt_seeds = [
-        Seed::from(CLAIMED_SEED),
-        Seed::from(distributor.address().as_ref()),
-        Seed::from(claimant.address().as_ref()),
-        Seed::from(&receipt_bump),
-    ];
-    create(claimant, receipt, 0, program_id, &receipt_seeds)?;
-
-    // Pay from the vault, signed by the distributor's seeds.
-    let bump = [bump];
-    let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(&root), Seed::from(&bump)];
-    Transfer::new(vault, claimant_token, distributor, amount).invoke_signed(&[Signer::from(&seeds)])
-}
-```
+as a little-endian field element. The proof stays a reference into the instruction data: a
+256-byte copy on the stack, beside the verifier's own, overflows the 4 KiB frame a Solana program
+gets.
 
 Each check closes a way to take tokens that aren't yours:
 
 - **The claimant signs.** The claimant chooses the token account `to` that's paid, so without this
   anyone holding Bob's proof could claim Bob's tokens to their own account.
-- **The distributor is one `initialize` made**: the program's, and of its size (a receipt is the
-  program's too, but empty). Otherwise a claimant could pass an account holding the root of a list
-  of their own.
-- **The vault is the distributor's**, derived from the bump `initialize` stored.
+- **The distributor is one `initialize` made**: `Distributor::load` checks it's the program's, and
+  of its size (a receipt is the program's too, but empty). Otherwise a claimant could pass an
+  account holding the root of a list of their own.
+- **The vault is the distributor's**, derived from the bump `initialize` stored. The token program
+  would refuse any other vault too, since only this one's owner signs; the check fails it early,
+  with `InvalidSeeds`.
 - **The program assembles the public inputs.** The root comes from the distributor, the claimant
   from the signer, the amount from the instruction. A proof made for another list, another wallet
-  or another amount fails `verify`. See
+  or another amount fails `verify`, with `InvalidProof`. See
   [Where the public inputs come from](/docs/guides/how-verification-works#where-the-public-inputs-come-from).
-- **The receipt is the claimant's PDA, and new.** It's derived from the distributor and the
-  claimant's address, so a claimant can't pass a fresh account each time, and once it exists a
-  second claim fails with `AccountAlreadyInitialized`.
+- **The receipt is the claimant's PDA, at its canonical bump, and new.** It's derived from the
+  distributor and the claimant's address, so a claimant can't pass a fresh account each time. The
+  bump is the one `find_program_address` finds, not one the client sends, or the same claimant
+  would have a receipt at each of the other bumps too. Once it exists, a second claim fails with
+  `AccountAlreadyInitialized`.
 
 The program needs no nullifier, because it knows who's claiming: the signer. And it can't
 remember claims by the proof's bytes, since anyone holding a Groth16 proof can re-randomize it
@@ -735,12 +960,16 @@ vault's mint. The transfer at the end is signed with the distributor's seeds
 <Step>
 ### Create accounts that can't be blocked
 
-Last, the helper both instructions create accounts with. Append:
+Last, the helper both instructions create accounts with, and the entrypoint's log. Create
+`program/src/helpers.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/helpers.rs"
+use pinocchio::{AccountView, Address, ProgramResult, cpi::{Seed, Signer}, sysvars::{Sysvar, rent::Rent}};
+use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
+
 /// Create the PDA `account`, signed by its `seeds`: `space` bytes owned by `owner`,
 /// paid by `payer`.
-fn create(payer: &AccountView, account: &AccountView, space: usize, owner: &Address, seeds: &[Seed]) -> ProgramResult {
+pub fn create(payer: &AccountView, account: &AccountView, space: usize, owner: &Address, seeds: &[Seed]) -> ProgramResult {
     let signer = [Signer::from(seeds)];
     let rent = Rent::get()?.try_minimum_balance(space)?;
     let held = account.lamports();
@@ -750,12 +979,18 @@ fn create(payer: &AccountView, account: &AccountView, space: usize, owner: &Addr
     // Anyone can send lamports to an address, and `CreateAccount` refuses one that
     // holds any: top it up, allocate and assign it instead.
     if held < rent {
-        Lamports { from: payer, to: account, lamports: rent - held }.invoke()?;
+        Transfer { from: payer, to: account, lamports: rent - held }.invoke()?;
     }
     if space > 0 {
         Allocate { account, space: space as u64 }.invoke_signed(&signer)?;
     }
     Assign { account, owner }.invoke_signed(&signer)
+}
+
+/// Write `message` to the program's logs.
+pub fn log(message: &str) {
+    // SAFETY: the pointer and length are a valid `&str`'s.
+    unsafe { pinocchio::syscalls::sol_log_(message.as_ptr(), message.len() as u64) };
 }
 ```
 
@@ -775,7 +1010,7 @@ $ cargo build-sbf --arch v3
    Compiling token-claim-verifier v0.1.0 (.../token-claim/token-claim-verifier)
 ...
    Compiling token-claim-program v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.60s
+    Finished `release` profile [optimized] target(s) in 0.66s
 ```
 
 The program is at `program/target/deploy/token_claim_program.so`.
@@ -935,10 +1170,10 @@ test("each address on the list claims its amount, once", async () => {
   // address, and the proof fails. So does Carol's proof for more than her amount.
   const mallory = await funded(svm);
   const malloryToken = await tokenAccount(svm, mint, mallory.address, 0n);
-  await expect(send(svm, mallory, await claim(drop, mallory, malloryToken, proof, 1_000n))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, mallory, await claim(drop, mallory, malloryToken, proof, 1_000n))).rejects.toThrow(/InvalidProof/);
   const carolProof = prover.prove({ path: paths[2], root, claim: claims[2] }).toBytes();
   const carolToken = await tokenAccount(svm, mint, carol.address, 0n);
-  await expect(send(svm, carol, await claim(drop, carol, carolToken, carolProof, 750n))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, carol, await claim(drop, carol, carolToken, carolProof, 750n))).rejects.toThrow(/InvalidProof/);
 
   // Someone sends lamports to Alice's receipt address to block her claim. It
   // goes through anyway.
@@ -956,12 +1191,12 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ token-claim.test.ts > a claimant on the list has a proof 1128ms
- ✓ token-claim.test.ts > an address not on the list has no proof 1011ms
+ ✓ token-claim.test.ts > a claimant on the list has a proof 1145ms
+ ✓ token-claim.test.ts > an address not on the list has no proof 1070ms
 stdout | token-claim.test.ts > each address on the list claims its amount, once
-claimed onchain in 98546 CU
+claimed onchain in 98567 CU
 
- ✓ token-claim.test.ts > each address on the list claims its amount, once 2951ms
+ ✓ token-claim.test.ts > each address on the list claims its amount, once 3038ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
@@ -970,9 +1205,9 @@ claimed onchain in 98546 CU
 Bob's claim landed in about 100,000 compute units: the proof's verification, the receipt and the
 transfer. Your number will differ by a few thousand, because finding the receipt's PDA takes more
 or fewer tries depending on the claimant's address. His second claim found his receipt; Mallory,
-signing his proof, and Carol, claiming more than her amount, were refused by `verify`; and Alice
-claimed though someone had funded her receipt's address to block her. Carol's 250 stays in the
-vault until she claims it.
+signing his proof, and Carol, claiming more than her amount, were refused by `verify` with
+`InvalidProof`; and Alice claimed though someone had funded her receipt's address to block her.
+Carol's 250 stays in the vault until she claims it.
 </Step>
 
 </Steps>

@@ -512,10 +512,25 @@ The program is Pinocchio, as in 01 to 04, and has two instructions:
   two nullifiers, moves the public amounts in or out of the vault, stores the new root and logs
   the two memos.
 
-It's longer than 04's, so you'll write it in the same pieces. From `xark-transfer/`:
+It's longer than 04's, so you'll write it in the same pieces, in the same layout:
+
+```text
+program/src/
+├── lib.rs                  the entrypoint
+├── state.rs                the pool's account, and its checks
+├── helpers.rs              the account checks the instructions share
+├── instructions/
+│   ├── mod.rs
+│   ├── initialize.rs
+│   └── transact.rs
+└── errors.rs               the program's own errors
+```
+
+From `xark-transfer/`:
 
 ```sh
 cargo new --lib program --name shielded-transfer
+mkdir program/src/instructions
 ```
 
 Replace `program/Cargo.toml` with:
@@ -550,127 +565,59 @@ overflow-checks = true
 ```
 
 Besides 04's dependencies, it takes 03's `pinocchio-token` for the vault and `solana-sha256-hasher`
-for the memos' hashes. Replace `program/src/lib.rs` with the entrypoint:
+for the memos' hashes. The entrypoint is 04's: the first byte of the instruction data is a
+discriminator, `0` for `Initialize` and `1` for `Transact`, and the rest of the data and the
+accounts go to that instruction. Replace `program/src/lib.rs` with:
 
 ```rust title="program/src/lib.rs"
 #![no_std]
 
-use pinocchio::{
-    AccountView, Address, ProgramResult,
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    program_entrypoint,
-};
-use pinocchio_token::{
-    instructions::{InitializeAccount3, Transfer},
-    state::{Account as TokenAccount, Mint},
-};
-use solana_sha256_hasher::hash;
-use transact_verifier::{NUM_PUBLIC_INPUTS, Proof, verify};
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
+
+mod errors;
+mod helpers;
+mod instructions;
+mod state;
+
+pub use errors::*;
+pub use instructions::*;
+
+// CUCcJJBRbK6tK4nPP2zgmvdYbKWSCGGVdRegtJ2GPJtF
+pub const ID: Address = Address::new_from_array([
+    0xaa, 0x68, 0x5d, 0x29, 0x28, 0x7d, 0x47, 0xbd, 0xdd, 0xfd, 0x73, 0xfa, 0x40, 0xf1, 0xd4, 0xb7,
+    0xa5, 0xa4, 0x78, 0x46, 0xc0, 0xd8, 0x4b, 0x91, 0xa8, 0x42, 0x2f, 0x90, 0x8a, 0x31, 0xce, 0xc0,
+]);
 
 program_entrypoint!(process_instruction);
 pinocchio::nostd_panic_handler!();
 pinocchio::no_allocator!();
 
-const TREE_HEIGHT: u32 = 20;
-const ROOT_HISTORY_SIZE: usize = 16;
-const POOL_SEED: &[u8] = b"pool";
-const VAULT_SEED: &[u8] = b"vault";
-const NULLIFIER_SEED: &[u8] = b"nullifier";
-
-// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
-// a pool can't be seeded with another tree.
-const EMPTY_ROOT: [u8; 32] = [
-    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
-    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
-];
-
-// The instructions' tags: the first byte of the instruction data.
-const INITIALIZE: u8 = 0;
-const TRANSACT: u8 = 1;
-
 fn process_instruction(
-    program_id: &Address,
+    _program_id: &Address,
     accounts: &mut [AccountView],
-    data: &[u8],
+    instruction_data: &[u8],
 ) -> ProgramResult {
-    let result = match data.split_first() {
-        // `[0]`, and nothing else.
-        Some((&INITIALIZE, [])) => initialize(program_id, accounts),
-        Some((&TRANSACT, args)) => {
-            let (args, memos) = args
-                .split_at_checked(TransactArgs::LEN)
-                .ok_or(ProgramError::InvalidInstructionData)?;
-            transact(program_id, accounts, cast(args)?, &read_memos(memos)?)
-        }
-        _ => Err(ProgramError::InvalidInstructionData),
-    };
-    if let Err(ProgramError::Custom(code)) = result {
-        log(PoolError::message(code));
+    let result = dispatch(accounts, instruction_data);
+    // The program's own errors log their names, which the test matches.
+    if let Err(error @ ProgramError::Custom(_)) = &result {
+        helpers::log(error.to_str::<ShieldedTransferError>());
     }
     result
 }
 
-/// `[1] ‖ proof (256) ‖ root (32) ‖ nf[0] ‖ nf[1] ‖ cm_out[0] ‖ cm_out[1] ‖
-/// new_root (32 each) ‖ vpub_in ‖ vpub_out ‖ fee (u64 LE each)`, then two memos.
-#[repr(C)]
-struct TransactArgs {
-    proof: [u8; 256],
-    root: [u8; 32],
-    nf: [[u8; 32]; 2],
-    cm_out: [[u8; 32]; 2],
-    new_root: [u8; 32],
-    vpub_in: [u8; 8],
-    vpub_out: [u8; 8],
-    fee: [u8; 8],
-}
-
-/// Plain bytes: `#[repr(C)]`, made only of `u8` arrays, so alignment 1 and every
-/// bit pattern valid. A byte slice of exactly its size can be read as one.
-///
-/// # Safety
-///
-/// The implementor must be `#[repr(C)]` and made only of `u8` arrays.
-unsafe trait Plain: Sized {
-    const LEN: usize = size_of::<Self>();
-}
-
-unsafe impl Plain for TransactArgs {}
-
-/// The arguments `data` holds, if it is exactly their size.
-fn cast<T: Plain>(data: &[u8]) -> Result<&T, ProgramError> {
-    if data.len() != T::LEN {
-        return Err(ProgramError::InvalidInstructionData);
+fn dispatch(accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramResult {
+    match instruction_data.split_first() {
+        Some((Initialize::DISCRIMINATOR, data)) => {
+            Initialize::try_from((data, accounts))?.process()
+        }
+        Some((Transact::DISCRIMINATOR, data)) => Transact::try_from((data, accounts))?.process(),
+        _ => Err(ProgramError::InvalidInstructionData),
     }
-    // SAFETY: `T` is plain bytes (alignment 1) and `data` is exactly its size.
-    Ok(unsafe { &*data.as_ptr().cast::<T>() })
-}
-
-/// The two memos: each its length as a u32 LE, then its bytes, and nothing after.
-fn read_memos(mut data: &[u8]) -> Result<[&[u8]; 2], ProgramError> {
-    let mut memo = || {
-        let (len, rest) = data
-            .split_first_chunk::<4>()
-            .ok_or(ProgramError::InvalidInstructionData)?;
-        let (memo, rest) = rest
-            .split_at_checked(u32::from_le_bytes(*len) as usize)
-            .ok_or(ProgramError::InvalidInstructionData)?;
-        data = rest;
-        Ok::<_, ProgramError>(memo)
-    };
-    let memos = [memo()?, memo()?];
-    if !data.is_empty() {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    Ok(memos)
 }
 ```
 
-The instruction data is 04's layout: a one-byte tag, then the arguments' bytes in order. A
-transact's fixed-size arguments are a `#[repr(C)]` struct of byte arrays, read in place with
-`cast`. The two memos come after them, each its length then its bytes, since a memo's size is up
-to the wallet. Short data, a memo longer than what's left, and trailing bytes all fail with
-`InvalidInstructionData`.
+`ID` is the program's address. The program derives its PDAs from it and checks its accounts against
+it, so it must be the address the program is deployed at; the test deploys it there.
 </Step>
 
 <Step>
@@ -684,53 +631,87 @@ The program owns two kinds of account, each at a PDA, and creates a third:
 | `vault` | `["vault", mint]` | the token program: a token account owned by `pool` | 165 |
 | `nullifier` | `["nullifier", mint, nf]` | this program | 0 |
 
-A nullifier holds no data: that its account exists is what counts. Append the pool's layout to
-`program/src/lib.rs`:
+A nullifier holds no data: that its account exists is what counts. Create `program/src/state.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/state.rs"
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
+use pinocchio_token::state::Account as TokenAccount;
+
+use crate::helpers::{token_account, writable};
+
+pub const TREE_HEIGHT: u32 = 20;
+pub const ROOT_HISTORY_SIZE: usize = 16;
+pub const POOL_SEED: &[u8] = b"pool";
+pub const VAULT_SEED: &[u8] = b"vault";
+pub const NULLIFIER_SEED: &[u8] = b"nullifier";
+
+// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
+// a pool can't be seeded with another tree.
+pub const EMPTY_ROOT: [u8; 32] = [
+    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
+    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+];
+
 /// A pool's account, 554 bytes: `mint`, `next_index` and `current_root_index`
 /// (u32 LE), a ring of the 16 most recent roots, then the pool's and the vault's
 /// bumps.
 #[repr(C)]
-struct Pool {
-    mint: [u8; 32],
+pub struct Pool {
+    pub mint: [u8; 32],
     next_index: [u8; 4],
     current_root_index: [u8; 4],
     roots: [[u8; 32]; ROOT_HISTORY_SIZE],
-    bump: u8,
-    vault_bump: u8,
+    pub bump: u8,
+    pub vault_bump: u8,
 }
 
-unsafe impl Plain for Pool {}
 const _: () = assert!(Pool::LEN == 554);
 
 impl Pool {
-    /// The pool `data` holds, if it is a pool's size.
-    fn from_bytes(data: &[u8]) -> Result<&Pool, ProgramError> {
-        cast(data).map_err(|_| ProgramError::InvalidAccountData)
-    }
+    pub const LEN: usize = size_of::<Self>();
 
-    /// As `from_bytes`, to write.
-    fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Pool, ProgramError> {
-        if data.len() != Pool::LEN {
+    /// The pool `data` holds, if it is a pool's size.
+    pub fn load(data: &[u8]) -> Result<&Self, ProgramError> {
+        if data.len() != Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        // SAFETY: `Pool` is plain bytes and `data` is exactly its size.
-        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Pool>() })
+        // SAFETY: `Pool` is all byte arrays (alignment 1, any bit pattern valid),
+        // and `data` is exactly its size.
+        Ok(unsafe { &*data.as_ptr().cast::<Self>() })
     }
 
-    fn next_index(&self) -> u32 {
+    /// As `load`, to write.
+    pub fn load_mut(data: &mut [u8]) -> Result<&mut Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: as above.
+        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Self>() })
+    }
+
+    /// Write a new pool into a freshly created account, which is zeroed: the
+    /// ring's other slots are empty.
+    pub fn init(data: &mut [u8], mint: &[u8; 32], bump: u8, vault_bump: u8) -> ProgramResult {
+        let pool = Self::load_mut(data)?;
+        pool.mint = *mint;
+        pool.roots[0] = EMPTY_ROOT;
+        pool.bump = bump;
+        pool.vault_bump = vault_bump;
+        Ok(())
+    }
+
+    pub fn next_index(&self) -> u32 {
         u32::from_le_bytes(self.next_index)
     }
 
-    fn current_root(&self) -> &[u8; 32] {
+    pub fn current_root(&self) -> &[u8; 32] {
         let i = u32::from_le_bytes(self.current_root_index) as usize % ROOT_HISTORY_SIZE;
         &self.roots[i]
     }
 
     /// Remember `root` as the newest in the ring, and advance the tree by a pair.
     /// The caller has checked the tree has room.
-    fn push_root(&mut self, root: &[u8; 32]) {
+    pub fn push_root(&mut self, root: &[u8; 32]) {
         let i = (u32::from_le_bytes(self.current_root_index) as usize + 1) % ROOT_HISTORY_SIZE;
         self.current_root_index = (i as u32).to_le_bytes();
         self.roots[i] = *root;
@@ -738,118 +719,123 @@ impl Pool {
     }
 
     /// One of the recent roots. The ring's unused slots are zero; no root is.
-    fn knows_root(&self, root: &[u8; 32]) -> bool {
+    pub fn knows_root(&self, root: &[u8; 32]) -> bool {
         root != &[0; 32] && self.roots.contains(root)
     }
 }
 ```
 
-As in 04, every field is a byte array, so the account's data is the struct. The roots start at
-offset 40, which is where the test will read the empty root. A pool and a nullifier are told apart
-by size, 554 bytes or none.
+As in 04, every field is a byte array, so the account's data is the struct and `load` reads it in
+place. The roots start at offset 40, which is where the test will read the empty root. A pool and a
+nullifier are told apart by size, 554 bytes or none.
 </Step>
 
 <Step>
 ### Check every account
 
-The `accounts` module is 04's, with three more kinds of account: the token program, a mint, and a
-token account, and the vault built from them. Append:
+`helpers.rs` is 04's, with three more kinds of account: the token program, a mint, and a token
+account. Create `program/src/helpers.rs`:
 
-```rust title="program/src/lib.rs"
-/// What each kind of account must be, one function each.
-mod accounts {
-    use super::*;
+```rust title="program/src/helpers.rs"
+use pinocchio::{AccountView, ProgramResult, error::ProgramError};
+use pinocchio_token::state::{Account as TokenAccount, Mint};
 
-    /// An account the program writes to.
-    pub fn writable(account: &AccountView) -> ProgramResult {
-        if !account.is_writable() {
-            return Err(ProgramError::Immutable);
-        }
-        Ok(())
+use crate::ShieldedTransferError;
+
+/// An account the program writes to.
+pub fn writable(account: &AccountView) -> ProgramResult {
+    if !account.is_writable() {
+        return Err(ProgramError::Immutable);
     }
+    Ok(())
+}
 
-    /// A payer: a signer, writable.
-    pub fn writable_signer(account: &AccountView) -> ProgramResult {
-        if !account.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
-        }
-        writable(account)
+/// A payer: a signer, writable.
+pub fn writable_signer(account: &AccountView) -> ProgramResult {
+    if !account.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
     }
+    writable(account)
+}
 
-    /// The system program, which creates the accounts.
-    pub fn system_program(account: &AccountView) -> ProgramResult {
-        if account.address() != &pinocchio_system::ID {
-            return Err(ProgramError::IncorrectProgramId);
-        }
-        Ok(())
+/// The system program, which creates the accounts.
+pub fn system_program(account: &AccountView) -> ProgramResult {
+    if account.address() != &pinocchio_system::ID {
+        return Err(ProgramError::IncorrectProgramId);
     }
+    Ok(())
+}
 
-    /// The token program, which holds the vault and moves the tokens.
-    pub fn token_program(account: &AccountView) -> ProgramResult {
-        if account.address() != &pinocchio_token::ID {
-            return Err(ProgramError::IncorrectProgramId);
-        }
-        Ok(())
+/// The token program, which holds the vault and moves the tokens.
+pub fn token_program(account: &AccountView) -> ProgramResult {
+    if account.address() != &pinocchio_token::ID {
+        return Err(ProgramError::IncorrectProgramId);
     }
+    Ok(())
+}
 
-    /// An account about to be created: owned by the system program, with no data.
-    /// It may already hold lamports, which anyone can send it; creation tops them
-    /// up to rent exemption.
-    pub fn is_uninitialized(account: &AccountView) -> bool {
-        account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
+/// An account about to be created: owned by the system program, with no data.
+/// It may already hold lamports, which anyone can send it; creation tops them
+/// up to rent exemption.
+pub fn is_uninitialized(account: &AccountView) -> bool {
+    account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
+}
+
+/// An SPL mint: the token program's, a mint's size, initialized.
+pub fn mint(account: &AccountView) -> ProgramResult {
+    if !Mint::from_account_view(account)?.is_initialized() {
+        return Err(ProgramError::UninitializedAccount);
     }
+    Ok(())
+}
 
-    /// An SPL mint: the token program's, a mint's size, initialized.
-    pub fn mint(account: &AccountView) -> ProgramResult {
-        if !Mint::from_account_view(account)?.is_initialized() {
-            return Err(ProgramError::UninitializedAccount);
-        }
-        Ok(())
+/// A token account of `mint`: writable, the token program's, a token
+/// account's size, initialized.
+pub fn token_account(account: &AccountView, mint: &[u8; 32]) -> ProgramResult {
+    writable(account)?;
+    let token = TokenAccount::from_account_view(account)?;
+    if !token.is_initialized() {
+        return Err(ProgramError::UninitializedAccount);
     }
+    if token.mint().as_array() != mint {
+        return Err(ShieldedTransferError::WrongMint.into());
+    }
+    Ok(())
+}
+```
 
-    /// A token account of `mint`: writable, the token program's, a token
-    /// account's size, initialized.
-    pub fn token_account(account: &AccountView, mint: &[u8; 32]) -> ProgramResult {
+The pool's checks read the pool, so they go with it: the pool itself, and the vault built from the
+new helpers. Append to `program/src/state.rs`:
+
+```rust title="program/src/state.rs"
+impl Pool {
+    /// A pool account: writable, owned by this program, a pool's size, at the
+    /// address its own mint and stored bump derive.
+    pub fn check(account: &AccountView) -> ProgramResult {
         writable(account)?;
-        let token = TokenAccount::from_account_view(account)?;
-        if !token.is_initialized() {
-            return Err(ProgramError::UninitializedAccount);
-        }
-        if token.mint().as_array() != mint {
-            return Err(PoolError::WrongMint.into());
-        }
-        Ok(())
-    }
-
-    /// A pool: writable, owned by this program, a pool's size, at the address its
-    /// own mint and stored bump derive.
-    pub fn pool(program_id: &Address, pool: &AccountView) -> ProgramResult {
-        writable(pool)?;
-        if !pool.owned_by(program_id) {
+        if !account.owned_by(&crate::ID) {
             return Err(ProgramError::InvalidAccountOwner);
         }
-        let data = pool.try_borrow()?;
-        let state = Pool::from_bytes(&data)?;
+        let data = account.try_borrow()?;
+        let pool = Self::load(&data)?;
         let address =
-            Address::derive_address(&[POOL_SEED, &state.mint], Some(state.bump), program_id);
-        if pool.address() != &address {
+            Address::derive_address(&[POOL_SEED, &pool.mint], Some(pool.bump), &crate::ID);
+        if account.address() != &address {
             return Err(ProgramError::InvalidSeeds);
         }
         Ok(())
     }
 
-    /// The pool's vault: at the address its mint and stored bump derive, a
-    /// writable token account of the pool's mint, owned by the pool.
-    pub fn vault(program_id: &Address, vault: &AccountView, pool: &AccountView) -> ProgramResult {
-        let data = pool.try_borrow()?;
-        let state = Pool::from_bytes(&data)?;
-        let seeds = [VAULT_SEED, &state.mint];
-        let address = Address::derive_address(&seeds, Some(state.vault_bump), program_id);
+    /// The pool's vault: at the address the pool's mint and stored vault bump
+    /// derive, a token account of the pool's mint, owned by the pool.
+    pub fn check_vault(&self, vault: &AccountView, pool: &Address) -> ProgramResult {
+        let seeds = [VAULT_SEED, &self.mint];
+        let address = Address::derive_address(&seeds, Some(self.vault_bump), &crate::ID);
         if vault.address() != &address {
             return Err(ProgramError::InvalidSeeds);
         }
-        token_account(vault, &state.mint)?;
-        if TokenAccount::from_account_view(vault)?.owner() != pool.address() {
+        token_account(vault, &self.mint)?;
+        if TokenAccount::from_account_view(vault)?.owner() != pool {
             return Err(ProgramError::IncorrectAuthority);
         }
         Ok(())
@@ -857,8 +843,8 @@ mod accounts {
 }
 ```
 
-`writable`, `writable_signer`, `system_program`, `is_uninitialized` and `pool` prevent what they
-did in 04. The new ones:
+`writable`, `writable_signer`, `system_program`, `is_uninitialized` and `Pool::check` prevent what
+they did in 04. The new ones:
 
 - **`token_program`**: the token CPIs call the token program by its address, so a fake couldn't
   be called in its place; the check names a wrong account list first, with `IncorrectProgramId`.
@@ -867,231 +853,469 @@ did in 04. The new ones:
 - **`token_account`**: an initialized token account of the pool's mint. The token program would
   refuse a transfer between two mints anyway; checking first fails with `WrongMint` before
   verification spends its compute units.
-- **`vault`**: at its PDA, a token account of the pool's mint, owned by the pool. Without it, a
-  depositor could name a token account of their own as the vault: the tokens would go back to
-  them, and their new note would be backed by nothing.
+- **`Pool::check_vault`**: at its PDA, a token account of the pool's mint, owned by the pool.
+  Without it, a depositor could name a token account of their own as the vault: the tokens would
+  go back to them, and their new note would be backed by nothing.
 </Step>
 
 <Step>
 ### Create a pool
 
-Append `initialize`:
+Each instruction is three structs, as in 04: its accounts, checked as they're taken; its
+instruction data, checked for length; and the instruction, which holds both and whose `process`
+does the work. Create `program/src/instructions/mod.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/instructions/mod.rs"
+pub mod initialize;
+pub mod transact;
+
+pub use initialize::*;
+pub use transact::*;
+```
+
+Then `program/src/instructions/initialize.rs`:
+
+```rust title="program/src/instructions/initialize.rs"
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+};
+use pinocchio_token::{instructions::InitializeAccount3, state::Account as TokenAccount};
+
+use crate::{
+    helpers::{is_uninitialized, mint, system_program, token_program, writable, writable_signer},
+    state::{POOL_SEED, Pool, VAULT_SEED},
+};
+
+/// Accounts: the pool and the vault (the PDAs, not yet created), the mint, the
+/// authority (pays the rent), the token program, the system program.
+pub struct InitializeAccounts<'a> {
+    pub pool: &'a mut AccountView,
+    pub vault: &'a mut AccountView,
+    pub mint: &'a AccountView,
+    pub authority: &'a AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for InitializeAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [pool, vault, mint_account, authority, token, system, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        writable_signer(authority)?;
+        token_program(token)?;
+        system_program(system)?;
+        mint(mint_account)?;
+        writable(pool)?;
+        writable(vault)?;
+        Ok(Self {
+            pool,
+            vault,
+            mint: mint_account,
+            authority,
+        })
+    }
+}
+
 /// Create the pool for one SPL mint, with the empty tree's root, and its vault.
-fn initialize(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
-    let [pool, vault, mint, authority, token, system, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    accounts::writable_signer(authority)?;
-    accounts::token_program(token)?;
-    accounts::system_program(system)?;
-    accounts::mint(mint)?;
-    accounts::writable(pool)?;
-    accounts::writable(vault)?;
-    // One pool and one vault per mint, each at its canonical bump.
-    let mint_key = mint.address().as_array();
-    let (address, bump) = Address::find_program_address(&[POOL_SEED, mint_key], program_id);
-    let (vault_address, vault_bump) =
-        Address::find_program_address(&[VAULT_SEED, mint_key], program_id);
-    if pool.address() != &address || vault.address() != &vault_address {
-        return Err(ProgramError::InvalidSeeds);
-    }
-    if !accounts::is_uninitialized(pool) || !accounts::is_uninitialized(vault) {
-        return Err(ProgramError::AccountAlreadyInitialized);
-    }
+/// No instruction data.
+pub struct Initialize<'a> {
+    pub accounts: InitializeAccounts<'a>,
+    pub bump: u8,
+    pub vault_bump: u8,
+}
 
-    let bump = [bump];
-    let seeds = [
-        Seed::from(POOL_SEED),
-        Seed::from(mint_key),
-        Seed::from(&bump),
-    ];
-    pinocchio_system::create_account_with_minimum_balance_signed(
-        pool,
-        Pool::LEN,
-        program_id,
-        authority,
-        None,
-        &[Signer::from(&seeds)],
-    )?;
-    {
-        let mut data = pool.try_borrow_mut()?;
-        let state = Pool::from_bytes_mut(&mut data)?; // created zeroed: the ring is empty
-        state.mint = *mint_key;
-        state.roots[0] = EMPTY_ROOT;
-        state.bump = bump[0];
-        state.vault_bump = vault_bump;
-    }
+impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for Initialize<'a> {
+    type Error = ProgramError;
 
-    // The vault: a token account of `mint` at its PDA, owned by the pool.
-    let vault_bump = [vault_bump];
-    let seeds = [
-        Seed::from(VAULT_SEED),
-        Seed::from(mint_key),
-        Seed::from(&vault_bump),
-    ];
-    pinocchio_system::create_account_with_minimum_balance_signed(
-        vault,
-        TokenAccount::LEN,
-        &pinocchio_token::ID,
-        authority,
-        None,
-        &[Signer::from(&seeds)],
-    )?;
-    InitializeAccount3::new(vault, mint, pool.address()).invoke()
+    fn try_from((data, accounts): (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        if !data.is_empty() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let accounts = InitializeAccounts::try_from(accounts)?;
+        // One pool and one vault per mint, each at its canonical bump.
+        let mint = accounts.mint.address().as_array();
+        let (address, bump) = Address::find_program_address(&[POOL_SEED, mint], &crate::ID);
+        let (vault_address, vault_bump) =
+            Address::find_program_address(&[VAULT_SEED, mint], &crate::ID);
+        if accounts.pool.address() != &address || accounts.vault.address() != &vault_address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if !is_uninitialized(accounts.pool) || !is_uninitialized(accounts.vault) {
+            return Err(ProgramError::AccountAlreadyInitialized);
+        }
+        Ok(Self {
+            accounts,
+            bump,
+            vault_bump,
+        })
+    }
+}
+
+impl<'a> Initialize<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &0;
+
+    pub fn process(&mut self) -> ProgramResult {
+        let mint = self.accounts.mint.address().as_array();
+        let bump = [self.bump];
+        let seeds = [Seed::from(POOL_SEED), Seed::from(mint), Seed::from(&bump)];
+        pinocchio_system::create_account_with_minimum_balance_signed(
+            self.accounts.pool,
+            Pool::LEN,
+            &crate::ID,
+            self.accounts.authority,
+            None,
+            &[Signer::from(&seeds)],
+        )?;
+        Pool::init(
+            &mut self.accounts.pool.try_borrow_mut()?,
+            mint,
+            self.bump,
+            self.vault_bump,
+        )?;
+
+        // The vault: a token account of `mint` at its PDA, owned by the pool.
+        let vault_bump = [self.vault_bump];
+        let seeds = [
+            Seed::from(VAULT_SEED),
+            Seed::from(mint),
+            Seed::from(&vault_bump),
+        ];
+        pinocchio_system::create_account_with_minimum_balance_signed(
+            self.accounts.vault,
+            TokenAccount::LEN,
+            &pinocchio_token::ID,
+            self.accounts.authority,
+            None,
+            &[Signer::from(&seeds)],
+        )?;
+        InitializeAccount3::new(
+            self.accounts.vault,
+            self.accounts.mint,
+            self.accounts.pool.address(),
+        )
+        .invoke()
+    }
 }
 ```
 
-The pool is 04's: one per mint, at its canonical bump, created zeroed by `pinocchio-system` with
-only the first root set. The vault is 03's: a token account at a PDA, created by the program and
-initialized with `InitializeAccount3`, with the pool's PDA as its owner, so only this program,
-signing with the pool's seeds, can move its tokens. The pool stores both canonical bumps, so
-`accounts::pool` and `accounts::vault` derive the two addresses without searching again.
+The pool is 04's: one per mint, created zeroed by `pinocchio-system` with only the first root set.
+The vault is 03's: a token account at a PDA, created by the program and initialized with
+`InitializeAccount3`, with the pool's PDA as its owner, so only this program, signing with the
+pool's seeds, can move its tokens. The checks, and what they prevent:
+
+- **There is no instruction data**, so a malformed instruction is refused before anything reads
+  it.
+- **The pool and the vault are the mint's PDAs at their canonical bumps**, the ones
+  `find_program_address` returns. Another bump would give another valid address, and so a second
+  pool for the same mint. The pool stores both bumps, so `Pool::check` and `Pool::check_vault`
+  derive the two addresses without searching again.
+- **Neither exists yet**, so no one can reinitialize a live pool and wipe its roots.
 </Step>
 
 <Step>
 ### Transact
 
-Append `transact`:
+`transact.rs` is the longest file, so you'll write it in four pieces. First its accounts. Create
+`program/src/instructions/transact.rs`:
 
-```rust title="program/src/lib.rs"
-/// One JoinSplit: spend 2 notes, create 2, with `vpub_in` entering the pool,
-/// `vpub_out` leaving it and `fee` paid to the relayer.
-fn transact(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    args: &TransactArgs,
-    memos: &[&[u8]; 2],
-) -> ProgramResult {
-    let [
-        pool,
-        vault,
-        nullifier0,
-        nullifier1,
-        user,
-        user_token,
-        recipient_token,
-        relayer_token,
-        token,
-        system,
-        ..,
-    ] = accounts
-    else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    accounts::pool(program_id, pool)?;
-    accounts::vault(program_id, vault, pool)?;
-    accounts::writable_signer(user)?;
-    accounts::token_program(token)?;
-    accounts::system_program(system)?;
-    let (mint, bump, index) = {
-        let data = pool.try_borrow()?;
-        let state = Pool::from_bytes(&data)?;
-        (state.mint, state.bump, state.next_index())
-    };
-    // A token account the transaction doesn't use is passed as this program's
-    // address, and the proof binds that address in its place.
-    let optional = |account: &AccountView| -> Result<Option<AccountView>, ProgramError> {
-        if account.address() == program_id {
-            return Ok(None);
-        }
-        accounts::token_account(account, &mint)?;
-        Ok(Some(*account))
-    };
-    let user_token = optional(user_token)?;
-    let recipient_token = optional(recipient_token)?;
-    let relayer_token = optional(relayer_token)?;
+```rust title="program/src/instructions/transact.rs"
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+};
+use pinocchio_token::instructions::Transfer;
+use solana_sha256_hasher::hash;
+use transact_verifier::{NUM_PUBLIC_INPUTS, Proof, verify};
 
-    // Each nullifier's account, at its canonical bump, per mint, not yet created.
-    let mut bumps = [0u8; 2];
-    for (i, nullifier) in [&*nullifier0, &*nullifier1].into_iter().enumerate() {
-        accounts::writable(nullifier)?;
-        let seeds = [NULLIFIER_SEED, &mint, &args.nf[i]];
-        let (address, bump) = Address::find_program_address(&seeds, program_id);
-        if nullifier.address() != &address {
-            return Err(ProgramError::InvalidSeeds);
-        }
-        if !accounts::is_uninitialized(nullifier) {
-            return Err(PoolError::NullifierSpent.into());
-        }
-        bumps[i] = bump;
-    }
-    if u64::from(index) + 2 > 1 << TREE_HEIGHT {
-        return Err(PoolError::TreeFull.into());
-    }
-    if !proves(
-        pool,
-        args,
-        memos,
-        &recipient_token,
-        &relayer_token,
-        program_id,
-    )? {
-        return Err(PoolError::InvalidProof.into());
-    }
+use crate::{
+    ShieldedTransferError,
+    helpers::{
+        is_uninitialized, log_data, system_program, token_account, token_program, writable,
+        writable_signer,
+    },
+    state::{NULLIFIER_SEED, POOL_SEED, Pool, TREE_HEIGHT},
+};
 
-    // Spend the notes: create each nullifier's account, empty, paid by the user.
-    for (i, nullifier) in [nullifier0, nullifier1].into_iter().enumerate() {
-        let bump = [bumps[i]];
-        let seeds = [
-            Seed::from(NULLIFIER_SEED),
-            Seed::from(&mint),
-            Seed::from(&args.nf[i]),
-            Seed::from(&bump),
-        ];
-        pinocchio_system::create_account_with_minimum_balance_signed(
-            nullifier,
-            0,
-            program_id,
+/// Accounts: the pool, the vault, the two nullifiers (the PDAs, not yet
+/// created), the user (pays their rent), the user's, the recipient's and the
+/// relayer's token accounts (each optional), the token program, the system
+/// program.
+pub struct TransactAccounts<'a> {
+    pub pool: &'a mut AccountView,
+    pub vault: &'a AccountView,
+    pub nullifiers: [&'a mut AccountView; 2],
+    pub user: &'a AccountView,
+    pub user_token: Option<&'a AccountView>,
+    pub recipient_token: Option<&'a AccountView>,
+    pub relayer_token: Option<&'a AccountView>,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for TransactAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, Self::Error> {
+        let [
+            pool,
+            vault,
+            nullifier0,
+            nullifier1,
             user,
-            None,
-            &[Signer::from(&seeds)],
-        )?;
+            user_token,
+            recipient_token,
+            relayer_token,
+            token,
+            system,
+            ..,
+        ] = accounts
+        else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        Pool::check(pool)?;
+        let mint = {
+            let data = pool.try_borrow()?;
+            let state = Pool::load(&data)?;
+            state.check_vault(vault, pool.address())?;
+            state.mint
+        };
+        writable_signer(user)?;
+        token_program(token)?;
+        system_program(system)?;
+        writable(nullifier0)?;
+        writable(nullifier1)?;
+        // A token account the transaction doesn't use is passed as this program's
+        // address, and the proof binds that address in its place.
+        let optional = |account: &'a AccountView| -> Result<Option<&'a AccountView>, ProgramError> {
+            if account.address() == &crate::ID {
+                return Ok(None);
+            }
+            token_account(account, &mint)?;
+            Ok(Some(account))
+        };
+        Ok(Self {
+            user_token: optional(user_token)?,
+            recipient_token: optional(recipient_token)?,
+            relayer_token: optional(relayer_token)?,
+            pool,
+            vault,
+            nullifiers: [nullifier0, nullifier1],
+            user,
+        })
     }
-
-    // Value entering the pool: user → vault, signed by the user.
-    let vpub_in = u64::from_le_bytes(args.vpub_in);
-    if vpub_in > 0 {
-        let from = user_token.ok_or(PoolError::NoSource)?;
-        Transfer::new(&from, vault, user, vpub_in).invoke()?;
-    }
-
-    // Value leaving it, signed by the pool PDA: `vpub_out` to the recipient, `fee`
-    // to the relayer.
-    let bump = [bump];
-    let seeds = [Seed::from(POOL_SEED), Seed::from(&mint), Seed::from(&bump)];
-    let payouts = [
-        (args.vpub_out, recipient_token, PoolError::NoRecipient),
-        (args.fee, relayer_token, PoolError::NoRelayer),
-    ];
-    for (amount, to, missing) in payouts {
-        let amount = u64::from_le_bytes(amount);
-        if amount > 0 {
-            let to = to.ok_or(missing)?;
-            Transfer::new(vault, &to, pool, amount).invoke_signed(&[Signer::from(&seeds)])?;
-        }
-    }
-
-    // The chain never hashes the tree: it takes the new root the proof checked.
-    Pool::from_bytes_mut(&mut pool.try_borrow_mut()?)?.push_root(&args.new_root);
-    // What a wallet scans for: each new note's leaf index, commitment and memo.
-    for (i, (commitment, memo)) in args.cm_out.iter().zip(memos).enumerate() {
-        let leaf_index = (index + i as u32).to_le_bytes();
-        log_data(&[&leaf_index, commitment, memo]);
-    }
-    Ok(())
 }
 ```
 
-Every check runs before anything changes. On top of `accounts`:
+On top of the checks in `helpers.rs` and `state.rs`, **a token account the transaction doesn't use
+is the program's address.** That's how a client leaves an optional account out, and every one it
+does use passes `token_account`. The nullifiers' addresses come from the instruction data, so
+they're checked once it's read.
+
+Then its instruction data. A transact's arguments are their bytes in order, then the two memos,
+each its length then its bytes, since a memo's size is up to the wallet. Append:
+
+```rust title="program/src/instructions/transact.rs"
+/// Data: proof (256) ‖ root (32) ‖ nf[0] ‖ nf[1] ‖ cm_out[0] ‖ cm_out[1] ‖
+/// new_root (32 each) ‖ vpub_in ‖ vpub_out ‖ fee (u64 LE each) ‖ memo0 ‖ memo1
+/// (each its length as a u32 LE, then its bytes).
+pub struct TransactInstructionData<'a> {
+    pub proof: &'a [u8; 256],
+    pub root: &'a [u8; 32],
+    pub nf: [&'a [u8; 32]; 2],
+    pub cm_out: [&'a [u8; 32]; 2],
+    pub new_root: &'a [u8; 32],
+    pub vpub_in: u64,
+    pub vpub_out: u64,
+    pub fee: u64,
+    pub memos: [&'a [u8]; 2],
+}
+
+impl<'a> TryFrom<&'a [u8]> for TransactInstructionData<'a> {
+    type Error = ProgramError;
+
+    fn try_from(mut data: &'a [u8]) -> Result<Self, Self::Error> {
+        let proof = take(&mut data)?;
+        let root = take(&mut data)?;
+        let nf = [take(&mut data)?, take(&mut data)?];
+        let cm_out = [take(&mut data)?, take(&mut data)?];
+        let new_root = take(&mut data)?;
+        let vpub_in = u64::from_le_bytes(*take(&mut data)?);
+        let vpub_out = u64::from_le_bytes(*take(&mut data)?);
+        let fee = u64::from_le_bytes(*take(&mut data)?);
+        let memos = [memo(&mut data)?, memo(&mut data)?];
+        if !data.is_empty() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        Ok(Self {
+            proof,
+            root,
+            nf,
+            cm_out,
+            new_root,
+            vpub_in,
+            vpub_out,
+            fee,
+            memos,
+        })
+    }
+}
+
+/// The next `N` bytes of `data`.
+fn take<'a, const N: usize>(data: &mut &'a [u8]) -> Result<&'a [u8; N], ProgramError> {
+    let (head, rest) = data
+        .split_first_chunk()
+        .ok_or(ProgramError::InvalidInstructionData)?;
+    *data = rest;
+    Ok(head)
+}
+
+/// A memo: its length as a u32 LE, then that many bytes.
+fn memo<'a>(data: &mut &'a [u8]) -> Result<&'a [u8], ProgramError> {
+    let len = u32::from_le_bytes(*take(data)?) as usize;
+    let (memo, rest) = data
+        .split_at_checked(len)
+        .ok_or(ProgramError::InvalidInstructionData)?;
+    *data = rest;
+    Ok(memo)
+}
+```
+
+Short data, a memo longer than what's left, and trailing bytes all fail with
+`InvalidInstructionData`, so a malformed transaction is refused before anything reads it.
+
+Then the instruction. Append:
+
+```rust title="program/src/instructions/transact.rs"
+/// One JoinSplit: spend 2 notes, create 2, with `vpub_in` entering the pool,
+/// `vpub_out` leaving it and `fee` paid to the relayer.
+pub struct Transact<'a> {
+    pub accounts: TransactAccounts<'a>,
+    pub data: TransactInstructionData<'a>,
+    pub mint: [u8; 32],
+    pub bump: u8,
+    pub nullifier_bumps: [u8; 2],
+}
+
+impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for Transact<'a> {
+    type Error = ProgramError;
+
+    fn try_from((data, accounts): (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = TransactAccounts::try_from(accounts)?;
+        let data = TransactInstructionData::try_from(data)?;
+        let (mint, bump) = {
+            let pool = accounts.pool.try_borrow()?;
+            let pool = Pool::load(&pool)?;
+            (pool.mint, pool.bump)
+        };
+        // Each nullifier's account: at its canonical PDA, per mint, not yet created.
+        let mut nullifier_bumps = [0; 2];
+        for (i, nullifier) in accounts.nullifiers.iter().enumerate() {
+            let seeds = [NULLIFIER_SEED, &mint, data.nf[i]];
+            let (address, bump) = Address::find_program_address(&seeds, &crate::ID);
+            if nullifier.address() != &address {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            if !is_uninitialized(nullifier) {
+                return Err(ShieldedTransferError::NullifierSpent.into());
+            }
+            nullifier_bumps[i] = bump;
+        }
+        Ok(Self {
+            accounts,
+            data,
+            mint,
+            bump,
+            nullifier_bumps,
+        })
+    }
+}
+
+impl<'a> Transact<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &1;
+
+    pub fn process(&mut self) -> ProgramResult {
+        use ShieldedTransferError::*;
+        let (accounts, data) = (&mut self.accounts, &self.data);
+        let index = {
+            let pool = accounts.pool.try_borrow()?;
+            let pool = Pool::load(&pool)?;
+            if u64::from(pool.next_index()) + 2 > 1 << TREE_HEIGHT {
+                return Err(TreeFull.into());
+            }
+            let recipient = accounts.recipient_token;
+            if !proves(pool, data, recipient, accounts.relayer_token)? {
+                return Err(InvalidProof.into());
+            }
+            pool.next_index()
+        };
+
+        // Spend the notes: create each nullifier's account, empty, paid by the user.
+        for (i, nullifier) in accounts.nullifiers.iter_mut().enumerate() {
+            let bump = [self.nullifier_bumps[i]];
+            let seeds = [
+                Seed::from(NULLIFIER_SEED),
+                Seed::from(&self.mint),
+                Seed::from(data.nf[i]),
+                Seed::from(&bump),
+            ];
+            pinocchio_system::create_account_with_minimum_balance_signed(
+                nullifier,
+                0,
+                &crate::ID,
+                accounts.user,
+                None,
+                &[Signer::from(&seeds)],
+            )?;
+        }
+
+        // Value entering the pool: user → vault, signed by the user.
+        if data.vpub_in > 0 {
+            let from = accounts.user_token.ok_or(NoSource)?;
+            Transfer::new(from, accounts.vault, accounts.user, data.vpub_in).invoke()?;
+        }
+
+        // Value leaving it, signed by the pool PDA: `vpub_out` to the recipient, `fee`
+        // to the relayer.
+        let bump = [self.bump];
+        let seeds = [
+            Seed::from(POOL_SEED),
+            Seed::from(&self.mint),
+            Seed::from(&bump),
+        ];
+        let payouts = [
+            (data.vpub_out, accounts.recipient_token, NoRecipient),
+            (data.fee, accounts.relayer_token, NoRelayer),
+        ];
+        for (amount, to, missing) in payouts {
+            if amount > 0 {
+                let to = to.ok_or(missing)?;
+                Transfer::new(accounts.vault, to, accounts.pool, amount)
+                    .invoke_signed(&[Signer::from(&seeds)])?;
+            }
+        }
+
+        // The chain never hashes the tree: it takes the new root the proof checked.
+        Pool::load_mut(&mut accounts.pool.try_borrow_mut()?)?.push_root(data.new_root);
+        // What a wallet scans for: each new note's leaf index, commitment and memo.
+        for (i, (commitment, memo)) in data.cm_out.iter().zip(data.memos).enumerate() {
+            let leaf_index = (index + i as u32).to_le_bytes();
+            log_data(&[&leaf_index, *commitment, memo]);
+        }
+        Ok(())
+    }
+}
+```
+
+Every check runs before anything changes:
 
 - **Each nullifier is at its canonical PDA.** `find_program_address` returns the one bump; another
-  would be a second account for the same nullifier, and a second spend of the note.
+  would be a second account for the same nullifier, and a second spend of the note. So the program
+  finds the bump itself, rather than taking one from the client.
 - **Each nullifier is not yet created**, or the note is spent, with `NullifierSpent`. As in 04, it
   may already hold lamports, so no one can block a spend by funding its nullifier's address.
-- **A token account the transaction doesn't use is the program's address.** That's how a client
-  leaves an optional account out. Every one it does use passes `accounts::token_account`.
+- **The tree has room for two more leaves**, or the transaction fails with `TreeFull`.
 
 Which accounts the payouts go to isn't checked here: the proof binds the recipient and the relayer,
 so `verify` checks them. Then the nullifiers are burned, paid for by `user`, and the value moves. A
@@ -1106,44 +1330,39 @@ each new note's leaf index, commitment and encrypted memo as `Program data:`, fo
 
 Append `proves`, which builds the 19 public inputs and makes the one typed `verify` call:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/instructions/transact.rs"
 /// Does the proof verify against the circuit's public `Transaction`, assembled
 /// here? It checks `root` against the pool's ring first. In its own stack frame:
-/// the inputs and the pairing check's locals don't fit beside `transact`'s.
+/// the inputs and the pairing check's locals don't fit beside `process`'s.
 #[inline(never)]
 fn proves(
-    pool: &AccountView,
-    args: &TransactArgs,
-    memos: &[&[u8]; 2],
-    recipient: &Option<AccountView>,
-    relayer: &Option<AccountView>,
-    program_id: &Address,
+    pool: &Pool,
+    data: &TransactInstructionData,
+    recipient: Option<&AccountView>,
+    relayer: Option<&AccountView>,
 ) -> Result<bool, ProgramError> {
-    let data = pool.try_borrow()?;
-    let state = Pool::from_bytes(&data)?;
-    if !state.knows_root(&args.root) {
-        return Err(PoolError::UnknownRoot.into());
+    if !pool.knows_root(data.root) {
+        return Err(ShieldedTransferError::UnknownRoot.into());
     }
     // A left-out recipient or relayer is the program's address.
-    let address =
-        |a: &Option<AccountView>| *a.as_ref().map_or(program_id, |a| a.address()).as_array();
-    let [asset_hi, asset_lo] = halves(&state.mint);
+    let address = |a: Option<&AccountView>| *a.map_or(&crate::ID, |a| a.address()).as_array();
+    let [asset_hi, asset_lo] = halves(&pool.mint);
     let [recipient_hi, recipient_lo] = halves(&address(recipient));
     let [relayer_hi, relayer_lo] = halves(&address(relayer));
-    let [memo0_hi, memo0_lo] = halves(&hash(memos[0]).to_bytes());
-    let [memo1_hi, memo1_lo] = halves(&hash(memos[1]).to_bytes());
+    let [memo0_hi, memo0_lo] = halves(&hash(data.memos[0]).to_bytes());
+    let [memo1_hi, memo1_lo] = halves(&hash(data.memos[1]).to_bytes());
     let public_inputs: [[u8; 32]; NUM_PUBLIC_INPUTS] = [
-        args.root,
+        *data.root,
         asset_hi,
         asset_lo,
-        args.nf[0],
-        args.nf[1],
-        args.cm_out[0],
-        args.cm_out[1],
-        *state.current_root(),
-        args.new_root,
-        field_from_u64(u64::from(state.next_index())),
-        flow(args),
+        *data.nf[0],
+        *data.nf[1],
+        *data.cm_out[0],
+        *data.cm_out[1],
+        *pool.current_root(),
+        *data.new_root,
+        field_from_u64(u64::from(pool.next_index())),
+        flow(data),
         recipient_hi,
         recipient_lo,
         relayer_hi,
@@ -1153,7 +1372,7 @@ fn proves(
         memo1_hi,
         memo1_lo,
     ];
-    Ok(verify(&Proof::from_le_bytes(&args.proof), &public_inputs))
+    Ok(verify(&Proof::from_le_bytes(data.proof), &public_inputs))
 }
 
 /// A u64 as a 32-byte little-endian field element.
@@ -1165,11 +1384,11 @@ fn field_from_u64(x: u64) -> [u8; 32] {
 
 /// `Flow`'s three amounts packed into one field element, as xark packs them:
 /// `vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`.
-fn flow(args: &TransactArgs) -> [u8; 32] {
+fn flow(data: &TransactInstructionData) -> [u8; 32] {
     let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&args.vpub_in);
-    out[8..16].copy_from_slice(&args.vpub_out);
-    out[16..24].copy_from_slice(&args.fee);
+    out[..8].copy_from_slice(&data.vpub_in.to_le_bytes());
+    out[8..16].copy_from_slice(&data.vpub_out.to_le_bytes());
+    out[16..24].copy_from_slice(&data.fee.to_le_bytes());
     out
 }
 
@@ -1196,20 +1415,26 @@ doesn't compile. A proof made for other accounts or other memos doesn't verify. 
 
 The memos stay off-circuit: the program hashes each one and the circuit only binds the hash, so
 encryption costs no constraints. `proves` is `#[inline(never)]`, so the 19 inputs and the pairing check's
-locals get a stack frame of their own rather than crowding `transact`'s.
+locals get a stack frame of their own rather than crowding `process`'s: SBF gives each frame 4 KiB.
 </Step>
 
 <Step>
 ### Name the errors
 
-Append the errors and the two logs, as in 04:
+Most failures have a built-in Solana error, as each check above returns: `NotEnoughAccountKeys`,
+`InvalidInstructionData`, `MissingRequiredSignature`, `Immutable`, `IncorrectProgramId`,
+`InvalidAccountOwner`, `InvalidAccountData`, `InvalidSeeds`, `AccountAlreadyInitialized`,
+`UninitializedAccount` and `IncorrectAuthority`. Eight are the program's own. Create
+`program/src/errors.rs`:
 
-```rust title="program/src/lib.rs"
-/// The program's own errors, as custom error codes from 6000.
+```rust title="program/src/errors.rs"
+use pinocchio::error::{ProgramError, ToStr};
+
+/// The program's own errors, as `ProgramError::Custom` codes.
 #[derive(Clone, Copy)]
 #[repr(u32)]
-enum PoolError {
-    InvalidProof = 6000,
+pub enum ShieldedTransferError {
+    InvalidProof = 0,
     UnknownRoot,
     TreeFull,
     NullifierSpent,
@@ -1219,32 +1444,54 @@ enum PoolError {
     WrongMint,
 }
 
-impl From<PoolError> for ProgramError {
-    fn from(error: PoolError) -> Self {
-        ProgramError::Custom(error as u32)
+impl From<ShieldedTransferError> for ProgramError {
+    fn from(e: ShieldedTransferError) -> Self {
+        ProgramError::Custom(e as u32)
     }
 }
 
-impl PoolError {
-    /// What the program logs for error `code`: its name, then what it means.
-    fn message(code: u32) -> &'static str {
-        const MESSAGES: [&str; 8] = [
-            "InvalidProof: invalid proof",
-            "UnknownRoot: unknown or stale merkle root",
-            "TreeFull: tree is full",
-            "NullifierSpent: nullifier already spent",
-            "NoSource: a deposit (vpub_in > 0) needs user_token",
-            "NoRecipient: a withdrawal (vpub_out > 0) needs recipient_token",
-            "NoRelayer: a fee (fee > 0) needs relayer_token",
-            "WrongMint: a token account of another mint than the pool's",
-        ];
-        let index = code.wrapping_sub(PoolError::InvalidProof as u32) as usize;
-        MESSAGES.get(index).copied().unwrap_or("unknown error")
+impl TryFrom<u32> for ShieldedTransferError {
+    type Error = ProgramError;
+
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        match code {
+            0 => Ok(Self::InvalidProof),
+            1 => Ok(Self::UnknownRoot),
+            2 => Ok(Self::TreeFull),
+            3 => Ok(Self::NullifierSpent),
+            4 => Ok(Self::NoSource),
+            5 => Ok(Self::NoRecipient),
+            6 => Ok(Self::NoRelayer),
+            7 => Ok(Self::WrongMint),
+            _ => Err(ProgramError::InvalidArgument),
+        }
     }
 }
 
+/// What the entrypoint logs: the name, then what it means.
+impl ToStr for ShieldedTransferError {
+    fn to_str(&self) -> &'static str {
+        match self {
+            Self::InvalidProof => "InvalidProof: invalid proof",
+            Self::UnknownRoot => "UnknownRoot: unknown or stale merkle root",
+            Self::TreeFull => "TreeFull: tree is full",
+            Self::NullifierSpent => "NullifierSpent: nullifier already spent",
+            Self::NoSource => "NoSource: a deposit (vpub_in > 0) needs user_token",
+            Self::NoRecipient => "NoRecipient: a withdrawal (vpub_out > 0) needs recipient_token",
+            Self::NoRelayer => "NoRelayer: a fee (fee > 0) needs relayer_token",
+            Self::WrongMint => "WrongMint: a token account of another mint than the pool's",
+        }
+    }
+}
+```
+
+The codes are `0` to `7`, in the order they're declared, and the entrypoint logs each one's name,
+so the test can match `InvalidProof` and `NullifierSpent`. Last, the two logs; append to
+`program/src/helpers.rs`:
+
+```rust title="program/src/helpers.rs"
 /// `Program log: <message>`.
-fn log(message: &str) {
+pub fn log(message: &str) {
     #[cfg(target_os = "solana")]
     // SAFETY: the pointer and length are a valid `&str`'s.
     unsafe {
@@ -1255,7 +1502,7 @@ fn log(message: &str) {
 }
 
 /// `Program data: <base64> <base64> ..`, one per slice.
-fn log_data(data: &[&[u8]]) {
+pub fn log_data(data: &[&[u8]]) {
     #[cfg(target_os = "solana")]
     // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
     unsafe {
@@ -1265,10 +1512,6 @@ fn log_data(data: &[&[u8]]) {
     let _ = data;
 }
 ```
-
-Account checks fail with the runtime's standard errors. The program's own eight are custom codes
-from 6000, and the entrypoint logs each one's name, so the test can match `InvalidProof` and
-`NullifierSpent`.
 </Step>
 
 <Step>
@@ -1284,7 +1527,7 @@ $ cargo build-sbf --arch v3
    Compiling pinocchio-token v0.7.0
    Compiling pinocchio-system v0.6.1
    Compiling shielded-transfer v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.98s
+    Finished `release` profile [optimized] target(s) in 0.73s
 ```
 
 The program is at `program/target/deploy/shielded_transfer.so`.
@@ -1366,12 +1609,13 @@ async function send(svm: LiteSVM, payer: KeyPairSigner, ...instructions: Instruc
   return result.computeUnitsConsumed();
 }
 
-// The program's instruction tags.
+// The program's instruction discriminators.
 const INITIALIZE = 0;
 const TRANSACT = 1;
 
-// An instruction's data: its tag, then its arguments' bytes.
-const instructionData = (tag: number, ...args: Uint8Array[]) => new Uint8Array(Buffer.concat([Uint8Array.of(tag), ...args]));
+// An instruction's data: its discriminator, then its arguments' bytes.
+const instructionData = (discriminator: number, ...args: Uint8Array[]) =>
+  new Uint8Array(Buffer.concat([Uint8Array.of(discriminator), ...args]));
 
 // A u64, little-endian, as the program reads it.
 function u64le(x: bigint) {
@@ -1380,7 +1624,7 @@ function u64le(x: bigint) {
   return out;
 }
 
-const program = address("CUCcJJBRbK6tK4nPP2zgmvdYbKWSCGGVdRegtJ2GPJtF");
+const program = address("CUCcJJBRbK6tK4nPP2zgmvdYbKWSCGGVdRegtJ2GPJtF"); // the program's `ID`
 const system = address("11111111111111111111111111111111");
 const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
 const random = () => new Field(crypto.getRandomValues(new Uint8Array(31)));
@@ -1390,12 +1634,12 @@ const readonly = (a: Address) => ({ address: a, role: AccountRole.READONLY });
 // A memo as the program reads it: its length as a `u32`, then its bytes.
 const vec = (b: Uint8Array) => new Uint8Array([...new Uint8Array(new Uint32Array([b.length]).buffer), ...b]);
 const sha256 = (b: Uint8Array) => new Uint8Array(createHash("sha256").update(b).digest());
-// A transact uses 168k to 192k compute units, close to the default limit of 200k.
+// A transact uses 168k to 182k compute units, close to the default limit of 200k.
 const budget = getSetComputeUnitLimitInstruction({ units: 250_000 });
 ```
 
-The program takes its own address from the runtime, so any address works; the test loads it at a
-fixed one.
+`program` is the program's `ID`: the test loads the program there, at the address it derives its
+PDAs from.
 
 Then the wallet itself. Append:
 
@@ -1517,8 +1761,8 @@ A few things to notice:
 - **The wallet never re-implements the circuit.** `Key.address`, `Transaction.of`, `Path.first`,
   `path.update` and `path.next` are the Rust you wrote, run from TypeScript.
 - **The account lists are the program's.** `initialize` takes six accounts and `transact` ten, in
-  the order the program destructures them, and the data is the tag, then the arguments in the
-  order `TransactArgs` lays them out.
+  the order the program destructures them, and the data is the discriminator, then the arguments in
+  the order `TransactInstructionData` reads them.
 - **Every note gets a fresh address.** `pay` picks a random diversifier each time, so Bob's notes
   don't share an owner field anyone could link.
 - **The memos are stand-ins.** A real wallet encrypts each note's value, `rho` and `rseed` to its
@@ -1599,26 +1843,26 @@ From `app/`:
 ```console
 $ npx vitest run --reporter=verbose
 stdout | shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
-transact verified onchain in 173117 CU
+transact verified onchain in 168440 CU
 ...
-transact verified onchain in 171242 CU
+transact verified onchain in 172575 CU
 ...
-withdrawal verified onchain in 180406 CU
+withdrawal verified onchain in 172743 CU
 
- ✓ shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 4372ms
+ ✓ shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 3650ms
 stdout | shielded-transfer.test.ts > only a note's owner can spend it
-transact verified onchain in 171617 CU
+transact verified onchain in 174440 CU
 
- ✓ shielded-transfer.test.ts > only a note's owner can spend it 2153ms
+ ✓ shielded-transfer.test.ts > only a note's owner can spend it 2017ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
 ```
 
 Four transactions were proved, each in about a second on the worker pool, and verified by your
-program in 171,000 to 181,000 compute units, almost all of it the proof's verification. The number
+program in 168,000 to 175,000 compute units, almost all of it the proof's verification. The number
 varies with the public inputs, and by 1,500 for each extra try `find_program_address` takes to find
-a nullifier's bump: across runs, from 168,000 to 192,000, close to the default limit of 200,000, so
+a nullifier's bump: across nine runs, from 168,000 to 182,000, close to the default limit of 200,000, so
 each transaction carries `budget`, a limit of 250,000. The vault ends at 45: Alice's change, still
 shielded, with nothing onchain saying it's hers. Mallory's spend was refused before any proof was
 made.
