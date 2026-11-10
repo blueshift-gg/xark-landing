@@ -17,12 +17,18 @@ const examples = [
   },
   {
     no: "03",
+    name: "Token claim",
+    pi: "4 public inputs",
+    blurb: "Claim an airdrop by proving your address is on the list. A private Merkle path.",
+  },
+  {
+    no: "04",
     name: "Shielded pool",
     pi: "4 + 7 public inputs",
     blurb: "Unlinkable deposit → withdrawal. Merkle membership + nullifiers.",
   },
   {
-    no: "04",
+    no: "05",
     name: "Shielded transfer",
     pi: "19 public inputs",
     blurb: "Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.",
@@ -37,7 +43,7 @@ export default function ExamplesPage() {
           <div className="xk-kicker" style={{ marginBottom: 16 }}>
             Examples
           </div>
-          <h1>Four circuits, easiest to hardest.</h1>
+          <h1>Five examples, easiest to hardest.</h1>
           <p>
             Each is built, proved, and verified end-to-end in an in-process
             Solana VM.

@@ -861,12 +861,12 @@ that guards anything real needs a key from a ceremony. See
 [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
-The finished example, with a `justfile` that runs every step, a policy builder
+The finished example, with npm scripts that run every step, a policy builder
 (`Policy::default().on(today).min_age(18)…`), a bundled self-test proof and more tests, is
 [02-zkyc](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc) in xark-examples.
 
 <Cards>
-  <Card title="03 · Shielded pool" href="/docs/tutorials/03-shielded-pool" description="Unlinkable deposits and withdrawals: Merkle paths, nullifiers, and two circuits." />
+  <Card title="03 · Token claim" href="/docs/tutorials/03-token-claim" description="Claim an airdrop by proving your address is on the list: a Merkle path as a private input." />
   <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs, packing, and the everyday types: Days, Text, Choice, Bitfield." />
   <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="Provers, verifiers, pinning, worker pools, and the circuit's Rust in TypeScript." />
 </Cards>
