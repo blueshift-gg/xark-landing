@@ -1,16 +1,21 @@
 ---
 title: "05 · Shielded transfer"
-description: Private payments of any amount, Zcash-style. Notes, a key hierarchy, a JoinSplit circuit, an SPL token pool and a relayer.
+description: Merkle trees and range proofs together. Private payments of any amount, Zcash-style. Notes, a key hierarchy, a JoinSplit circuit, an SPL token pool and a relayer.
 ---
 
 In this tutorial you'll build a shielded pool for an SPL token. Anyone can deposit tokens into it,
 pay anyone else any amount inside it, and withdraw. Onchain, an observer sees tokens go in and
 come out, but never who paid whom, or how much.
 
-[04 · Shielded pool](/docs/tutorials/04-shielded-pool) moved fixed amounts from a deposit to a
-withdrawal. This one adds what a payment system needs:
+This is where the story comes together: **Merkle trees and range proofs**.
+[04 · Shielded pool](/docs/tutorials/04-shielded-pool) used [03](/docs/tutorials/03-token-claim)'s
+Merkle tree and [02](/docs/tutorials/02-zkyc)'s commitments to move fixed amounts from a deposit to
+a withdrawal. Here notes carry any amount, and the circuit has to prove that what goes in equals
+what comes out without revealing either. That only works because every amount is a
+[range-checked](/docs/learn-zk/range-proofs) `u64`, the idea [01](/docs/tutorials/01-over-9000)
+started with. On top of 04, this one adds what a payment system needs:
 
-- **notes**: hidden amounts, each owned by an address;
+- **notes**: hidden amounts, each range-checked, each owned by an address;
 - a **key hierarchy**: one secret key, with a viewing key and any number of addresses derived from
   it;
 - **JoinSplit**: one circuit that spends two notes and creates two, as long as the values balance;
@@ -323,7 +328,19 @@ a dummy), and burns the nullifier revealed; that the outputs are the commitments
 value balances. As in 04, the chain never hashes: the circuit proves the two new notes take the
 tree from `old_root` to `new_root`, so the program only stores roots.
 
-The amounts are `u64` inputs, so xark range-checks each one and no sum can wrap around the field.
+<Callout title="Why every amount is range-checked">
+`require_eq(value_in, value_out)` is an equation in the field, where arithmetic wraps at `p`. On
+its own, it would accept a transaction that spends two dummies and brings nothing in, whose
+outputs are a note worth 1,000 and a note worth `p − 1,000`: the outputs sum to `p`, which is 0, the same as the inputs. The second note acts
+as −1,000, and 1,000 tokens appear from nowhere.
+
+What stops it is the type. `value`, `vpub_in`, `vpub_out` and `fee` are all `u64` inputs, so xark
+[range-checks](/docs/learn-zk/range-proofs) each to 64 bits as it's read, and `p − 1,000` has no
+64-bit decomposition. Each side then sums at most four values below 2^64, far below `p`, so the
+field equation is the integer equation: value is conserved, exactly. No comparison is needed; the
+range checks alone make the sum mean what it says.
+</Callout>
+
 The recipient, the relayer and the memos' hashes are used in no other constraint, so `bind`, as in
 04's withdraw circuit, ties each to the proof. Without it, a relayer could swap them freely.
 
@@ -1616,10 +1633,15 @@ withdrew without ever holding SOL. Onchain there was a deposit into the vault, a
 out of it, two fees and three transactions of commitments and nullifiers, with no link between
 the deposit and the withdrawal.
 
-The pieces were the ones from earlier tutorials, combined. A note is 02's commitment, carrying a
-value. A spend is 04's Merkle membership and nullifier. The vault is 03's. The new part was the
-balance equation that ties them together, and the public inputs that let a relayer submit your
-transaction without being able to change it.
+The pieces were the ones from earlier tutorials, combined. A note is 02's salted commitment,
+carrying a value. A spend is 03's Merkle membership with 04's nullifier. The vault is 03's. And
+01's range proof is what makes it a payment system: every amount is a range-checked `u64`, so the
+balance equation that ties the spends to the outputs can't wrap around the field and mint money.
+The public inputs let a relayer submit your transaction without being able to change it.
+
+That's the whole arc: range proofs make comparisons and sums mean what they say, commitments hide
+values while fixing them, Merkle trees prove membership in a set without naming the member, and
+together they make private payments.
 
 This is a teaching version of a deployed system. Before any real use, it would still need:
 

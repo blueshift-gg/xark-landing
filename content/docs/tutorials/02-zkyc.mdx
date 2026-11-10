@@ -1,19 +1,26 @@
 ---
-title: "02 · zkyc"
-description: Prove you pass a KYC check without showing your ID. A commitment an issuer publishes, typed and packed inputs, a policy the program picks, and a proof bound to the wallet that signs.
+title: "02 · zKYC"
+description: Range proofs put to work. Prove you pass a KYC check (age, net worth, nationality, a valid document) without showing your ID, against a salted commitment and a policy the program picks.
 ---
 
 In this tutorial you'll prove to a Solana program that you pass its KYC policy: 18 or older today,
 worth at least 500,000, a national of a country it allows, with an ID document that hasn't expired.
 The program learns that, and nothing else: not your birth date, your net worth, your nationality or
-your document number. It's the range check from [01 · Over 9000](/docs/tutorials/01-over-9000),
-with the things that make it hold up:
+your document number.
 
-- a **commitment** an issuer publishes, so the identity can't be made up;
-- **typed inputs** (dates, countries, a set of countries) that xark **packs** into few field
-  elements;
-- a **policy** as a public input, which the program builds itself, so the verifier picks the rules;
-- the **holder's wallet** as a public input, so no one else can submit the proof.
+[01 · Over 9000](/docs/tutorials/01-over-9000) taught the [range proof](/docs/learn-zk/range-proofs)
+on a number nobody cared about. Here range proofs do real work: an age is a comparison of dates, and
+a minimum net worth a comparison of amounts. Around them you'll add three more privacy tools:
+
+- a **set membership check**, so the program learns that your country is on its list, not which
+  one it is;
+- a **salted commitment**, so the identity is fixed by an issuer and the only trace of it onchain
+  reveals nothing;
+- the **holder's wallet** as a public input, so no one else can submit your proof.
+
+Along the way you'll meet **typed inputs** (dates, countries, a set of countries) that xark
+**packs** into few field elements, and a **policy** as a public input, which the program builds
+itself so the verifier picks the rules.
 
 By the end you'll have the same pieces as in 01: a circuit and its tests, a TypeScript client, a
 Solana program, and an end-to-end test that sends a proof to the program and sees it accepted for
@@ -86,11 +93,18 @@ impl Identity {
 }
 ```
 
-The issuer publishes only the commitment, the Poseidon2 hash of the identity's fields, and you
-can prove things about the identity behind it as often as you like, to any verifier. The salt keeps
-the commitment from leaking anything: birth dates, countries and round net worths are few enough
-that anyone could hash every plausible identity and find yours. See
-[Commitments](/docs/gadgets/commitments).
+The commitment is the Poseidon2 hash of all six fields, and it's the only part of the identity that
+ever goes onchain. You can prove things about the identity behind it as often as you like,
+to any verifier.
+
+<Callout title="Why the commitment is salted">
+A hash hides its input only if the input can't be guessed. An identity mostly can: there are about
+73,000 days in two centuries, 249 countries and a handful of round net worths. Without the salt,
+anyone who saw the commitment could hash every plausible birth date, country and net worth until
+one matched, and read your identity off it. The `salt` is a random field element the issuer picks
+and gives only to you. With it in the hash, there's nothing to enumerate: the commitment reveals
+nothing about the identity. See [Commitments](/docs/gadgets/commitments).
+</Callout>
 
 Each field has a type that says what it is, and xark checks it on the way in:
 
@@ -223,10 +237,24 @@ mod tests {
 ```
 
 The first `require_eq` is the one that matters. In 01 the prover could pick any number. Here every
-value the other checks read has to be the one inside a commitment the issuer published, so the
-prover can't choose convenient ones. The rest are 01's range checks, against a policy the verifier
-supplies, and a set membership check: `require_in` passes only if the nationality's bit is set in
-`allowed`.
+value the other checks read has to be the one inside the commitment, so the prover can't choose
+convenient ones. Each of the other lines proves one rule while hiding the value it checks:
+
+- **Age is a range proof on dates.** A `Day` is a count of days since 1900-01-01, range-checked to
+  17 bits as it's read, so `id.born <= policy.born_by` is 01's comparison on two 17-bit numbers.
+  The verifier learns "born on or before `born_by`", never the birth date. The expiry check,
+  `id.expires >= policy.today`, works the same way.
+- **Minimum net worth is a 64-bit range proof.** `id.net_worth >= policy.min_net_worth` compares
+  two range-checked `u64`s. It proves the holder has at least the minimum, never how much.
+- **The nationality is checked against an allow-list without naming it.** The nationality is a
+  private `Choice<Country>`, the country's position in the list; `allowed` is a public
+  `Bitfield<Country>`, one bit per country. `require_in` splits `allowed` into its 249 bits and
+  multiplies one factor per country, each zero only where the nationality is that country and that
+  country's bit is set; the product must be zero. The verifier sees only the allowed set, not
+  which member of it you are.
+
+None of this is a new kind of constraint: the comparisons are [range
+proofs](/docs/learn-zk/range-proofs), and the allow-list check rests on bit decompositions too.
 
 The tests call the circuit's own Rust (`id.commitment()`, `Policy::on`) to build their inputs, as
 the client will.
@@ -562,7 +590,8 @@ fn halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
 ```
 
 Unlike 01, the instruction data isn't the whole statement: the program only takes the proof and
-the commitment from the transaction. See
+the commitment from the transaction. That, with the signer's address, is all that goes onchain:
+the program stores nothing, and the identity and its salt stay with the holder and the issuer. See
 [Where the public inputs come from](/docs/guides/how-verification-works#where-the-public-inputs-come-from).
 </Step>
 
@@ -833,20 +862,22 @@ midnight UTC has to be made again.
 ## What you built
 
 A holder proved to a Solana program that they pass its KYC policy, and the program learned only
-that: not the birth date, the net worth, the nationality or the document number. The new ideas:
+that: not the birth date, the net worth, the nationality or the document number. 01's range proof
+did the real work, on dates for the age and the expiry and on amounts for the net worth, and three
+more tools kept the rest private:
 
-- **A commitment.** `require_eq(id.commitment(), commitment)` ties the private identity to one an
-  issuer published, so the prover can't choose it.
-- **Typed inputs.** `Text`, `Days`, `Choice<Country>`, `Bitfield<Country>` and `u64` gave the
-  circuit, the tests and the TypeScript client the same types, and `#[input] impl` gave the client
-  the circuit's own `Identity.commitment` and `Policy.on`.
-- **Packing.** `#[input]` packed `Policy` into two public inputs and `Identity` into three field
-  elements, and the program packed its policy the same way.
-- **A policy from the verifier.** `Policy` is a public input the program builds from its constants
-  and its `Clock`, so the rules and "today" are the program's, not the prover's, and one circuit
-  serves any policy.
+- **Set membership.** `require_in` proved the nationality is in the program's `allowed` set without
+  saying which country it is.
+- **A salted commitment.** `require_eq(id.commitment(), commitment)` ties the private identity to
+  the one the issuer committed to, so the prover can't choose it, and the salt makes that
+  commitment, the only trace of the identity in the transaction, reveal nothing.
 - **A bound signer.** `bind(holder)` ties the proof to one wallet, which the program fills in from
   the transaction's signer.
+
+Underneath, **typed inputs** (`Text`, `Days`, `Choice<Country>`, `Bitfield<Country>`, `u64`) gave
+the circuit, the tests and the TypeScript client the same types, **packing** fit `Policy` into two
+public inputs, and **a policy from the verifier**, built from the program's constants and its
+`Clock`, made the rules and "today" the program's, not the prover's.
 
 A proof guarantees consistency, not honesty. It shows the identity inside the commitment meets the
 policy; it says nothing about whether the commitment is true. This program accepts any commitment,
@@ -854,6 +885,10 @@ so anyone could commit to a 1900 birth date and a billion in net worth. A real o
 commitment against a registry its trusted issuers sign, or has the circuit verify the issuer's
 signature with a [signature gadget](/docs/gadgets/signatures). A program serving several verifiers
 would also keep each policy in an account rather than in constants, and pack it the same way.
+
+Checking against a registry raises the next question: how does a circuit prove a value is in a list
+of thousands without the list being a public input? The next tutorial answers it with a **Merkle
+tree**: a token claim, where the list is one published root and your place in it a private path.
 
 <Callout type="warn" title="Before you deploy">
 `xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
@@ -866,7 +901,7 @@ The finished example, with npm scripts that run every step, a policy builder
 [02-zkyc](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc) in xark-examples.
 
 <Cards>
-  <Card title="03 · Token claim" href="/docs/tutorials/03-token-claim" description="Claim an airdrop by proving your address is on the list: a Merkle path as a private input." />
+  <Card title="03 · Token claim" href="/docs/tutorials/03-token-claim" description="Merkle trees in a circuit: claim an airdrop by proving your address and amount are on the list, with the path private." />
   <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs, packing, and the everyday types: Days, Text, Choice, Bitfield." />
   <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="Provers, verifiers, pinning, worker pools, and the circuit's Rust in TypeScript." />
 </Cards>

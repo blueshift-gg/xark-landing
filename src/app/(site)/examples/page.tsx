@@ -7,31 +7,31 @@ const examples = [
     no: "01",
     name: "Over 9000",
     pi: "0 public inputs",
-    blurb: "Prove a secret number beats a bound. The range-proof primitive.",
+    blurb: "Range proofs. A field has no order, so the circuit proves a secret number beats a bound one bit at a time.",
   },
   {
     no: "02",
-    name: "zkyc",
+    name: "zKYC",
     pi: "5 public inputs",
-    blurb: "Prove you pass KYC without showing your ID, for one wallet. Commitments and policies.",
+    blurb: "Range proofs put to work: prove your age and net worth, and a nationality on an allow-list, against a salted commitment.",
   },
   {
     no: "03",
     name: "Token claim",
     pi: "4 public inputs",
-    blurb: "Claim an airdrop by proving your address is on the list. A private Merkle path.",
+    blurb: "Merkle trees in a circuit. Prove your address and amount are on the airdrop list, with the path kept private.",
   },
   {
     no: "04",
     name: "Shielded pool",
     pi: "4 + 7 public inputs",
-    blurb: "Unlinkable deposit → withdrawal. Merkle membership + nullifiers.",
+    blurb: "Merkle trees plus salted commitments. Notes and nullifiers make a withdrawal unlinkable to its deposit.",
   },
   {
     no: "05",
     name: "Shielded transfer",
     pi: "19 public inputs",
-    blurb: "Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.",
+    blurb: "Merkle trees and range proofs together. Private payments of any amount; range-checked values keep the sums from wrapping.",
   },
 ];
 

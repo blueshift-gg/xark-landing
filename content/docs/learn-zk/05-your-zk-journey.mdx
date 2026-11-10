@@ -11,21 +11,26 @@ dumps; every one earns its place).
 
 **Step 1 — Run example 01 (today, ~20 min).**
 [`01-over-9000`](/examples). Prove a range, then verify it in an in-process Solana VM or on devnet.
-Goal: get the toolchain working and *feel* the build → prove → export → verify loop end to end.
+Goal: get the toolchain working, *feel* the build → prove → export → verify loop end to end, and
+see why a comparison needs a [range proof](/docs/learn-zk/range-proofs).
 
 **Step 2 — Learn just enough of xark's Rust subset (a day).**
 You only need the basics: `Private<T>`/`Public<T>`, integer inputs, `require`, arrays, fixed
 loops, functions, and what the [supported subset](/docs/reference/supported-subset) accepts. Keep
 `xark check` running in your editor. Rewrite example 01 from scratch without looking.
 
-**Step 3 — Build with commitments (example 02).**
-[`02-zkyc`](/examples). This is the leap from "toy proof" to "useful
-claim" — binding hidden values to a public commitment. Most real ZK apps are variations on this.
+**Step 3 — Put range proofs to work, with commitments (example 02).**
+[`02-zkyc`](/examples), zKYC. Range proofs check an age and a net worth, an allow-list checks a
+nationality without naming it, and a salted commitment binds the hidden values to something public.
+This is the leap from "toy proof" to "useful claim". Most real ZK apps are variations on it.
 
-**Step 4 — Build a real primitive (examples 03 and 04).**
-[`03-token-claim`](/examples) puts a Merkle path in the private inputs; [`04-shielded-pool`](/examples)
-adds nullifiers, two circuits and onchain state. When you understand why the chain never hashes, you understand ZK system *design*, not just
-circuits.
+**Step 4 — Merkle trees, then a shielded pool (examples 03, 04 and 05).**
+[`03-token-claim`](/examples) brings Merkle trees into the circuit: a private path proves your
+address and amount are on a list. [`04-shielded-pool`](/examples) puts 02's salted commitments in
+that tree and adds nullifiers, so a withdrawal is unlinkable to its deposit.
+[`05-shielded-transfer`](/examples) adds range proofs back: notes of any amount, each range-checked
+so value can't be minted by wrapping the field. When you understand why the chain never hashes, you
+understand ZK system *design*, not just circuits.
 
 **Step 5 — Design your own.**
 Pick a problem where something should be *hidden but provable*: private votes, sealed-bid auctions,

@@ -1,19 +1,21 @@
 ---
 title: "03 · Token claim"
-description: Airdrop an SPL token to a list of up to a million addresses, with one 32-byte root onchain. A Merkle path as a private input, a tree builder the client runs from the circuit's Rust, and a Pinocchio program that pays each address once.
+description: Merkle trees in a circuit. Airdrop an SPL token to a list of up to a million addresses, with one 32-byte root onchain. A Merkle path as a private input, a tree builder the client runs from the circuit's Rust, and a Pinocchio program that pays each address once.
 ---
 
 In this tutorial you'll build a token airdrop. A distributor publishes one 32-byte root for a list
 of (Solana address, amount) pairs and funds a vault with the tokens. Each address on the list
 proves it's there, for its amount, and a Solana program pays it, once.
-[02](/docs/tutorials/02-zkyc) proved something about one committed value; this proves membership
-in a list of up to a million, with the same 256-byte proof. The new ideas:
 
-- a **Merkle path as a private input**: the claimant proves their entry is in the tree without
-  putting the path onchain;
+The new idea is the **Merkle tree in a circuit**. [01](/docs/tutorials/01-over-9000) and
+[02](/docs/tutorials/02-zkyc) proved things about one value: a number, then one committed identity.
+A list of a million can't be a public input, but its Merkle root can: one field element that fixes
+every entry. Each leaf is the Poseidon2 hash of a claimant's Solana address (as two halves) and the
+amount they're owed. The claimant proves their leaf is under the published root, with the path to
+it as a private input, and that proof is what entitles them to claim the amount. Around it:
+
 - a **tree builder written once**, in the circuit crate's Rust, that the distributor and the
   claimant both call from TypeScript, so everyone hashes as the circuit does;
-- **Poseidon2** for the leaves and the nodes;
 - a **public claimant and amount**, so the program remembers who claimed with one receipt account
   per address;
 - an **SPL vault** that a Pinocchio program pays from, signing as its owner.
@@ -96,9 +98,15 @@ halves, `hi` and `lo`. See [Hashes](/docs/gadgets/hashes).
 <Step>
 ### Write the tree
 
-The list is a Merkle tree of depth 20: the claims' leaves in order, then an empty leaf in every
-slot left, up to 2^20. Its root is what the distributor publishes. A leaf's **path** is its index
-and its sibling at each of the 20 levels. Append to `token-claim/src/lib.rs`:
+A Merkle tree hashes its leaves in pairs, then those hashes in pairs, up to a single **root**.
+Changing any leaf changes the root, so the root commits to the whole list. To show a leaf is in it,
+you give the leaf's **path**: its index, and the sibling at each level. Hashing up from the leaf
+with those siblings must land on the root, and Poseidon2's collision resistance means only a leaf
+that's really there can. That check is 20 hashes, whatever the list's length.
+
+This list is a Merkle tree of depth 20: the claims' leaves in order, then an empty leaf in every
+slot left, up to 2^20. Its root is what the distributor publishes. Append to
+`token-claim/src/lib.rs`:
 
 ```rust title="token-claim/src/lib.rs"
 /// Tree depth: up to 2^20 claims.
@@ -974,8 +982,9 @@ vault until she claims it.
 A distributor published one root for a list of three, and could have for a million. Each address
 on it claimed its tokens once, with a proof of a path no transaction ever carried. The new ideas:
 
-- **A Merkle path as a private input.** `Private<Path>` holds an index and 20 siblings, and
-  `require_eq(path.root(claim.leaf()), root)` is the whole circuit.
+- **A Merkle tree in a circuit.** Each leaf is `Poseidon2(claimant.hi, claimant.lo, amount)`;
+  `Private<Path>` holds an index and 20 siblings, and `require_eq(path.root(claim.leaf()), root)`,
+  the whole circuit, proves the leaf is under the published root.
 - **A builder written once.** `Path::first`, `next`, `update` and `list_root` are host-only Rust in
   the circuit crate, and through `#[input] impl` the distributor's TypeScript calls them, so the
   tree it publishes is hashed exactly as the circuit hashes it.
@@ -988,8 +997,12 @@ What hiding the path buys: a claim is 256 bytes of proof and 8 of amount however
 program never hashes and has no Poseidon2 to keep in step with the circuit, and none of the
 siblings, which are other people's leaves, ever goes onchain. What it doesn't hide: the claimant
 and the amount. They're public inputs the program fills in from the signer and the instruction, so
-anyone reading the chain sees who claimed how much. Hiding who claims needs a nullifier and a
-relayer, which is the next tutorial.
+anyone reading the chain sees who claimed how much.
+
+The next tutorial hides them. Put 02's salted commitments in the leaves instead of addresses, and
+the Merkle tree becomes a **shielded pool**: a deposit adds a commitment, a withdrawal proves it
+knows the secrets behind one of the leaves without saying which, and a nullifier stops it from
+withdrawing twice.
 
 The program accepts any list from anyone. A real distributor also checks that its list has one
 entry per address (a second entry for the same address can never be claimed), funds the vault
@@ -1007,7 +1020,7 @@ the program and more refusals, is
 xark-examples.
 
 <Cards>
-  <Card title="04 · Shielded pool" href="/docs/tutorials/04-shielded-pool" description="Unlinkable deposits and withdrawals: the same Merkle path, with nullifiers and a relayer to hide who withdraws." />
+  <Card title="04 · Shielded pool" href="/docs/tutorials/04-shielded-pool" description="Merkle trees plus salted commitments: notes and nullifiers make a withdrawal unlinkable to its deposit." />
   <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, roots and cond_swap." />
   <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs and arrays, packing, and how a Hash enters a circuit." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the public inputs a program supplies, and the generated crate." />

@@ -1,11 +1,18 @@
 ---
 title: "04 · Shielded pool"
-description: Deposit 1 SOL, then withdraw it to a fresh address that no one can link to the deposit. Note commitments, nullifiers, two circuits sharing a Rust crate, and a Pinocchio program that never hashes the tree.
+description: Merkle trees plus salted commitments. Deposit 1 SOL, then withdraw it to a fresh address that no one can link to the deposit. Note commitments, nullifiers, two circuits sharing a Rust crate, and a Pinocchio program that never hashes the tree.
 ---
 
 In this tutorial you'll build a shielded pool: anyone deposits a fixed amount, and later
 withdraws it to a new address. Onchain, an observer sees a deposit and, separately, a
-withdrawal, with nothing to say which deposit it came from. By the end you'll have:
+withdrawal, with nothing to say which deposit it came from.
+
+The pool is two ideas you already have, combined: [03](/docs/tutorials/03-token-claim)'s **Merkle
+tree**, with [02](/docs/tutorials/02-zkyc)'s **salted commitments** as its leaves. A deposit appends
+a commitment to secrets only the depositor knows; a withdrawal proves it knows the secrets behind
+*some* leaf, without saying which, and reveals a **nullifier** so the same deposit can't be
+withdrawn twice. [Range proofs](/docs/learn-zk/range-proofs) play only a supporting role here,
+because every deposit is the same amount. By the end you'll have:
 
 - a **shared crate**, `pool`: the Merkle tree of deposits, as plain Rust a wallet also runs;
 - a **deposit circuit**, which proves a new tree root is the old tree with one leaf appended;
@@ -36,7 +43,8 @@ signer. A shielded pool hides who is paid, with two new pieces.
 
 A deposit is a secret **note**: two random field elements, `nullifier` and `secret`. The depositor
 keeps it, and the pool appends its **commitment**, a Poseidon2 hash of both, as the next leaf of a
-Merkle tree. To withdraw, the owner proves two things without saying which leaf is theirs:
+Merkle tree. It's 02's salted commitment with nothing left to hide but randomness: both fields are
+random, so no one can guess a note from its commitment. To withdraw, the owner proves two things without saying which leaf is theirs:
 
 1. their commitment is a leaf of a tree whose root the program knows (03's Merkle path);
 2. a value only the note's owner can compute, its **nullifier hash**, is what they say it is.
@@ -450,6 +458,12 @@ mod tests {
 whoever submits the proof can't redirect the payout. The two addresses are only bound, as the
 holder was in [02](/docs/tutorials/02-zkyc). `fee` is a `u64`, and its range check
 already uses it.
+
+That range check is one of the pool's two [range proofs](/docs/learn-zk/range-proofs), and both
+play a supporting role. `fee` is checked to 64 bits as it's read, and the program then checks it's
+at most the denomination before paying it out. The leaf index in `Path` is a `u32`, and
+`to_bits::<H>()` in `Path::root` bounds it below 2^20 while splitting out the bits that steer the
+path. Amounts need no range proof at all: every note in a pool is the same denomination.
 
 ```console
 $ xark test withdraw
@@ -1460,8 +1474,9 @@ program found its nullifier account already there.
 A shielded pool: 1 SOL went in from one wallet and came out at another, and nothing onchain links
 the two. The new ideas:
 
-- **Commitments and nullifiers.** A deposit's commitment is a leaf; a withdrawal proves the note
-  behind *some* leaf is yours, against a root the program remembers, with 03's Merkle path. Every
+- **Commitments in a Merkle tree, and nullifiers.** 02's commitments became 03's leaves. A
+  deposit's commitment is a leaf; a withdrawal proves the note behind *some* leaf is yours,
+  against a root the program remembers, with 03's Merkle path. Every
   deposit in the tree is a candidate, so the anonymity set is the whole pool. Each note has one
   nullifier hash, which the program records as a PDA, so a note pays out once, and the hash
   reveals nothing about which commitment it belongs to.
@@ -1474,7 +1489,7 @@ the two. The new ideas:
   PDA per pool and per nullifier, and every account check written out.
 
 The pool hides *which* deposit a withdrawal spends, not *how much*: every note in a pool is the
-same size. It also can't hide timing. A withdrawal right after the only deposit links them anyway.
+same size, which is why range proofs had little to do here. It also can't hide timing. A withdrawal right after the only deposit links them anyway.
 A deposit proof binds the current root and next index, so two deposits racing for the same slot
 can't both land: a real wallet reads the pool's state just before proving, and proves again if
 another deposit wins.
@@ -1490,8 +1505,13 @@ and a test of more refusals (another fee, an unknown root), is
 [04-shielded-pool](https://github.com/blueshift-gg/xark-examples/tree/main/04-shielded-pool) in
 xark-examples.
 
+Fixed denominations are the pool's limit: you can't pay someone 3.7 SOL, or split a note. The
+next tutorial lets notes carry any amount, and that is where range proofs become essential: once
+amounts are private and arbitrary, only a range check on each one stops a note from being worth
+"−1".
+
 <Cards>
-  <Card title="05 · Shielded transfer" href="/docs/tutorials/05-shielded-transfer" description="Private payments of any amount: value-carrying notes, keys, JoinSplit and SPL tokens." />
+  <Card title="05 · Shielded transfer" href="/docs/tutorials/05-shielded-transfer" description="Merkle trees and range proofs together: private payments of any amount, with every value range-checked so the sums can't wrap." />
   <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="The xark-merkle gadget behind every root in this pool." />
   <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="How a client runs the circuit crate's Rust." />
 </Cards>

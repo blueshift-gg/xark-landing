@@ -1,10 +1,17 @@
 ---
 title: "01 · Over 9000"
-description: Prove a secret number is greater than 9000, then verify the proof in a Solana program. A range proof, and the whole xark loop.
+description: Your first range proof. Prove a secret number is greater than 9000, and verify the proof in a Solana program.
 ---
 
 In this tutorial you'll prove that you know a number greater than 9000 without revealing it, and
-check that proof in a Solana program. By the end you'll have built the whole xark loop by hand:
+check that proof in a Solana program.
+
+The claim is a comparison, and comparisons are the first thing a circuit can't do natively. A
+circuit computes in a prime field, which has no "less than", so to compare numbers it first proves
+they're small: it splits each into bits and checks every bit. That's a **range proof**, and it sits
+under every age, balance and price check you'll write. Over 9000 is the smallest one there is.
+
+By the end you'll have built the whole xark loop by hand:
 
 - a **circuit**: four lines of Rust that state the rule;
 - its **tests**, run with `xark test`;
@@ -63,11 +70,11 @@ pub fn over_9000(power_level: Private<u64>) {
 That's the whole circuit. `Private` means the prover supplies `power_level` but the proof never
 reveals it. `require` states what must hold: if it doesn't, there is no proof to make.
 
-The `u64` does real work. A circuit computes over a large prime field, not machine integers, so
-xark constrains `power_level` to 64 bits before it compares it. That bound is what makes `>`
-mean what it says, and it's the range proof under every balance, age or price check you'll write.
-See [Integers](/docs/reference/language#integers) and
-[Circuits and constraints](/docs/learn-zk/02-circuits-and-constraints).
+The `u64` is the range proof. In the field, `0 − 1` is the largest value there is, so `>` on raw
+field elements could be fooled. Declaring `power_level` a `u64` makes xark split it into 64 bits and
+constrain each to 0 or 1, which proves it lies in `[0, 2^64)`. With both sides that small, the
+comparison can't wrap, and `>` means what it says. [Range proofs](/docs/learn-zk/range-proofs)
+explains why, step by step. Pick a type and a value to see the bits a value is checked against:
 
 <IntegerWidths />
 
@@ -118,8 +125,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 The first run compiles xark and takes a little while. 128 of the 131 constraints are range checks,
-one per bit: for `power_level`, and for the difference the comparison checks. `xark profile
-over-9000` breaks them down by source line. The digest is the circuit's fingerprint: you'll get
+one per bit: 64 for `power_level`, and 64 for the difference between it and 9000, whose top bit
+says which side is bigger. Two more belong to the comparison itself, and one is the `require`.
+`xark profile over-9000` breaks them down by source line. The digest is the circuit's fingerprint: you'll get
 the same one. For more on writing tests, see [Test a circuit](/docs/guides/testing).
 </Step>
 
@@ -408,7 +416,8 @@ Your proof was verified onchain, in about 76,000 compute units, and the tampered
 ## What you built
 
 A secret number went into a TypeScript prover, and a 256-byte proof came out. A Solana program
-checked it and learned only that the number is over 9000. Along the way you used each part of
+checked it and learned only that the number is over 9000. The proof rests on a range proof:
+64 constrained bits that make `power_level` an integer, so `>` could be trusted. Along the way you used each part of
 xark: `xark test` for the circuit, `xark setup` and `xark prove` for keys and proofs, `xark client`
 for the app, and `xark export` for the program.
 
@@ -416,8 +425,8 @@ When you change the circuit, rerun `xark setup`, `xark prove`, `xark export` and
 then rebuild the program. The client and verifier follow the circuit.
 
 The proof says someone knows *a* number over 9000. It doesn't tie that number to anything: anyone
-can pick 9001. The next tutorial binds hidden values to a published commitment, and the same
-range check becomes a KYC check.
+can pick 9001. The next tutorial, zKYC, binds hidden values to a published commitment, and the
+same range proofs check an age and a net worth.
 
 <Callout type="warn" title="Before you deploy">
 `xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
@@ -429,7 +438,7 @@ The finished example, with npm scripts that run every step, is
 xark-examples.
 
 <Cards>
-  <Card title="02 · zkyc" href="/docs/tutorials/02-zkyc" description="Prove you pass a KYC check without showing your ID: commitments, typed inputs and a policy the program picks." />
+  <Card title="02 · zKYC" href="/docs/tutorials/02-zkyc" description="Range proofs put to work: prove your age and net worth, and an allowed nationality, against a salted commitment, without showing your ID." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the pairing check, and the crate your program calls." />
   <Card title="The CLI, command by command" href="/docs/reference/cli" description="Every subcommand, its flags, and what it writes." />
 </Cards>
