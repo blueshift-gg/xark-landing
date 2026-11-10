@@ -428,6 +428,12 @@
 .xk .xk-commit-row .val {
   color: var(--lime);
 }
+.xk .xk-proof-row {
+  margin: 16px 0 0;
+}
+.xk .xk-proof-row .val {
+  font-variant-numeric: tabular-nums;
+}
 .xk .xk-prompt {
   font-size: 21px;
   font-weight: 400;
