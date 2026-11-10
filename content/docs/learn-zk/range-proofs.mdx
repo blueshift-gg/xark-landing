@@ -1,0 +1,82 @@
+---
+title: Range proofs
+description: Why a prime field has no "less than", and how a circuit compares numbers anyway — by proving them small, one bit at a time.
+---
+
+Almost every useful claim compares numbers: a balance covers a payment, a person is over 18, a
+price is under a limit. A circuit can't compare numbers directly. This page explains why, and how a
+**range proof** makes comparisons possible.
+
+## A prime field has no order
+
+A circuit computes over a [finite field](/docs/learn-zk/02-circuits-and-constraints): the integers
+modulo a prime `p`, a 254-bit number for BN254. Addition wraps around at `p`, like a clock with `p`
+hours.
+
+On a clock, "less than" stops meaning anything. Start at 0 and keep adding 1, and every step
+seems to go up: 0 < 1 < 2 < … until, after `p` steps, you're back at 0. An order that respects
+addition (if `a < b` then `a + c < b + c`) would make 0 less than itself, so a prime field can't
+have one. Any order you choose would be broken by the arithmetic.
+
+The wrap is easy to see. In the field, `0 − 1` isn't −1; it's `p − 1`, the largest value there is.
+So "is the balance at least the payment?" can't be asked of field elements as they stand: a
+prover could put `p − 1` where a small negative number should be, and it would look enormous.
+
+## Fix a range, and prove it
+
+The way out is to give up on comparing *field elements* and compare *small integers* instead. If
+`a` and `b` are known to lie in `[0, 2^N)`, with `2^N` far below `p`, then nothing can wrap. Field
+arithmetic on them is integer arithmetic, and integer order means what it should.
+
+The circuit can't take "known to lie in" on trust: the prover chooses the values. It has to prove
+it. That proof is a **bit decomposition**: the prover supplies `N` bits `b₀ … b_{N−1}`, and the
+circuit checks two things:
+
+- each bit is a bit: `bᵢ · (bᵢ − 1) = 0`, which holds only for 0 and 1;
+- the bits make the value: `a = b₀ + 2·b₁ + 4·b₂ + … + 2^{N−1}·b_{N−1}`.
+
+`N` bits can only add up to something in `[0, 2^N)`, so a value with a valid decomposition is in
+range. A value outside it, `p − 1` say, has no such bits, and no proof exists. That is a **range
+proof**. It costs one constraint per bit.
+
+## Comparing two numbers
+
+With `a` and `b` both range-checked to `N` bits, `a < b` is one more decomposition. The circuit
+takes `a − b + 2^N`. That's a number between 1 and `2^{N+1} − 1`, so it fits in `N + 1` bits and
+can't wrap. Its top bit is 1 exactly when `a ≥ b`. The circuit decomposes it and reads that bit.
+
+<Comparison />
+
+Switch the range checks off and try `b = -1`: the comparison then reports something false. Range
+checks are what make a comparison mean anything.
+
+## What this means in xark
+
+You rarely write a decomposition yourself; the types do it.
+
+- **Integer inputs are range-checked as they're read.** A `u64` input costs 64 constraints, a `u8`
+  costs 8, a `Days<1900, 2100>` costs 17. That check happens once per value, however many times you
+  compare it.
+- **A comparison adds about one more decomposition**, of the difference.
+  [Over 9000](/docs/tutorials/01-over-9000)'s whole circuit is 131 constraints: 64 for
+  `power_level`, 64 for the difference the comparison splits, two for the comparison itself, and one
+  equality.
+- **A bare `Field` has no `<`.** Comparing two `Field`s needs a width you state: `a.lt::<32>(b)`.
+  Comparing against a typed literal takes the literal's width: `x < 100u32`. There is no silent
+  default. See [The xark crate](/docs/reference/language#field).
+- **Sums can't wrap either.** When every amount is a range-checked `u64`, a sum of a few of them
+  stays far below `p`. So `inputs == outputs` means what it says, with no "negative" note minting
+  money. [Shielded transfer](/docs/tutorials/05-shielded-transfer) relies on exactly this.
+
+<IntegerWidths />
+
+## Where the tutorials use it
+
+- [01 · Over 9000](/docs/tutorials/01-over-9000): the bare range proof. A secret `u64` above a
+  bound.
+- [02 · zKYC](/docs/tutorials/02-zkyc): range proofs on dates and money. Born on or before a day
+  (a 17-bit comparison), net worth at least a minimum (64-bit), the document not expired.
+- [05 · Shielded transfer](/docs/tutorials/05-shielded-transfer): range-checked amounts, so value is
+  conserved without wrapping.
+
+Next: [the proof system these examples use →](/docs/learn-zk/03-groth16-in-one-page)

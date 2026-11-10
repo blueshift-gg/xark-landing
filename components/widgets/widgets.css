@@ -572,3 +572,55 @@
     transition: none !important;
   }
 }
+
+/* comparison */
+.xw-cmp-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr 4.5rem;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--xw-mono);
+  font-size: 12px;
+}
+.xw-cmp-l {
+  color: #bdbdbd;
+}
+.xw-cmp-v {
+  text-align: right;
+  color: #fff;
+}
+.xw-cmp-bits {
+  display: flex;
+  gap: 3px;
+}
+.xw-cmp-bit {
+  flex: 1;
+  max-width: 34px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  background: #161616;
+  color: var(--xw-muted);
+  font-size: 11px;
+}
+.xw-cmp-bit.on {
+  background: var(--xw-lime);
+  color: #0a0a0a;
+}
+.xw-cmp-bit.pad {
+  visibility: hidden;
+}
+.xw-cmp-bit.top {
+  outline: 1px solid #fff;
+  outline-offset: 1px;
+}
+@media (max-width: 720px) {
+  .xw-cmp-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .xw-cmp-v {
+    text-align: left;
+  }
+}
