@@ -40,8 +40,8 @@ Two consequences you'll feel:
 - **Comparisons and bit operations aren't free.** `a > b`, `a & b`, "is this 8 bits?" all have to be
   *built* out of field arithmetic. That's what a **range proof** is — proving a value fits in N bits
   by decomposing it into bits and constraining each. The `u64` input above makes xark decompose
-  `power_level` into 64 constrained bits, so `> 9000` compares integers.
-  ([Example 01](/examples) is the minimal case.)
+  `power_level` into 64 constrained bits, so `> 9000` compares integers. [Range
+  proofs](/docs/learn-zk/range-proofs) explains why a field has no order, and how this works.
 - **Hashes are chosen for the field.** Poseidon is popular in ZK precisely because it's cheap in
   field arithmetic — far cheaper than SHA-256 inside a circuit. That's why our commitments and
   Merkle trees use Poseidon2.
@@ -73,7 +73,7 @@ proof
 ```
 
 There is no separate frontend language: **the circuit is ordinary Rust**, compiled by your stable
-`rustc`. xark owns everything after the wasm (xark-IR → R1CS → Groth16 → on-chain verifier). It
+`rustc`. xark owns everything after the wasm (xark-IR → R1CS → Groth16 → onchain verifier). It
 accepts a subset of Rust and *rejects* anything it can't prove soundly, at its source line — that
 rejection is a safety feature, not a limitation to route around.
 
@@ -85,4 +85,4 @@ in-circuit secp256k1 ECDSA verify about 227,000. Part of designing a good ZK app
 circuit small: `xark inspect` gives the totals, and `xark profile` attributes every constraint to
 a line of your Rust.
 
-Next: [the proof system these examples use →](/docs/learn-zk/03-groth16-in-one-page)
+Next: [range proofs, and why a field has no order →](/docs/learn-zk/range-proofs)

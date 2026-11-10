@@ -1,0 +1,1027 @@
+---
+title: "03 · Token claim"
+description: Merkle trees in a circuit. Airdrop an SPL token to a list of up to a million addresses, with one 32-byte root onchain. A Merkle path as a private input, a tree builder the client runs from the circuit's Rust, and a Pinocchio program that pays each address once.
+---
+
+In this tutorial you'll build a token airdrop. A distributor publishes one 32-byte root for a list
+of (Solana address, amount) pairs and funds a vault with the tokens. Each address on the list
+proves it's there, for its amount, and a Solana program pays it, once.
+
+The new idea is the **Merkle tree in a circuit**. [01](/docs/tutorials/01-over-9000) and
+[02](/docs/tutorials/02-zkyc) proved things about one value: a number, then one committed identity.
+A list of a million can't be a public input, but its Merkle root can: one field element that fixes
+every entry. Each leaf is the Poseidon2 hash of a claimant's Solana address (as two halves) and the
+amount they're owed. The claimant proves their leaf is under the published root, with the path to
+it as a private input, and that proof is what entitles them to claim the amount. Around it:
+
+- a **tree builder written once**, in the circuit crate's Rust, that the distributor and the
+  claimant both call from TypeScript, so everyone hashes as the circuit does;
+- a **public claimant and amount**, so the program remembers who claimed with one receipt account
+  per address;
+- an **SPL vault** that a Pinocchio program pays from, signing as its owner.
+
+By the end you'll have the same pieces as in [01](/docs/tutorials/01-over-9000) and
+[02](/docs/tutorials/02-zkyc): a circuit and its tests, a TypeScript client, a Solana program,
+and an end-to-end test where an address on the list claims its tokens and every other claim is
+refused.
+
+<Callout title="Prerequisites">
+Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
+`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. The program uses
+`pinocchio-system` and `pinocchio-token`, which Cargo fetches. This tutorial assumes you've done
+[01](/docs/tutorials/01-over-9000) and [02](/docs/tutorials/02-zkyc), and doesn't re-explain
+their commands.
+</Callout>
+
+This tutorial gets its own directory, laid out as before:
+
+```text
+xark-claim/
+├── token-claim/   the circuit crate, and the tree builder
+├── program/       the Solana program
+└── app/           the TypeScript client and the end-to-end test
+```
+
+<Steps>
+
+<Step>
+### Create the circuit crate
+
+```sh
+mkdir xark-claim && cd xark-claim
+xark init token-claim
+cd token-claim
+cargo add xark-poseidon2@0.3 xark-hash@0.3 xark-merkle@0.3
+cd ..
+```
+
+Three [gadget crates](/docs/gadgets) this time: `xark-poseidon2` hashes the tree, `xark-hash`
+holds the address type you used in 02, and `xark-merkle` orders each pair of nodes.
+</Step>
+
+<Step>
+### Describe a claim
+
+A claim is one entry of the list: an address, and how many tokens it gets. Replace
+`token-claim/src/lib.rs` with:
+
+```rust title="token-claim/src/lib.rs"
+use xark::prelude::*;
+use xark_hash::Hash;
+use xark_merkle::cond_swap;
+use xark_poseidon2::hash2;
+
+/// One entry of the list: `amount` tokens for the wallet `claimant`.
+#[input]
+pub struct Claim {
+    pub claimant: Hash,
+    pub amount: u64,
+}
+
+#[input]
+impl Claim {
+    /// The claim's leaf: `Poseidon2(claimant.hi, claimant.lo, amount)`.
+    pub fn leaf(&self) -> Field {
+        let mut halves = [Field::from(0u64); 2];
+        xark::input::write_fields(&self.claimant, &mut halves);
+        xark_poseidon2::hash([halves[0], halves[1], Field::from(self.amount)])
+    }
+}
+```
+
+The address is a `Hash`, two field elements, as 02's holder was. A claim's **leaf** is the
+Poseidon2 hash of its three field elements, and `#[input] impl` puts `Claim.leaf` in the
+TypeScript client, as `Identity.commitment` was in 02. `write_fields` gives the address's two
+halves, `hi` and `lo`. See [Hashes](/docs/gadgets/hashes).
+</Step>
+
+<Step>
+### Write the tree
+
+A Merkle tree hashes its leaves in pairs, then those hashes in pairs, up to a single **root**.
+Changing any leaf changes the root, so the root commits to the whole list. To show a leaf is in it,
+you give the leaf's **path**: its index, and the sibling at each level. Hashing up from the leaf
+with those siblings must land on the root, and Poseidon2's collision resistance means only a leaf
+that's really there can. That check is 20 hashes, whatever the list's length.
+
+This list is a Merkle tree of depth 20: the claims' leaves in order, then an empty leaf in every
+slot left, up to 2^20. Its root is what the distributor publishes. Append to
+`token-claim/src/lib.rs`:
+
+```rust title="token-claim/src/lib.rs"
+/// Tree depth: up to 2^20 claims.
+pub const DEPTH: usize = 20;
+
+/// The empty leaf, ASCII `xarkzero`: no claim's leaf is this value, so the
+/// padding after the list can't be claimed.
+pub const EMPTY_LEAF: u64 = 0x7861_726b_7a65_726f;
+
+/// A leaf's authentication path: its index, and its sibling at each height.
+#[input]
+pub struct Path {
+    pub index: u32,
+    pub siblings: [Field; 20],
+}
+
+#[input]
+impl Path {
+    /// The root of the tree with `leaf` at this path.
+    pub fn root(&self, leaf: Field) -> Field {
+        let bits = Field::from(self.index).to_bits::<DEPTH>();
+        let mut node = leaf;
+        let mut i = 0;
+        while i < DEPTH {
+            // The bit orders the pair: 0, this node is the left child; 1, the right.
+            let (left, right) = cond_swap(bits[i], node, self.siblings[i]);
+            node = hash2(left, right);
+            i += 1;
+        }
+        node
+    }
+
+    /// The first leaf's path, in the empty list.
+    #[cfg(not(xark))]
+    pub fn first() -> Path {
+        Path { index: 0, siblings: zeros() }
+    }
+
+    /// For the next free leaf's path, the root of the list so far.
+    #[cfg(not(xark))]
+    pub fn list_root(&self) -> Field {
+        self.root(Field::from(EMPTY_LEAF))
+    }
+
+    /// The next free leaf's path, once `leaf` is added at this one.
+    #[cfg(not(xark))]
+    pub fn next(self, leaf: Field) -> Path {
+        assert!((self.index as usize) < (1 << DEPTH) - 1, "the list is full");
+        let index = self.index + 1;
+        let z = zeros();
+        let mut siblings = self.siblings;
+        let mut node = leaf;
+        for (i, sibling) in siblings.iter_mut().enumerate() {
+            let (mine, next) = (self.index >> i, index >> i);
+            let old = *sibling;
+            if next != mine {
+                // A new subtree: its left sibling is this leaf's, its right is empty.
+                *sibling = if next & 1 == 1 { node } else { z[i] };
+            }
+            node = node_of(mine, node, old);
+        }
+        Path { index, siblings }
+    }
+
+    /// This path, once `leaf` is added at `later`, a later leaf's path.
+    #[cfg(not(xark))]
+    pub fn update(self, later: Path, leaf: Field) -> Path {
+        assert!(later.index > self.index, "`later` must be a later leaf's path");
+        let mut siblings = self.siblings;
+        let mut node = leaf;
+        for (i, (sibling, beside)) in siblings.iter_mut().zip(later.siblings).enumerate() {
+            let at = later.index >> i;
+            if at == self.index >> i ^ 1 {
+                *sibling = node;
+            }
+            node = node_of(at, node, beside);
+        }
+        Path { index: self.index, siblings }
+    }
+}
+
+/// The parent of `node`, at position `at` in its level, and its `sibling`.
+#[cfg(not(xark))]
+fn node_of(at: u32, node: Field, sibling: Field) -> Field {
+    if at & 1 == 0 { hash2(node, sibling) } else { hash2(sibling, node) }
+}
+
+/// `zeros()[i]` is the root of an empty subtree of height `i`.
+#[cfg(not(xark))]
+fn zeros() -> [Field; DEPTH] {
+    let mut z = [Field::from(EMPTY_LEAF); DEPTH];
+    for i in 1..DEPTH {
+        z[i] = hash2(z[i - 1], z[i - 1]);
+    }
+    z
+}
+```
+
+`root` is the one function the circuit calls. `to_bits` turns the index into the 20 bits that
+steer each level, and bounds it below 2^20. `cond_swap`, from `xark-merkle`, puts the running
+node on the left or the right by that bit, and constrains the bit to 0 or 1. `hash2` is
+Poseidon2's 2-to-1 hash. See [Commitments & Merkle trees](/docs/gadgets/commitments).
+
+The rest is the **builder**, host-only (`#[cfg(not(xark))]`), so it costs the circuit nothing:
+
+- `Path::first()` is the first leaf's path, in an empty list.
+- The distributor keeps the path of the next free leaf, the **tip**. `tip.list_root()` is the
+  list's root so far, and `tip.next(leaf)` the next tip once `leaf` is added.
+- `path.update(tip, leaf)` keeps an earlier path current when `leaf` is added at `tip`.
+
+`#[input] impl` puts these in the client too, so the distributor builds the tree, and a claimant
+checks their path, with this same Rust. See
+[On the host](/docs/reference/language#on-the-host).
+
+A leaf and a node can't be confused. The leaf is Poseidon2's sponge over three elements, and a node
+its 2-to-1 compression, two different functions; and every path is exactly 20 levels, so no node
+passes as a leaf at a shallower one. The empty leaf is a constant no claim hashes to, so the
+padding can't be claimed.
+</Step>
+
+<Step>
+### Write the circuit and its tests
+
+Append the circuit and three tests:
+
+```rust title="token-claim/src/lib.rs"
+#[circuit]
+pub fn token_claim(path: Private<Path>, root: Public<Field>, claim: Public<Claim>) {
+    require_eq(path.root(claim.leaf()), root);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claim(n: u8, amount: u64) -> Claim {
+        Claim { claimant: [n; 32].into(), amount }
+    }
+
+    /// The list's root and every claim's path, as a distributor builds them.
+    fn list(claims: &[Claim]) -> (Field, Vec<Path>) {
+        let mut tip = Path::first(); // the next free leaf's path
+        let mut paths: Vec<Path> = Vec::new();
+        for c in claims {
+            paths = paths.into_iter().map(|p| p.update(tip, c.leaf())).collect();
+            paths.push(tip);
+            tip = tip.next(c.leaf());
+        }
+        (tip.list_root(), paths)
+    }
+
+    /// The root of `leaves`, hashed from scratch level by level.
+    fn root_of(leaves: &[Field]) -> Field {
+        let mut level = leaves.to_vec();
+        let mut empty = Field::from(EMPTY_LEAF);
+        for _ in 0..DEPTH {
+            level = level.chunks(2).map(|p| hash2(p[0], *p.get(1).unwrap_or(&empty))).collect();
+            empty = hash2(empty, empty);
+        }
+        level.first().copied().unwrap_or(empty)
+    }
+
+    #[test]
+    fn the_builder_agrees_with_the_whole_tree() {
+        let claims: Vec<Claim> = (1..=11).map(|n| claim(n, u64::from(n) * 100)).collect();
+        let leaves: Vec<Field> = claims.iter().map(Claim::leaf).collect();
+        for n in 0..=claims.len() {
+            let (root, paths) = list(&claims[..n]);
+            assert_eq!(root, root_of(&leaves[..n]));
+            for (path, leaf) in paths.iter().zip(&leaves) {
+                assert_eq!(path.root(*leaf), root);
+            }
+        }
+    }
+
+    #[test]
+    fn everyone_on_the_list_claims_their_amount() {
+        let claims = [claim(1, 500), claim(2, 1_000), claim(3, 250)];
+        let (root, paths) = list(&claims);
+        for (path, c) in paths.iter().zip(claims) {
+            token_claim(*path, root, c).unwrap();
+        }
+    }
+
+    #[test]
+    fn nothing_else_is_on_the_list() {
+        let claims = [claim(1, 500), claim(2, 1_000), claim(3, 250)];
+        let (root, paths) = list(&claims);
+        assert!(token_claim(paths[0], root, claim(1, 501)).is_err()); // another amount
+        assert!(token_claim(paths[1], root, claim(1, 500)).is_err()); // someone else's path
+        assert!(token_claim(paths[0], root, claim(9, 500)).is_err()); // not on the list
+        // The slot after the list holds the empty leaf, which no claim is.
+        let (_, longer) = list(&[claims[0], claims[1], claims[2], claim(4, 1)]);
+        assert!(token_claim(longer[3], root, claim(4, 1)).is_err());
+    }
+}
+```
+
+The whole circuit is one line: the path's root over the claim's leaf is the published root. The
+`path` is private; the `root` and the `claim` are public.
+
+The tests build the list as a distributor will, with `list`. The first checks the builder against
+the tree hashed from scratch, level by level, for lists of 0 to 11 claims. The other two check
+that everyone on a list of three can claim their amount, and nothing else can: another amount,
+someone else's path, an address that isn't on the list, or the empty slot after it.
+</Step>
+
+<Step>
+### Run the tests
+
+```console
+$ xark test token-claim
+xark building circuit `token-claim`
+xark 5438 vars, 5437 constraints, 5413 witness-gen ops
+xark circuit digest 41f8cf4f8d4625284ec61bea304dc68b
+...
+running 3 tests
+test tests::the_builder_agrees_with_the_whole_tree ... ok
+test tests::everyone_on_the_list_claims_their_amount ... ok
+test tests::nothing_else_is_on_the_list ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+```
+
+`xark profile` shows where the 5,437 constraints go:
+
+```console
+$ xark profile token-claim
+...
+lib.rs:120     require_eq(path.root(claim.leaf()), root);          5341
+    ├─ root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
+    ├─ root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
+    ├─ leaf → hash → hash_in → perm → internal_round → sbox → pow  336   (Mul 336)
+    ├─ leaf → hash → hash_in → perm → external_round → sbox → pow  144   (Mul 144)
+    ├─ root → cond_swap                         20   (Mul 20)
+    ├─ root → cond_swap → require_bool          20   (Booleanity 20)
+    ├─ root → to_bits                           20   (RangeCheck 20)
+    └─ require_eq                                1   (Equality 1)
+lib.rs:118     #[circuit]                                            96   (RangeCheck 96)
+────────────────────────────────────────────────────────────
+TOTAL  5437 constraints
+...
+```
+
+Each level of the tree is 243: 240 for `hash2`, one for `cond_swap`, one for its bit's check and
+one for the index's bit. The leaf is 480, two Poseidon2 permutations. The last 96 range-check the
+`u32` index and the `u64` amount. A tree twice as big adds one level, 243 constraints, and not a
+byte to the proof.
+</Step>
+
+<Step>
+### Make the keys, the verifier crate and the client
+
+The same three commands as in 01 and 02:
+
+```console
+$ xark setup token-claim
+...
+Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
+
+$ xark export token-claim
+Generated verifier crate `token-claim-verifier` at .../token-claim/token-claim-verifier (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+...
+✅ On-chain verifier crate ready (verifying key embedded).
+
+$ xark client token-claim --out app/
+✅ TypeScript client for `token_claim` at app/token_claim.ts
+```
+
+As in 02, there's no proof from `xark prove` for the verifier crate to bundle, so it has no
+self-test: the end-to-end test checks it. The program will supply four public inputs, in this
+order:
+
+```console
+$ xark inspect token-claim --json | tail -7
+  "public_inputs": [
+    "root",
+    "claim.claimant.hi",
+    "claim.claimant.lo",
+    "claim.amount"
+  ]
+}
+```
+
+None of the path's 21 field elements is among them.
+</Step>
+
+<Step>
+### Build the list and prove from TypeScript
+
+Set up `app/` as before:
+
+```sh
+cd app
+npm init -y
+npm pkg set type=module
+npm install @blueshift-gg/xark@^0.3.0 vitest
+```
+
+Create `app/token-claim.test.ts`:
+
+```ts title="app/token-claim.test.ts"
+import { readFileSync } from "node:fs";
+import { beforeAll, expect, test } from "vitest";
+import { Claim, Path, TokenClaim, type Field, type PathValue, type TokenClaimProver } from "./token_claim";
+
+// What `xark build` and `xark setup` wrote. A web app would serve this
+// directory and pass its URL instead.
+const out = "../token-claim/target/xark/token-claim/";
+const read = (file: string) => new Uint8Array(readFileSync(out + file));
+
+let prover: TokenClaimProver;
+beforeAll(async () => {
+  prover = await TokenClaim.prover(
+    {
+      circuit: read("circuit.xbc"),
+      provingKey: read("pk.bin"),
+      sources: readFileSync(out + "sources.json", "utf8"),
+      client: read("client.wasm"), // the crate's Rust: Claim.leaf, Path
+    },
+    { digest: TokenClaim.digest },
+  );
+});
+
+/** The distributor's list: its root, and each claim's path. */
+function list(claims: Claim[]): { root: Field; paths: PathValue[] } {
+  let tip = Path.first(); // the next free leaf's path
+  let paths: PathValue[] = [];
+  for (const claim of claims) {
+    const leaf = Claim.leaf(claim);
+    paths = paths.map((p) => p.update(tip, leaf));
+    paths.push(tip);
+    tip = tip.next(leaf);
+  }
+  return { root: tip.listRoot(), paths };
+}
+
+const wallet = (n: number) => new Uint8Array(32).fill(n);
+
+test("a claimant on the list has a proof", async () => {
+  const claims: Claim[] = [
+    { claimant: wallet(1), amount: 500 },
+    { claimant: wallet(2), amount: 1_000 },
+    { claimant: wallet(3), amount: 250 },
+  ];
+  const { root, paths } = list(claims);
+  expect(paths[1].root(Claim.leaf(claims[1]))).toEqual(root);
+
+  const proof = prover.prove({ path: paths[1], root, claim: claims[1] });
+
+  // The verifier sees the root and the claim, and nothing of the path.
+  const verifier = await TokenClaim.verifier(read("vk.bin"));
+  expect(verifier.verify(proof.toBytes(), { root, claim: claims[1] })).toBe(true);
+  expect(verifier.verify(proof.toBytes(), { root, claim: { ...claims[1], amount: 1_001 } })).toBe(false);
+});
+
+test("an address not on the list has no proof", () => {
+  const { root, paths } = list([{ claimant: wallet(1), amount: 500 }]);
+  const stranger = { claimant: wallet(9), amount: 500 };
+  expect(() => prover.prove({ path: paths[0], root, claim: stranger })).toThrow(/path\.root\(claim\.leaf\(\)\)/);
+});
+```
+
+`list` is the distributor: it adds each claim at the tip, updates the paths it has already handed
+out, and publishes `tip.listRoot()`. Every hash in it is the Rust you wrote, run from
+`client.wasm`, so the root it makes is the one the circuit checks. A claimant can check the path
+they're given the same way, with `path.root(Claim.leaf(claim))`, as the first test does. See
+[Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
+
+`list` updates every path at every step, which is fine for a few claims and too slow for a
+million. A real distributor hashes the tree once, level by level, as the circuit's
+`the_builder_agrees_with_the_whole_tree` test does, and hands each claimant its path.
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ token-claim.test.ts > a claimant on the list has a proof 1120ms
+ ✓ token-claim.test.ts > an address not on the list has no proof 1070ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+The proof verifies for Bob's claim and not for the same address with another amount. An address
+that isn't on the list doesn't get as far as a proof: the client throws a `CheckFailed`,
+``the inputs fail the check at src/lib.rs:120:5: `require_eq(path.root(claim.leaf()), root);` ``.
+</Step>
+
+<Step>
+### Start the Solana program
+
+The program has two instructions. `initialize` stores a list's root and creates its vault, a
+token account the program controls, funded by the distributor. `claim` checks a proof against
+that root, records a receipt and pays. From `xark-claim/`:
+
+```sh
+cd ..
+cargo new --lib program --name token-claim-program
+```
+
+Replace `program/Cargo.toml` with:
+
+```toml title="program/Cargo.toml"
+[package]
+name = "token-claim-program"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+token-claim-verifier = { path = "../token-claim/token-claim-verifier" }
+pinocchio = "0.11"
+pinocchio-system = "0.6"
+pinocchio-token = "0.7"
+```
+
+`pinocchio-system` creates accounts and `pinocchio-token` moves tokens, both through calls to
+those programs. Replace `program/src/lib.rs` with the entrypoint and two helpers:
+
+```rust title="program/src/lib.rs"
+#![no_std]
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+    program_entrypoint,
+    sysvars::{Sysvar, rent::Rent},
+};
+use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer as Lamports};
+use pinocchio_token::instructions::{InitializeAccount3, Transfer};
+use token_claim_verifier::{Proof, verify};
+
+program_entrypoint!(process_instruction);
+pinocchio::nostd_panic_handler!();
+pinocchio::no_allocator!();
+
+const DISTRIBUTOR_SEED: &[u8] = b"distributor";
+const VAULT_SEED: &[u8] = b"vault";
+const CLAIMED_SEED: &[u8] = b"claimed";
+
+/// The distributor's state: `root` (32 B) ‖ its bump ‖ the vault's bump.
+const DISTRIBUTOR_LEN: usize = 34;
+/// An SPL token account's size.
+const TOKEN_ACCOUNT_LEN: usize = 165;
+
+/// Data: one byte, which instruction, then its arguments.
+/// - `0`, initialize: root (32 B) ‖ total (8 B).
+/// - `1`, claim: proof (256 B) ‖ amount (8 B).
+fn process_instruction(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    match data.split_first() {
+        Some((0, data)) => initialize(program_id, accounts, data),
+        Some((1, data)) => claim(program_id, accounts, data),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+/// `N` bytes, then a little-endian `u64`, and nothing else.
+fn split<const N: usize>(data: &[u8]) -> Result<(&[u8; N], u64), ProgramError> {
+    let (head, tail) = data.split_first_chunk::<N>().ok_or(ProgramError::InvalidInstructionData)?;
+    let tail: [u8; 8] = tail.try_into().map_err(|_| ProgramError::InvalidInstructionData)?;
+    Ok((head, u64::from_le_bytes(tail)))
+}
+
+/// The circuit's public inputs, in its order: root, claimant.hi, claimant.lo, amount.
+fn public_inputs(root: &[u8; 32], claimant: &[u8; 32], amount: u64) -> [[u8; 32]; 4] {
+    // A `Hash` is two 16-byte halves, each read as a big-endian integer.
+    let half = |b: &[u8]| {
+        let mut out = [0u8; 32];
+        out[..16].copy_from_slice(b);
+        out[..16].reverse();
+        out
+    };
+    let mut amount_field = [0u8; 32];
+    amount_field[..8].copy_from_slice(&amount.to_le_bytes());
+    [*root, half(&claimant[..16]), half(&claimant[16..]), amount_field]
+}
+```
+
+`public_inputs` builds the circuit's four inputs from the root, the claimant's address and the
+amount, in the order `xark inspect` printed: the address in two halves, as in 02, and the amount
+as a little-endian field element.
+</Step>
+
+<Step>
+### Create the distributor and its vault
+
+The program keeps its state in [PDAs](https://solana.com/docs/core/pda), addresses derived from
+seeds that only the program can sign for. Append `initialize`:
+
+```rust title="program/src/lib.rs"
+/// Accounts: authority (signer), distributor, vault, mint, the authority's token
+/// account, the token program, the system program.
+fn initialize(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    let (root, total) = split::<32>(data)?;
+    let [authority, distributor, vault, mint, authority_token, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // The distributor, at ["distributor", root]: one per list.
+    let (address, bump) = Address::find_program_address(&[DISTRIBUTOR_SEED, root], program_id);
+    if distributor.address() != &address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    let bump = [bump];
+    let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(root), Seed::from(&bump)];
+    create(authority, distributor, DISTRIBUTOR_LEN, program_id, &seeds)?;
+
+    // The vault, at ["vault", distributor]: a token account the distributor owns.
+    let (address, vault_bump) = Address::find_program_address(&[VAULT_SEED, distributor.address().as_ref()], program_id);
+    if vault.address() != &address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    let vault_bump = [vault_bump];
+    let vault_seeds = [Seed::from(VAULT_SEED), Seed::from(distributor.address().as_ref()), Seed::from(&vault_bump)];
+    create(authority, vault, TOKEN_ACCOUNT_LEN, &pinocchio_token::ID, &vault_seeds)?;
+    InitializeAccount3::new(vault, mint, distributor.address()).invoke()?;
+
+    let mut state = distributor.try_borrow_mut()?;
+    state[..32].copy_from_slice(root);
+    state[32] = bump[0];
+    state[33] = vault_bump[0];
+    drop(state);
+
+    Transfer::new(authority_token, vault, authority, total).invoke()
+}
+```
+
+The distributor's address comes from the root, so there's one per list, and the claims later
+trust what it holds. The vault is an SPL token account whose owner is the distributor. No wallet
+holds a key for that address: only this program, signing with the distributor's seeds, can move
+the vault's tokens. The last line funds it, from a token account the authority signs for.
+</Step>
+
+<Step>
+### Pay a claim
+
+Append `claim`:
+
+```rust title="program/src/lib.rs"
+/// Accounts: claimant (signer), distributor, vault, receipt, the claimant's token
+/// account, the token program, the system program.
+fn claim(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    let (proof, amount) = split::<256>(data)?;
+    let [claimant, distributor, vault, receipt, claimant_token, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !claimant.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    // Only `initialize` makes an account of the program's this size.
+    if !distributor.owned_by(program_id) || distributor.data_len() != DISTRIBUTOR_LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let (root, bump, vault_bump) = {
+        let state = distributor.try_borrow()?;
+        let root: [u8; 32] = state[..32].try_into().unwrap();
+        (root, state[32], state[33])
+    };
+    let vault_address = Address::derive_address(&[VAULT_SEED, distributor.address().as_ref()], Some(vault_bump), program_id);
+    if vault.address() != &vault_address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    // The root from the distributor, the claimant from the signer, the amount from
+    // the instruction.
+    let public_inputs = public_inputs(&root, claimant.address().as_array(), amount);
+    if !verify(&Proof::from_le_bytes(proof), &public_inputs) {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    // The receipt, at ["claimed", distributor, claimant]: once it exists, this
+    // address has claimed.
+    let (address, receipt_bump) = Address::find_program_address(
+        &[CLAIMED_SEED, distributor.address().as_ref(), claimant.address().as_ref()],
+        program_id,
+    );
+    if receipt.address() != &address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if receipt.owned_by(program_id) {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+    let receipt_bump = [receipt_bump];
+    let receipt_seeds = [
+        Seed::from(CLAIMED_SEED),
+        Seed::from(distributor.address().as_ref()),
+        Seed::from(claimant.address().as_ref()),
+        Seed::from(&receipt_bump),
+    ];
+    create(claimant, receipt, 0, program_id, &receipt_seeds)?;
+
+    // Pay from the vault, signed by the distributor's seeds.
+    let bump = [bump];
+    let seeds = [Seed::from(DISTRIBUTOR_SEED), Seed::from(&root), Seed::from(&bump)];
+    Transfer::new(vault, claimant_token, distributor, amount).invoke_signed(&[Signer::from(&seeds)])
+}
+```
+
+Each check closes a way to take tokens that aren't yours:
+
+- **The claimant signs.** The claimant chooses the token account `to` that's paid, so without this
+  anyone holding Bob's proof could claim Bob's tokens to their own account.
+- **The distributor is one `initialize` made**: the program's, and of its size (a receipt is the
+  program's too, but empty). Otherwise a claimant could pass an account holding the root of a list
+  of their own.
+- **The vault is the distributor's**, derived from the bump `initialize` stored.
+- **The program assembles the public inputs.** The root comes from the distributor, the claimant
+  from the signer, the amount from the instruction. A proof made for another list, another wallet
+  or another amount fails `verify`. See
+  [Where the public inputs come from](/docs/guides/how-verification-works#where-the-public-inputs-come-from).
+- **The receipt is the claimant's PDA, and new.** It's derived from the distributor and the
+  claimant's address, so a claimant can't pass a fresh account each time, and once it exists a
+  second claim fails with `AccountAlreadyInitialized`.
+
+The program needs no nullifier, because it knows who's claiming: the signer. And it can't
+remember claims by the proof's bytes, since anyone holding a Groth16 proof can re-randomize it
+into another valid proof of the same statement. The token program checks that `to` holds the
+vault's mint. The transfer at the end is signed with the distributor's seeds
+(`invoke_signed`): the program signing for the vault's owner.
+</Step>
+
+<Step>
+### Create accounts that can't be blocked
+
+Last, the helper both instructions create accounts with. Append:
+
+```rust title="program/src/lib.rs"
+/// Create the PDA `account`, signed by its `seeds`: `space` bytes owned by `owner`,
+/// paid by `payer`.
+fn create(payer: &AccountView, account: &AccountView, space: usize, owner: &Address, seeds: &[Seed]) -> ProgramResult {
+    let signer = [Signer::from(seeds)];
+    let rent = Rent::get()?.try_minimum_balance(space)?;
+    let held = account.lamports();
+    if held == 0 {
+        return CreateAccount { from: payer, to: account, lamports: rent, space: space as u64, owner }.invoke_signed(&signer);
+    }
+    // Anyone can send lamports to an address, and `CreateAccount` refuses one that
+    // holds any: top it up, allocate and assign it instead.
+    if held < rent {
+        Lamports { from: payer, to: account, lamports: rent - held }.invoke()?;
+    }
+    if space > 0 {
+        Allocate { account, space: space as u64 }.invoke_signed(&signer)?;
+    }
+    Assign { account, owner }.invoke_signed(&signer)
+}
+```
+
+A PDA's address is known in advance, and anyone can send lamports to any address. The system
+program's `CreateAccount` refuses an address that holds lamports, so with `CreateAccount` alone, a
+griefer could block Alice's claim forever by sending her receipt's address a lamport. `create`
+tops such an account up, allocates it and assigns it to its owner instead.
+</Step>
+
+<Step>
+### Build the program
+
+```console
+$ cd program
+$ cargo build-sbf --arch v3
+...
+   Compiling token-claim-verifier v0.1.0 (.../token-claim/token-claim-verifier)
+...
+   Compiling token-claim-program v0.1.0 (.../program)
+    Finished `release` profile [optimized] target(s) in 0.60s
+```
+
+The program is at `program/target/deploy/token_claim_program.so`.
+</Step>
+
+<Step>
+### Claim onchain
+
+Back in `app/`, add the Solana packages, with the SPL Token program's client to make a mint and
+token accounts:
+
+```sh
+cd ../app
+npm install @solana/kit litesvm @solana-program/token
+```
+
+Add these imports at the top of `token-claim.test.ts`:
+
+```ts title="app/token-claim.test.ts"
+import {
+  AccountRole, address, appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner,
+  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
+  type Address, type Instruction, type KeyPairSigner,
+} from "@solana/kit";
+import {
+  AccountState, TOKEN_PROGRAM_ADDRESS, getMintEncoder, getMintSize, getTokenDecoder, getTokenEncoder, getTokenSize,
+} from "@solana-program/token";
+import { FailedTransactionMetadata, LiteSVM } from "litesvm";
+```
+
+Then add 02's `send`, and helpers for addresses, accounts and tokens, at the end:
+
+```ts title="app/token-claim.test.ts"
+// Send `instruction` in one transaction, paid by `payer`. Returns the compute
+// units it used, or throws with the program's logs.
+async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction) {
+  const tx = await pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayerSigner(payer, m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
+    (m) => appendTransactionMessageInstruction(instruction, m),
+    (m) => signTransactionMessageWithSigners(m),
+  );
+  const result = svm.sendTransaction(tx);
+  svm.expireBlockhash();
+  if (result instanceof FailedTransactionMetadata) {
+    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
+  }
+  return result.computeUnitsConsumed();
+}
+
+const system = address("11111111111111111111111111111111");
+const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
+const signer = (s: KeyPairSigner) => ({ address: s.address, role: AccountRole.WRITABLE_SIGNER, signer: s });
+const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
+const readonly = (a: Address) => ({ address: a, role: AccountRole.READONLY });
+
+// A u64, little-endian, as the program reads one.
+function u64le(x: bigint) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, x, true);
+  return out;
+}
+
+/** A new keypair holding 10 SOL. */
+async function funded(svm: LiteSVM) {
+  const s = await generateKeyPairSigner();
+  svm.airdrop(s.address, lamports(10_000_000_000n));
+  return s;
+}
+
+/** A token account of `mint` for `owner`, holding `amount`. */
+async function tokenAccount(svm: LiteSVM, mint: Address, owner: Address, amount: bigint) {
+  const at = (await generateKeyPairSigner()).address;
+  const data = getTokenEncoder().encode({ mint, owner, amount, delegate: null, state: AccountState.Initialized, isNative: null, delegatedAmount: 0, closeAuthority: null });
+  svm.setAccount({ address: at, data: new Uint8Array(data), executable: false, lamports: lamports(svm.minimumBalanceForRentExemption(BigInt(getTokenSize()))), programAddress: TOKEN_PROGRAM_ADDRESS, space: BigInt(getTokenSize()) });
+  return at;
+}
+const balance = (svm: LiteSVM, at: Address) => {
+  const account = svm.getAccount(at);
+  return account.exists ? getTokenDecoder().decode(account.data).amount : 0n;
+};
+```
+
+The mint and the token accounts are written straight into LiteSVM with `setAccount`: a test
+doesn't need the transactions that would make them. The vault isn't: the program creates it.
+Append the program's two instructions:
+
+```ts title="app/token-claim.test.ts"
+/** The distributor and its vault for the list rooted at `root`: the program's PDAs. */
+async function distributorOf(program: Address, root: Field) {
+  const [distributor] = await getProgramDerivedAddress({ programAddress: program, seeds: ["distributor", root.toBytes()] });
+  const [vault] = await getProgramDerivedAddress({ programAddress: program, seeds: ["vault", bytes(distributor)] });
+  return { program, root, distributor, vault };
+}
+type Drop = Awaited<ReturnType<typeof distributorOf>>;
+
+/** `initialize`: create the distributor, and fund its vault with `total` from `from`. */
+const initialize = (d: Drop, authority: KeyPairSigner, mint: Address, from: Address, total: bigint): Instruction => ({
+  programAddress: d.program,
+  accounts: [signer(authority), writable(d.distributor), writable(d.vault), readonly(mint), writable(from), readonly(TOKEN_PROGRAM_ADDRESS), readonly(system)],
+  data: new Uint8Array([0, ...d.root.toBytes(), ...u64le(total)]),
+});
+
+/** `claim`: `amount`, signed by `claimant`, paid to the token account `to`. */
+async function claim(d: Drop, claimant: KeyPairSigner, to: Address, proof: Uint8Array, amount: bigint): Promise<Instruction> {
+  const [receipt] = await getProgramDerivedAddress({ programAddress: d.program, seeds: ["claimed", bytes(d.distributor), bytes(claimant.address)] });
+  return {
+    programAddress: d.program,
+    accounts: [signer(claimant), readonly(d.distributor), writable(d.vault), writable(receipt), writable(to), readonly(TOKEN_PROGRAM_ADDRESS), readonly(system)],
+    data: new Uint8Array([1, ...proof, ...u64le(amount)]),
+  };
+}
+```
+
+Finally, the test. The distributor lists Alice, Bob and Carol and funds the vault with their total.
+Bob claims, and then everything that shouldn't work is tried:
+
+```ts title="app/token-claim.test.ts"
+test("each address on the list claims its amount, once", async () => {
+  const svm = new LiteSVM();
+  const program = (await generateKeyPairSigner()).address;
+  svm.addProgramFromFile(program, "../program/target/deploy/token_claim_program.so");
+
+  // A mint of 10,000 tokens, all in the authority's token account.
+  const authority = await funded(svm);
+  const mint = (await generateKeyPairSigner()).address;
+  const mintData = getMintEncoder().encode({ mintAuthority: authority.address, supply: 10_000n, decimals: 0, isInitialized: true, freezeAuthority: null });
+  svm.setAccount({ address: mint, data: new Uint8Array(mintData), executable: false, lamports: lamports(svm.minimumBalanceForRentExemption(BigInt(getMintSize()))), programAddress: TOKEN_PROGRAM_ADDRESS, space: BigInt(getMintSize()) });
+  const supply = await tokenAccount(svm, mint, authority.address, 10_000n);
+
+  // The list, its root, and a vault funded with its total.
+  const [alice, bob, carol] = await Promise.all([funded(svm), funded(svm), funded(svm)]);
+  const claims: Claim[] = [
+    { claimant: bytes(alice.address), amount: 500 },
+    { claimant: bytes(bob.address), amount: 1_000 },
+    { claimant: bytes(carol.address), amount: 250 },
+  ];
+  const { root, paths } = list(claims);
+  const drop = await distributorOf(program, root);
+  await send(svm, authority, initialize(drop, authority, mint, supply, 1_750n));
+  expect(balance(svm, drop.vault)).toBe(1_750n);
+
+  // Bob proves he's on the list for 1,000, and claims it.
+  const proof = prover.prove({ path: paths[1], root, claim: claims[1] }).toBytes();
+  const bobToken = await tokenAccount(svm, mint, bob.address, 0n);
+  const units = await send(svm, bob, await claim(drop, bob, bobToken, proof, 1_000n));
+  console.log(`claimed onchain in ${units} CU`);
+  expect(balance(svm, bobToken)).toBe(1_000n);
+  expect(balance(svm, drop.vault)).toBe(750n);
+
+  // Bob's receipt exists, so a second claim fails.
+  await expect(send(svm, bob, await claim(drop, bob, bobToken, proof, 1_000n))).rejects.toThrow(/AccountAlreadyInitialized/);
+
+  // Mallory copies Bob's proof and signs it herself: the program fills in her
+  // address, and the proof fails. So does Carol's proof for more than her amount.
+  const mallory = await funded(svm);
+  const malloryToken = await tokenAccount(svm, mint, mallory.address, 0n);
+  await expect(send(svm, mallory, await claim(drop, mallory, malloryToken, proof, 1_000n))).rejects.toThrow(/invalid instruction data/);
+  const carolProof = prover.prove({ path: paths[2], root, claim: claims[2] }).toBytes();
+  const carolToken = await tokenAccount(svm, mint, carol.address, 0n);
+  await expect(send(svm, carol, await claim(drop, carol, carolToken, carolProof, 750n))).rejects.toThrow(/invalid instruction data/);
+
+  // Someone sends lamports to Alice's receipt address to block her claim. It
+  // goes through anyway.
+  const [aliceReceipt] = await getProgramDerivedAddress({ programAddress: program, seeds: ["claimed", bytes(drop.distributor), bytes(alice.address)] });
+  svm.airdrop(aliceReceipt, lamports(1_000n));
+  const aliceProof = prover.prove({ path: paths[0], root, claim: claims[0] }).toBytes();
+  const aliceToken = await tokenAccount(svm, mint, alice.address, 0n);
+  await send(svm, alice, await claim(drop, alice, aliceToken, aliceProof, 500n));
+  expect(balance(svm, aliceToken)).toBe(500n);
+  expect(balance(svm, drop.vault)).toBe(250n); // Carol's, unclaimed
+}, 60_000);
+```
+
+Run the tests:
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ token-claim.test.ts > a claimant on the list has a proof 1128ms
+ ✓ token-claim.test.ts > an address not on the list has no proof 1011ms
+stdout | token-claim.test.ts > each address on the list claims its amount, once
+claimed onchain in 98546 CU
+
+ ✓ token-claim.test.ts > each address on the list claims its amount, once 2951ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+```
+
+Bob's claim landed in about 100,000 compute units: the proof's verification, the receipt and the
+transfer. Your number will differ by a few thousand, because finding the receipt's PDA takes more
+or fewer tries depending on the claimant's address. His second claim found his receipt; Mallory,
+signing his proof, and Carol, claiming more than her amount, were refused by `verify`; and Alice
+claimed though someone had funded her receipt's address to block her. Carol's 250 stays in the
+vault until she claims it.
+</Step>
+
+</Steps>
+
+## What you built
+
+A distributor published one root for a list of three, and could have for a million. Each address
+on it claimed its tokens once, with a proof of a path no transaction ever carried. The new ideas:
+
+- **A Merkle tree in a circuit.** Each leaf is `Poseidon2(claimant.hi, claimant.lo, amount)`;
+  `Private<Path>` holds an index and 20 siblings, and `require_eq(path.root(claim.leaf()), root)`,
+  the whole circuit, proves the leaf is under the published root.
+- **A builder written once.** `Path::first`, `next`, `update` and `list_root` are host-only Rust in
+  the circuit crate, and through `#[input] impl` the distributor's TypeScript calls them, so the
+  tree it publishes is hashed exactly as the circuit hashes it.
+- **Poseidon2 leaves and nodes**, as two different functions of it, at a fixed depth.
+- **A receipt instead of a nullifier.** The claimant and the amount are public, so the program
+  keys a receipt PDA on the signer's address.
+- **An SPL vault** owned by a PDA, paid out by the program signing with its seeds.
+
+What hiding the path buys: a claim is 256 bytes of proof and 8 of amount however deep the tree, the
+program never hashes and has no Poseidon2 to keep in step with the circuit, and none of the
+siblings, which are other people's leaves, ever goes onchain. What it doesn't hide: the claimant
+and the amount. They're public inputs the program fills in from the signer and the instruction, so
+anyone reading the chain sees who claimed how much.
+
+The next tutorial hides them. Put 02's salted commitments in the leaves instead of addresses, and
+the Merkle tree becomes a **shielded pool**: a deposit adds a commitment, a withdrawal proves it
+knows the secrets behind one of the leaves without saying which, and a nullifier stops it from
+withdrawing twice.
+
+The program accepts any list from anyone. A real distributor also checks that its list has one
+entry per address (a second entry for the same address can never be claimed), funds the vault
+with at least the list's total, and adds a way to close the vault and recover what's unclaimed
+after a deadline.
+
+<Callout type="warn" title="Before you deploy">
+`xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
+that holds tokens needs a key from a ceremony. See [The trusted setup](/docs/trust/trusted-setup).
+</Callout>
+
+The finished example, with a demo proof bundled as the verifier crate's self-test, a host test for
+the program and more refusals, is
+[03-token-claim](https://github.com/blueshift-gg/xark-examples/tree/main/03-token-claim) in
+xark-examples.
+
+<Cards>
+  <Card title="04 · Shielded pool" href="/docs/tutorials/04-shielded-pool" description="Merkle trees plus salted commitments: notes and nullifiers make a withdrawal unlinkable to its deposit." />
+  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, roots and cond_swap." />
+  <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs and arrays, packing, and how a Hash enters a circuit." />
+  <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the public inputs a program supplies, and the generated crate." />
+</Cards>

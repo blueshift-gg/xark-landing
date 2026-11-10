@@ -43,7 +43,7 @@ pub fn merkle(
 
 <Callout title="The chain never hashes">
 This is the design note behind the shielded examples: the circuit proves that a new root correctly
-extends the old one, so an on-chain program only has to store roots and verify proofs. Circuit and
+extends the old one, so an onchain program only has to store roots and verify proofs. Circuit and
 chain agree **by construction** instead of by carefully matching two hash implementations. See
 [The examples](/docs/guides/examples).
 </Callout>
@@ -93,7 +93,7 @@ instances. Its output is a Grumpkin point, so you can feed it straight into the
 | --- | --- |
 | Membership in a set, cheap to verify | `xark-merkle` (Poseidon) |
 | A commitment with homomorphic / algebraic structure | `xark-pedersen` (Grumpkin) |
-| A hash inside a Merkle tree whose root is stored on-chain | Poseidon — see [the chain never hashes](/docs/guides/examples) |
+| A hash inside a Merkle tree whose root is stored onchain | Poseidon — see [the chain never hashes](/docs/guides/examples) |
 | Accumulating many statements (folding / IVC) | Pedersen, for the commitment fold |
 
 Both gadgets are unaudited reference implementations. Merkle's conditional swap is proven sound in

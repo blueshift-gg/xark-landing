@@ -7,25 +7,31 @@ const examples = [
     no: "01",
     name: "Over 9000",
     pi: "0 public inputs",
-    blurb: "Prove a secret number beats a bound. The range-proof primitive.",
+    blurb: "Range proofs. A field has no order, so the circuit proves a secret number beats a bound one bit at a time.",
   },
   {
     no: "02",
-    name: "Age verification",
-    pi: "4 public inputs",
-    blurb: "Prove 18+ without a birthday, for one wallet. Commitments.",
+    name: "zKYC",
+    pi: "5 public inputs",
+    blurb: "Range proofs put to work: prove your age and net worth, and a nationality on an allow-list, against a salted commitment.",
   },
   {
     no: "03",
-    name: "Shielded pool",
-    pi: "4 + 7 public inputs",
-    blurb: "Unlinkable deposit → withdrawal. Merkle membership + nullifiers.",
+    name: "Token claim",
+    pi: "4 public inputs",
+    blurb: "Merkle trees in a circuit. Prove your address and amount are on the airdrop list, with the path kept private.",
   },
   {
     no: "04",
+    name: "Shielded pool",
+    pi: "4 + 7 public inputs",
+    blurb: "Merkle trees plus salted commitments. Notes and nullifiers make a withdrawal unlinkable to its deposit.",
+  },
+  {
+    no: "05",
     name: "Shielded transfer",
     pi: "19 public inputs",
-    blurb: "Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.",
+    blurb: "Merkle trees and range proofs together. Private payments of any amount; range-checked values keep the sums from wrapping.",
   },
 ];
 
@@ -37,7 +43,7 @@ export default function ExamplesPage() {
           <div className="xk-kicker" style={{ marginBottom: 16 }}>
             Examples
           </div>
-          <h1>Four circuits, easiest to hardest.</h1>
+          <h1>Five examples, easiest to hardest.</h1>
           <p>
             Each is built, proved, and verified end-to-end in an in-process
             Solana VM.

@@ -62,7 +62,7 @@ came from. The circuit itself is unchanged by it.
 
 Circuit code also runs as plain Rust on the host: `Field` arithmetic, comparisons, hints and whole
 gadgets compute their values, and a failed `require` panics at its line. So tests and services call
-the same helpers the circuit does. `zkyc`'s tests make the issuer's commitment with
+the same helpers the circuit does. zKYC's tests make the issuer's commitment with
 `id.commitment()`, the very function the circuit checks it with, and `pubkey.verify(sig, digest)`
 checks an ECDSA signature off-circuit. (Calling the `#[circuit]` function itself still checks the
 circuit through the prover.)

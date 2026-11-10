@@ -1,0 +1,1517 @@
+---
+title: "04 · Shielded pool"
+description: Merkle trees plus salted commitments. Deposit 1 SOL, then withdraw it to a fresh address that no one can link to the deposit. Note commitments, nullifiers, two circuits sharing a Rust crate, and a Pinocchio program that never hashes the tree.
+---
+
+In this tutorial you'll build a shielded pool: anyone deposits a fixed amount, and later
+withdraws it to a new address. Onchain, an observer sees a deposit and, separately, a
+withdrawal, with nothing to say which deposit it came from.
+
+The pool is two ideas you already have, combined: [03](/docs/tutorials/03-token-claim)'s **Merkle
+tree**, with [02](/docs/tutorials/02-zkyc)'s **salted commitments** as its leaves. A deposit appends
+a commitment to secrets only the depositor knows; a withdrawal proves it knows the secrets behind
+*some* leaf, without saying which, and reveals a **nullifier** so the same deposit can't be
+withdrawn twice. [Range proofs](/docs/learn-zk/range-proofs) play only a supporting role here,
+because every deposit is the same amount. By the end you'll have:
+
+- a **shared crate**, `pool`: the Merkle tree of deposits, as plain Rust a wallet also runs;
+- a **deposit circuit**, which proves a new tree root is the old tree with one leaf appended;
+- a **withdraw circuit**, which proves you own *some* leaf, and reveals its nullifier;
+- a **Pinocchio program** that holds the SOL, keeps recent roots and spent nullifiers, and never
+  hashes the tree;
+- an **end-to-end test**: two deposits, then a withdrawal relayed to a fresh address, once.
+
+<Callout title="Prerequisites">
+Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
+`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new: Cargo
+fetches `pinocchio` and `pinocchio-system`. This tutorial assumes you've done
+[01](/docs/tutorials/01-over-9000), [02](/docs/tutorials/02-zkyc) and
+[03](/docs/tutorials/03-token-claim), and doesn't re-explain their commands. You don't need
+their files.
+</Callout>
+
+<Callout type="warn">
+This is a reference implementation for learning: unaudited, not for production. Privacy tooling
+carries real legal weight depending on your jurisdiction.
+</Callout>
+
+## How it works
+
+In [03](/docs/tutorials/03-token-claim) a claimant proved their address was a leaf of a list,
+with the Merkle path as a private input. The claimant was public, though: the program paid the
+signer. A shielded pool hides who is paid, with two new pieces.
+
+A deposit is a secret **note**: two random field elements, `nullifier` and `secret`. The depositor
+keeps it, and the pool appends its **commitment**, a Poseidon2 hash of both, as the next leaf of a
+Merkle tree. It's 02's salted commitment with nothing left to hide but randomness: both fields are
+random, so no one can guess a note from its commitment. To withdraw, the owner proves two things without saying which leaf is theirs:
+
+1. their commitment is a leaf of a tree whose root the program knows (03's Merkle path);
+2. a value only the note's owner can compute, its **nullifier hash**, is what they say it is.
+
+The program records each nullifier hash it pays out, so a note can't be withdrawn twice. 03 kept
+a receipt per claimant; here the program never learns who withdraws, so it keys the receipt on
+the nullifier hash instead. Since the proof hides the leaf, the withdrawal could have come from any
+deposit in the tree.
+
+**The chain never hashes.** In 03 the distributor published a fixed root. Here the tree grows with
+every deposit, and if the program hashed the new leaf in itself, its Poseidon and the circuit's
+would have to agree to the byte, or the roots would never match. So the program doesn't hash the
+tree at all. A deposit comes with a proof that the new root is the program's tree with one more
+leaf, and the program stores that root. Every tree hash lives in the circuits, and they agree with
+the program by construction.
+
+For the gadgets underneath, see [Commitments & Merkle trees](/docs/gadgets/commitments) and
+[Hashes](/docs/gadgets/hashes).
+
+This tutorial gets its own directory:
+
+```text
+xark-pool/
+├── pool/       the tree, shared by both circuits and the wallet
+├── deposit/    the deposit circuit
+├── withdraw/   the withdraw circuit
+├── program/    the Pinocchio program
+└── app/        the TypeScript clients and the end-to-end test
+```
+
+<Steps>
+
+<Step>
+### Create the crates
+
+```sh
+mkdir xark-pool && cd xark-pool
+cargo new --lib pool
+xark init deposit
+xark init withdraw
+```
+
+`pool` is an ordinary Rust library, not a circuit: it has no `#[circuit]`. Both circuits will
+depend on it, and xark compiles it into each of them like any other dependency.
+</Step>
+
+<Step>
+### Write the tree
+
+Replace `pool/Cargo.toml` with:
+
+```toml title="pool/Cargo.toml"
+[package]
+name = "pool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+xark = "0.3"
+xark-hash = "0.3"
+xark-merkle = "0.3"
+xark-poseidon = "0.3"
+
+# `xark` is set only when xark compiles a circuit.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(xark)'] }
+```
+
+The tree is [03's](/docs/tutorials/03-token-claim): a `Path` with the same `first`, `next` and
+`update`, kept by the wallet as the **path of the next free leaf**. Two things differ. Its root is
+`xark-merkle`'s `merkle_root`, whose nodes are Poseidon, a different permutation from the notes'
+Poseidon2, so a node can't pass for a note. And 03's `list_root` is `tree_root` here: that path's
+root over the still-empty slot. Replace `pool/src/lib.rs` with:
+
+```rust title="pool/src/lib.rs"
+//! What both circuits share: a path into the Merkle tree of notes, and
+//! Solana addresses as circuit inputs.
+use xark::prelude::*;
+
+/// Tree height: 2^20 notes.
+pub const H: usize = 20;
+
+/// The empty leaf, ASCII `xarkzero`: no note commitment is this value, so an
+/// empty slot can't be spent.
+pub const ZERO_LEAF: u64 = 0x7861_726b_7a65_726f;
+
+/// A leaf's authentication path: its index, and its sibling at each height.
+#[input]
+pub struct Path {
+    pub index: u32,
+    pub siblings: [Field; 20],
+}
+
+#[input]
+impl Path {
+    /// The first leaf's path, in the empty tree.
+    #[cfg(not(xark))]
+    pub fn first() -> Path {
+        Path { index: 0, siblings: zeros() }
+    }
+
+    /// The root of the tree with `leaf` at this path.
+    pub fn root(&self, leaf: Field) -> Field {
+        let bits = Field::from(self.index).to_bits::<H>();
+        xark_merkle::merkle_root(leaf, self.siblings, bits)
+    }
+
+    /// For the next free leaf's path, the tree's root: the slot is still empty.
+    pub fn tree_root(&self) -> Field {
+        self.root(Field::from(ZERO_LEAF))
+    }
+
+    /// The next free leaf's path, once `leaf` is appended at this one.
+    #[cfg(not(xark))]
+    pub fn next(self, leaf: Field) -> Path {
+        assert!((self.index as usize) < (1 << H) - 1, "the tree is full");
+        let index = self.index + 1;
+        let z = zeros();
+        let mut siblings = self.siblings;
+        let mut node = leaf;
+        for (i, sibling) in siblings.iter_mut().enumerate() {
+            let (mine, next) = (self.index >> i, index >> i);
+            let old = *sibling;
+            if next != mine {
+                // A new subtree: its left sibling is this leaf's, its right is empty.
+                *sibling = if next & 1 == 1 { node } else { z[i] };
+            }
+            node = node_of(mine, node, old);
+        }
+        Path { index, siblings }
+    }
+
+    /// This path once `leaf` lands at `later`, a later leaf's path.
+    #[cfg(not(xark))]
+    pub fn update(self, later: Path, leaf: Field) -> Path {
+        assert!(later.index > self.index, "`later` must be a later leaf's path");
+        let mut siblings = self.siblings;
+        let mut node = leaf;
+        for (i, (sibling, beside)) in siblings.iter_mut().zip(later.siblings).enumerate() {
+            let at = later.index >> i;
+            if at == self.index >> i ^ 1 {
+                *sibling = node;
+            }
+            node = node_of(at, node, beside);
+        }
+        Path { index: self.index, siblings }
+    }
+}
+
+/// The parent of `node`, at position `at` in its level, and its `sibling`.
+#[cfg(not(xark))]
+fn node_of(at: u32, node: Field, sibling: Field) -> Field {
+    if at & 1 == 0 {
+        xark_poseidon::hash2(node, sibling)
+    } else {
+        xark_poseidon::hash2(sibling, node)
+    }
+}
+
+/// `zeros()[i]` is the root of an empty subtree of height `i`.
+#[cfg(not(xark))]
+fn zeros() -> [Field; H] {
+    let mut z = [Field::from(ZERO_LEAF); H];
+    for i in 1..H {
+        z[i] = xark_poseidon::hash2(z[i - 1], z[i - 1]);
+    }
+    z
+}
+
+/// A Solana address enters a circuit as xark's `Hash`: two field elements.
+pub use xark_hash::Hash;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xark_poseidon::hash2;
+
+    /// The root of `leaves`, hashed from scratch level by level.
+    fn root_of(leaves: &[Field]) -> Field {
+        let mut level = leaves.to_vec();
+        let mut empty = Field::from(ZERO_LEAF);
+        for _ in 0..H {
+            level = level.chunks(2).map(|p| hash2(p[0], *p.get(1).unwrap_or(&empty))).collect();
+            empty = hash2(empty, empty);
+        }
+        level.first().copied().unwrap_or(empty)
+    }
+
+    #[test]
+    fn paths_agree_with_the_whole_tree() {
+        let leaves: Vec<Field> = (1..=11u64).map(Field::from).collect();
+        let mut tip = Path::first();
+        let mut paths: Vec<Path> = Vec::new();
+        for (i, &leaf) in leaves.iter().enumerate() {
+            assert_eq!(tip.tree_root(), root_of(&leaves[..i]));
+            paths = paths.into_iter().map(|p| p.update(tip, leaf)).collect();
+            paths.push(tip);
+            tip = tip.next(leaf);
+            // Every leaf so far is in the current root, at its kept path.
+            for (j, path) in paths.iter().enumerate() {
+                assert_eq!(path.root(leaves[j]), root_of(&leaves[..=i]));
+            }
+        }
+    }
+}
+```
+
+As in 03, `root` is the one function a circuit calls; `first`, `next` and `update` are host-only
+(`#[cfg(not(xark))]`), and `#[input] impl` puts all of them in the TypeScript clients. What's new
+is that the crate is its own: both circuits depend on it, and so does
+[05](/docs/tutorials/05-shielded-transfer). The test checks every path against a tree hashed from
+scratch. Run it:
+
+```console
+$ cd pool
+$ cargo test --release
+...
+running 1 test
+test tests::paths_agree_with_the_whole_tree ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s
+```
+</Step>
+
+<Step>
+### Write the deposit circuit
+
+Add `pool` to the deposit crate:
+
+```sh
+cd ../deposit
+cargo add --path ../pool
+```
+
+A deposit proves one statement, its public `Append`: the program's root and next index, the new
+leaf, and the root once the leaf is appended. Replace `deposit/src/lib.rs` with:
+
+```rust title="deposit/src/lib.rs"
+use pool::Path;
+use xark::prelude::*;
+
+/// What the program checks a deposit against: its tree's root and next index,
+/// the new leaf, and the root once the leaf is appended. The public inputs, in
+/// this order.
+#[input]
+pub struct Append {
+    pub old_root: Field,
+    pub new_root: Field,
+    pub leaf: Field,
+    pub index: u32,
+}
+
+#[input]
+impl Append {
+    /// `leaf` appended at `path`, the next free leaf's path.
+    pub fn of(path: Path, leaf: Field) -> Append {
+        Append {
+            old_root: path.tree_root(),
+            new_root: path.root(leaf),
+            leaf,
+            index: path.index,
+        }
+    }
+}
+
+#[circuit]
+pub fn deposit(path: Private<Path>, append: Public<Append>) {
+    require_eq(Append::of(path, append.leaf), append);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appends_to_the_tree() {
+        let tip = Path::first().next(Field::from(7u64));
+        let append = Append::of(tip, Field::from(8u64));
+        deposit(tip, append).unwrap();
+        // Another index, or the empty tree's root: each is refused.
+        assert!(deposit(tip, Append { index: 2, ..append }).is_err());
+        let empty = Path::first().tree_root();
+        assert!(deposit(tip, Append { old_root: empty, ..append }).is_err());
+    }
+}
+```
+
+The circuit is one line: the public statement must be what `Append::of` computes from the private
+path. Only the tree's true siblings hash up to the program's `old_root`, so the same siblings give
+the true `new_root`. The depositor can't slip a different tree in.
+
+```console
+$ cd ..
+$ xark test deposit
+xark building circuit `deposit`
+xark 9626 vars, 9647 constraints, 9601 witness-gen ops
+xark circuit digest d43e8c0d55297486007612c4e210a6cc
+...
+running 1 test
+test tests::appends_to_the_tree ... ok
+```
+
+About 9,600 constraints: two 20-level Poseidon paths, one for each root. The digests match
+these if your circuits do.
+</Step>
+
+<Step>
+### Write the withdraw circuit
+
+The withdraw crate also hashes notes, with Poseidon2:
+
+```sh
+cd withdraw
+cargo add xark-poseidon2@0.3
+cargo add --path ../pool
+cd ..
+```
+
+Replace `withdraw/src/lib.rs` with:
+
+```rust title="withdraw/src/lib.rs"
+use pool::{Hash, Path};
+use xark::prelude::*;
+use xark_poseidon2::hash;
+
+/// A deposit's secret: whoever knows it can withdraw the deposit, once.
+#[input]
+pub struct Note {
+    pub nullifier: Field,
+    pub secret: Field,
+}
+
+#[input]
+impl Note {
+    /// The leaf a deposit appends: it hides both secrets.
+    pub fn commitment(&self) -> Field {
+        hash(self.to_fields())
+    }
+
+    /// What a withdrawal reveals: the same every time for this note, and
+    /// unlinkable to its commitment without the secret.
+    pub fn nullifier_hash(&self) -> Field {
+        hash([self.nullifier])
+    }
+}
+
+/// What the program checks a withdrawal against: the public inputs, in this order.
+#[input]
+pub struct Withdrawal {
+    pub root: Field,
+    pub nullifier_hash: Field,
+    pub recipient: Hash,
+    pub relayer: Hash,
+    pub fee: u64,
+}
+
+#[input]
+impl Withdrawal {
+    /// Withdrawing `note`, at `path`, to `recipient`, paying `fee` to `relayer`.
+    pub fn of(note: Note, path: Path, recipient: Hash, relayer: Hash, fee: u64) -> Withdrawal {
+        Withdrawal {
+            root: path.root(note.commitment()),
+            nullifier_hash: note.nullifier_hash(),
+            recipient,
+            relayer,
+            fee,
+        }
+    }
+}
+
+#[circuit]
+pub fn withdraw(note: Private<Note>, path: Private<Path>, withdrawal: Public<Withdrawal>) {
+    // The note is in the tree, and this is its nullifier hash.
+    require_eq(path.root(note.commitment()), withdrawal.root);
+    require_eq(note.nullifier_hash(), withdrawal.nullifier_hash);
+    // Nothing else uses the addresses, so bind them: the proof pays only them.
+    bind(withdrawal.recipient);
+    bind(withdrawal.relayer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(n: u64) -> Note {
+        Note { nullifier: Field::from(n), secret: Field::from(n + 1000) }
+    }
+
+    #[test]
+    fn withdraws_a_note_in_the_tree() {
+        let (mine, theirs) = (note(1), note(2));
+        // I deposit, then they do: my path changes with their deposit.
+        let path = Path::first();
+        let tip = path.next(mine.commitment());
+        let path = path.update(tip, theirs.commitment());
+        let root = tip.next(theirs.commitment()).tree_root();
+
+        let ok = Withdrawal::of(mine, path, [1; 32].into(), [2; 32].into(), 5);
+        assert_eq!(ok.root, root);
+        withdraw(mine, path, ok).unwrap();
+        // Their note at my path, or a root my note isn't in: refused.
+        let theirs_here = Withdrawal { nullifier_hash: theirs.nullifier_hash(), ..ok };
+        assert!(withdraw(theirs, path, theirs_here).is_err());
+        let stale = Withdrawal { root: tip.tree_root(), ..ok };
+        assert!(withdraw(mine, path, stale).is_err());
+    }
+}
+```
+
+`recipient`, `relayer` and `fee` are public inputs the program fills in from the transaction, so
+whoever submits the proof can't redirect the payout. The two addresses are only bound, as the
+holder was in [02](/docs/tutorials/02-zkyc). `fee` is a `u64`, and its range check
+already uses it.
+
+That range check is one of the pool's two [range proofs](/docs/learn-zk/range-proofs), and both
+play a supporting role. `fee` is checked to 64 bits as it's read, and the program then checks it's
+at most the denomination before paying it out. The leaf index in `Path` is a `u32`, and
+`to_bits::<H>()` in `Path::root` bounds it below 2^20 while splitting out the bits that steer the
+path. Amounts need no range proof at all: every note in a pool is the same denomination.
+
+```console
+$ xark test withdraw
+xark building circuit `withdraw`
+xark 5387 vars, 5382 constraints, 5357 witness-gen ops
+xark circuit digest 5bfbf4d76ed90e8aa38b9bd0ea431e5d
+...
+running 1 test
+test tests::withdraws_a_note_in_the_tree ... ok
+```
+
+The program will assemble the public inputs in the circuit's order. List them:
+
+```console
+$ xark inspect withdraw --json | tail -10
+  "public_inputs": [
+    "withdrawal.root",
+    "withdrawal.nullifier_hash",
+    "withdrawal.recipient.hi",
+    "withdrawal.recipient.lo",
+    "withdrawal.relayer.hi",
+    "withdrawal.relayer.lo",
+    "withdrawal.fee"
+  ]
+}
+```
+</Step>
+
+<Step>
+### Make the keys, the verifier crates and the clients
+
+The same three commands as in 02, once per circuit:
+
+```console
+$ xark setup deposit
+...
+Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
+
+$ xark setup withdraw
+...
+
+$ xark export deposit
+Generated verifier crate `deposit-verifier` at .../deposit/deposit-verifier (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+...
+
+$ xark export withdraw
+Generated verifier crate `withdraw-verifier` at .../withdraw/withdraw-verifier (7 public input(s), VK = 960 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+...
+
+$ xark client deposit --out app/
+✅ TypeScript client for `deposit` at app/deposit.ts
+
+$ xark client withdraw --out app/
+✅ TypeScript client for `withdraw` at app/withdraw.ts
+```
+
+Each client carries its crate's Rust as `client.wasm`, `pool` included: `Path.first()`,
+`Append.of` and `Note.commitment` all run from TypeScript.
+</Step>
+
+<Step>
+### Keep a wallet in TypeScript
+
+Set up `app/` as in 01:
+
+```sh
+cd app
+npm init -y
+npm pkg set type=module
+npm install @blueshift-gg/xark@^0.3.0 vitest
+```
+
+Create `app/shielded-pool.test.ts`:
+
+```ts title="app/shielded-pool.test.ts"
+import { readFileSync } from "node:fs";
+import { beforeAll, expect, test } from "vitest";
+import { Append, Deposit, Path, type DepositProver } from "./deposit";
+import { Field, Note, Withdraw, Withdrawal, type WithdrawProver } from "./withdraw";
+
+/** What `xark build`, `xark setup` and `xark client` wrote for circuit `name`. */
+function files(name: string) {
+  const out = `../${name}/target/xark/${name}/`;
+  const read = (file: string) => new Uint8Array(readFileSync(out + file));
+  return {
+    circuit: read("circuit.xbc"),
+    provingKey: read("pk.bin"),
+    sources: readFileSync(out + "sources.json", "utf8"),
+    client: read("client.wasm"),
+  };
+}
+
+let deposits: DepositProver;
+let withdrawals: WithdrawProver;
+beforeAll(async () => {
+  deposits = await Deposit.prover(files("deposit"), { digest: Deposit.digest });
+  withdrawals = await Withdraw.prover(files("withdraw"), { digest: Withdraw.digest });
+});
+
+/** A fresh note: two random field elements, kept secret by the depositor. */
+const newNote = (): Note => ({
+  nullifier: new Field(crypto.getRandomValues(new Uint8Array(31))),
+  secret: new Field(crypto.getRandomValues(new Uint8Array(31))),
+});
+
+test("a wallet keeps its path as others deposit", () => {
+  const [mine, theirs] = [newNote(), newNote()];
+  let tip = Path.first(); // the empty tree's next free leaf
+  let path = tip; // my note lands here
+  tip = tip.next(Note.commitment(mine));
+  // They deposit after me: my path changes beside theirs.
+  path = path.update(tip, Note.commitment(theirs));
+  tip = tip.next(Note.commitment(theirs));
+
+  const zero = new Uint8Array(32);
+  const withdrawal = Withdrawal.of(mine, path, zero, zero, 0);
+  expect(withdrawal.root).toEqual(tip.treeRoot());
+  withdrawals.prove({ note: mine, path, withdrawal });
+
+  // A note that isn't in the tree has no proof.
+  const stranger = newNote();
+  const theirClaim = { ...Withdrawal.of(stranger, path, zero, zero, 0), root: tip.treeRoot() };
+  expect(() => withdrawals.prove({ note: stranger, path, withdrawal: theirClaim })).toThrow(
+    /path\.root\(note\.commitment\(\)\)/,
+  );
+}, 60_000);
+```
+
+This is the wallet: `Path.first`, `next` and `update` are the Rust from `pool`, so the paths the
+wallet keeps can't disagree with the circuits. `deposits` is for the onchain test at the end.
+Run it:
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2280ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+```
+</Step>
+
+<Step>
+### Start the program
+
+The program is Pinocchio, as in 01 to 03, and has three instructions:
+
+- `initialize(denomination)` creates a pool for one amount, at a PDA seeded by that amount. One
+  program serves 0.1, 1 or 10 SOL pools side by side, and every note in a pool is worth the same.
+- `deposit(commitment, new_root, proof)` checks the proof against its own root and next index,
+  takes the denomination, and stores `new_root`.
+- `withdraw(proof, root, nullifier_hash, fee)` checks that `root` is one of its 16 most recent
+  roots, checks the proof against the recipient and relayer accounts, creates a PDA for the
+  nullifier hash and pays out. A second withdrawal of the same note finds that PDA and fails.
+
+It's longer than 03's, so you'll write it in pieces. From `xark-pool/`:
+
+```sh
+cd ..
+cargo new --lib program --name shielded-pool
+```
+
+Replace `program/Cargo.toml` with:
+
+```toml title="program/Cargo.toml"
+[package]
+name = "shielded-pool"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+deposit-verifier = { path = "../deposit/deposit-verifier" }
+withdraw-verifier = { path = "../withdraw/withdraw-verifier" }
+pinocchio = "0.11"
+pinocchio-system = "0.6"
+
+# Onchain, PDAs come from the runtime's syscalls; a host build (your editor,
+# clippy) derives them in software.
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+solana-address = { version = "2", features = ["curve25519"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+```
+
+Instruction data is a one-byte tag, which instruction, then its arguments' bytes in order. Each
+instruction's arguments are a `#[repr(C)]` struct of byte arrays, so the program reads them in
+place, with no parsing and no copying, and refuses data of any other length. Replace
+`program/src/lib.rs` with the entrypoint:
+
+```rust title="program/src/lib.rs"
+#![no_std]
+
+use deposit_verifier::Proof; // the same type in both verifier crates
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+    program_entrypoint,
+};
+
+program_entrypoint!(process_instruction);
+pinocchio::nostd_panic_handler!();
+pinocchio::no_allocator!();
+
+const TREE_HEIGHT: u32 = 20;
+const ROOT_HISTORY_SIZE: usize = 16;
+const POOL_SEED: &[u8] = b"pool";
+const NULLIFIER_SEED: &[u8] = b"nullifier";
+
+// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
+// a pool can't be seeded with another tree.
+const EMPTY_ROOT: [u8; 32] = [
+    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
+    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+];
+
+// The instructions' tags: the first byte of the instruction data.
+const INITIALIZE: u8 = 0;
+const DEPOSIT: u8 = 1;
+const WITHDRAW: u8 = 2;
+
+fn process_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+) -> ProgramResult {
+    let result = match data.split_first() {
+        Some((&INITIALIZE, args)) => initialize(program_id, accounts, cast(args)?),
+        Some((&DEPOSIT, args)) => deposit(program_id, accounts, cast(args)?),
+        Some((&WITHDRAW, args)) => withdraw(program_id, accounts, cast(args)?),
+        _ => Err(ProgramError::InvalidInstructionData),
+    };
+    if let Err(ProgramError::Custom(code)) = result {
+        log(PoolError::message(code));
+    }
+    result
+}
+
+/// `[0] ‖ denomination (u64 LE)`
+#[repr(C)]
+struct InitializeArgs {
+    denomination: [u8; 8],
+}
+
+/// `[1] ‖ commitment (32) ‖ new_root (32) ‖ proof (256)`
+#[repr(C)]
+struct DepositArgs {
+    commitment: [u8; 32],
+    new_root: [u8; 32],
+    proof: [u8; 256],
+}
+
+/// `[2] ‖ proof (256) ‖ root (32) ‖ nullifier_hash (32) ‖ fee (u64 LE)`
+#[repr(C)]
+struct WithdrawArgs {
+    proof: [u8; 256],
+    root: [u8; 32],
+    nullifier_hash: [u8; 32],
+    fee: [u8; 8],
+}
+
+/// Plain bytes: `#[repr(C)]`, made only of `u8` arrays, so alignment 1 and every
+/// bit pattern valid. A byte slice of exactly its size can be read as one.
+///
+/// # Safety
+///
+/// The implementor must be `#[repr(C)]` and made only of `u8` arrays.
+unsafe trait Plain: Sized {
+    const LEN: usize = size_of::<Self>();
+}
+
+unsafe impl Plain for InitializeArgs {}
+unsafe impl Plain for DepositArgs {}
+unsafe impl Plain for WithdrawArgs {}
+
+/// The arguments `data` holds, if it is exactly their size.
+fn cast<T: Plain>(data: &[u8]) -> Result<&T, ProgramError> {
+    if data.len() != T::LEN {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    // SAFETY: `T` is plain bytes (alignment 1) and `data` is exactly its size.
+    Ok(unsafe { &*data.as_ptr().cast::<T>() })
+}
+```
+
+`EMPTY_ROOT` is the one tree value the program holds itself, and the test at the end checks it
+against the circuit's `Path.first().treeRoot()`. The entrypoint logs the program's own errors by
+name, which you'll write last, so the test can match them.
+</Step>
+
+<Step>
+### Lay out the accounts
+
+The program owns two kinds of account, each at a PDA:
+
+| PDA | Seeds | Size |
+|---|---|--:|
+| `pool` | `["pool", denomination as u64 LE]` | 536 |
+| `nullifier` | `["nullifier", denomination as u64 LE, nullifier_hash]` | 1 |
+
+Each starts with a tag byte, so one kind can't be passed off as the other. Append the layouts to
+`program/src/lib.rs`:
+
+```rust title="program/src/lib.rs"
+/// A pool's account, 536 bytes: tag, bump, 6 reserved bytes, then
+/// `denomination` (u64 LE), `next_index` and `current_root_index` (u32 LE), and
+/// a ring of the 16 most recent roots.
+#[repr(C)]
+struct Pool {
+    tag: u8,
+    bump: u8,
+    reserved: [u8; 6],
+    denomination: [u8; 8],
+    next_index: [u8; 4],
+    current_root_index: [u8; 4],
+    roots: [[u8; 32]; ROOT_HISTORY_SIZE],
+}
+
+unsafe impl Plain for Pool {}
+const _: () = assert!(Pool::LEN == 536);
+
+impl Pool {
+    const TAG: u8 = 1;
+
+    /// The pool `data` holds, if it is a pool's size and tag.
+    fn from_bytes(data: &[u8]) -> Result<&Pool, ProgramError> {
+        if data.len() != Pool::LEN || data[0] != Pool::TAG {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: `Pool` is plain bytes and `data` is exactly its size.
+        Ok(unsafe { &*data.as_ptr().cast::<Pool>() })
+    }
+
+    /// As `from_bytes`, to write; a freshly created account (tag 0) too.
+    fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Pool, ProgramError> {
+        if data.len() != Pool::LEN || (data[0] != Pool::TAG && data[0] != 0) {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: as above.
+        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Pool>() })
+    }
+
+    fn denomination(&self) -> u64 {
+        u64::from_le_bytes(self.denomination)
+    }
+
+    fn next_index(&self) -> u32 {
+        u32::from_le_bytes(self.next_index)
+    }
+
+    fn current_root(&self) -> &[u8; 32] {
+        let i = u32::from_le_bytes(self.current_root_index) as usize % ROOT_HISTORY_SIZE;
+        &self.roots[i]
+    }
+
+    /// Remember `root` as the newest in the ring, and advance the tree. The caller
+    /// has checked the tree isn't full.
+    fn push_root(&mut self, root: &[u8; 32]) {
+        let i = (u32::from_le_bytes(self.current_root_index) as usize + 1) % ROOT_HISTORY_SIZE;
+        self.current_root_index = (i as u32).to_le_bytes();
+        self.roots[i] = *root;
+        self.next_index = (self.next_index() + 1).to_le_bytes();
+    }
+
+    /// One of the recent roots. The ring's unused slots are zero; no root is.
+    fn knows_root(&self, root: &[u8; 32]) -> bool {
+        root != &[0; 32] && self.roots.contains(root)
+    }
+}
+
+/// A spent nullifier's account: one byte, its tag. That it exists is what counts.
+struct Nullifier;
+
+impl Nullifier {
+    const LEN: usize = 1;
+    const TAG: u8 = 2;
+}
+```
+
+A pool is plain bytes too: every field is a byte array, read little-endian, so the account's data
+is the struct, at any address. The 6 reserved bytes put `denomination` at offset 8, and the roots
+start at 24, which is where the test will read the empty root. The ring keeps 16 roots, so a
+withdrawal proved against the tree a few deposits ago still verifies.
+</Step>
+
+<Step>
+### Check every account
+
+Nothing checks an account for a Pinocchio program: the runtime hands it the accounts the
+transaction names, and anyone can name any account. So each check is written out, one function
+per kind of account. Append:
+
+```rust title="program/src/lib.rs"
+/// What each kind of account must be, one function each.
+mod accounts {
+    use super::*;
+
+    /// An account the program writes to.
+    pub fn writable(account: &AccountView) -> ProgramResult {
+        if !account.is_writable() {
+            return Err(ProgramError::Immutable);
+        }
+        Ok(())
+    }
+
+    /// A payer: a signer, writable.
+    pub fn writable_signer(account: &AccountView) -> ProgramResult {
+        if !account.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        writable(account)
+    }
+
+    /// The system program, which creates the accounts and moves the deposits.
+    pub fn system_program(account: &AccountView) -> ProgramResult {
+        if account.address() != &pinocchio_system::ID {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+        Ok(())
+    }
+
+    /// An account about to be created: owned by the system program, with no data.
+    /// It may already hold lamports, which anyone can send it; creation tops them
+    /// up to rent exemption.
+    pub fn is_uninitialized(account: &AccountView) -> bool {
+        account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
+    }
+
+    /// A pool: writable, owned by this program, a pool's size and tag, at the
+    /// address its own denomination and stored bump derive.
+    pub fn pool(program_id: &Address, pool: &AccountView) -> ProgramResult {
+        writable(pool)?;
+        if !pool.owned_by(program_id) {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+        let data = pool.try_borrow()?;
+        let state = Pool::from_bytes(&data)?;
+        let address = Address::derive_address(
+            &[POOL_SEED, &state.denomination],
+            Some(state.bump),
+            program_id,
+        );
+        if pool.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        Ok(())
+    }
+}
+```
+
+What each one prevents:
+
+- **`writable`**: a read-only account can't be changed, and the runtime would only fail the
+  transaction after the program ran; the check fails it up front, with `Immutable`.
+- **`writable_signer`**: the depositor's lamports, and the rent for a new account, move only with
+  their owner's signature, so no one can spend someone else's SOL into the pool.
+- **`system_program`**: the CPIs below call the system program by its address, and the runtime
+  would refuse them with that account missing; the check names the problem first, with
+  `IncorrectProgramId`.
+- **`is_uninitialized`**: an account about to be created doesn't exist yet, so `initialize` can't
+  reset a live pool's roots, and a nullifier that exists means its note is spent. It allows
+  lamports already at the address, which anyone can send, so no one can block a withdrawal by
+  funding its nullifier's address first.
+- **`pool`**: only this program can write an account it owns, so the owner check makes the roots
+  and the index the program's own, not ones someone wrote to look like them. The size and tag tell
+  a pool from a nullifier, and the address ties it to its own denomination and bump.
+</Step>
+
+<Step>
+### Create a pool
+
+Append `initialize`:
+
+```rust title="program/src/lib.rs"
+/// Create the pool for one denomination, with the empty tree's root.
+fn initialize(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &InitializeArgs,
+) -> ProgramResult {
+    let [pool, authority, system, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    accounts::writable_signer(authority)?;
+    accounts::system_program(system)?;
+    accounts::writable(pool)?;
+    // One pool per denomination, at the canonical bump.
+    let (address, bump) =
+        Address::find_program_address(&[POOL_SEED, &args.denomination], program_id);
+    if pool.address() != &address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if !accounts::is_uninitialized(pool) {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+
+    let bump = [bump];
+    let seeds = [
+        Seed::from(POOL_SEED),
+        Seed::from(&args.denomination),
+        Seed::from(&bump),
+    ];
+    pinocchio_system::create_account_with_minimum_balance_signed(
+        pool,
+        Pool::LEN,
+        program_id,
+        authority,
+        None,
+        &[Signer::from(&seeds)],
+    )?;
+
+    let mut data = pool.try_borrow_mut()?;
+    let state = Pool::from_bytes_mut(&mut data)?; // created zeroed: the ring is empty
+    state.tag = Pool::TAG;
+    state.bump = bump[0];
+    state.denomination = args.denomination;
+    state.roots[0] = EMPTY_ROOT;
+    Ok(())
+}
+```
+
+It takes the denomination's PDA at its canonical bump, the one `find_program_address` returns, so
+there's exactly one pool per denomination: another bump would give another valid address. The
+account is created by a `pinocchio-system` CPI, signed with the pool's seeds, and is zeroed, so
+only the first root in the ring is set. Anyone can create a pool; the empty root is a constant, so
+no one can seed one with another tree.
+</Step>
+
+<Step>
+### Deposit
+
+Append `deposit`:
+
+```rust title="program/src/lib.rs"
+/// Deposit the denomination and append `commitment`. The proof says `new_root`
+/// is the current tree with `commitment` appended.
+fn deposit(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &DepositArgs,
+) -> ProgramResult {
+    let [pool, depositor, system, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    accounts::pool(program_id, pool)?;
+    accounts::writable_signer(depositor)?;
+    accounts::system_program(system)?;
+
+    let (denomination, index) = {
+        let mut data = pool.try_borrow_mut()?;
+        let state = Pool::from_bytes_mut(&mut data)?;
+        let index = state.next_index();
+        if index >= 1 << TREE_HEIGHT {
+            return Err(PoolError::TreeFull.into());
+        }
+
+        // The deposit circuit's public `Append`, field by field.
+        let public_inputs = [
+            *state.current_root(),
+            args.new_root,
+            args.commitment,
+            field_from_u64(u64::from(index)),
+        ];
+        if !deposit_verifier::verify(&Proof::from_le_bytes(&args.proof), &public_inputs) {
+            return Err(PoolError::InvalidProof.into());
+        }
+        state.push_root(&args.new_root);
+        (state.denomination(), index)
+    };
+
+    pinocchio_system::instructions::Transfer {
+        from: depositor,
+        to: pool,
+        lamports: denomination,
+    }
+    .invoke()?;
+
+    // What a wallet follows the tree by: the commitment and its leaf index.
+    log_data(&[&args.commitment, &index.to_le_bytes()]);
+    Ok(())
+}
+
+/// A u64 as a 32-byte little-endian field element.
+fn field_from_u64(x: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..8].copy_from_slice(&x.to_le_bytes());
+    out
+}
+```
+
+The program builds the deposit circuit's `Append` itself: `old_root` and `index` from its own state,
+and only the commitment and the new root from the instruction. A proof holds only for this pool's
+tree as it is now, so the depositor can't append to an older tree, or at another index. Then it
+stores the new root and pulls the denomination from the depositor with a `pinocchio-system`
+transfer, which the depositor's signature authorizes.
+
+The `Program data:` log is how a wallet learns of other deposits, to call `update` on its paths.
+</Step>
+
+<Step>
+### Withdraw
+
+Append `withdraw`:
+
+```rust title="program/src/lib.rs"
+/// Pay the denomination, less `fee`, to `recipient`, and `fee` to the relayer.
+/// The `nullifier` account is created here: if it exists, the note is spent.
+fn withdraw(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &WithdrawArgs,
+) -> ProgramResult {
+    let [pool, nullifier, recipient, relayer, system, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    accounts::pool(program_id, pool)?;
+    accounts::writable_signer(relayer)?;
+    accounts::system_program(system)?;
+    accounts::writable(recipient)?;
+    accounts::writable(nullifier)?;
+    // The payout below moves the pool's lamports: never to the pool's own accounts.
+    if recipient.address() == pool.address() || recipient.address() == nullifier.address() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let fee = u64::from_le_bytes(args.fee);
+    let denomination = {
+        let data = pool.try_borrow()?;
+        let state = Pool::from_bytes(&data)?;
+
+        // The nullifier's account, at its canonical bump, per denomination.
+        let seeds = [NULLIFIER_SEED, &state.denomination, &args.nullifier_hash];
+        let (address, bump) = Address::find_program_address(&seeds, program_id);
+        if nullifier.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if !accounts::is_uninitialized(nullifier) {
+            return Err(PoolError::NullifierSpent.into());
+        }
+        if fee > state.denomination() {
+            return Err(PoolError::FeeTooHigh.into());
+        }
+        if !state.knows_root(&args.root) {
+            return Err(PoolError::UnknownRoot.into());
+        }
+
+        // The withdraw circuit's public `Withdrawal`, field by field.
+        let [r_hi, r_lo] = address_halves(recipient.address().as_array());
+        let [l_hi, l_lo] = address_halves(relayer.address().as_array());
+        let public_inputs = [
+            args.root,
+            args.nullifier_hash,
+            r_hi,
+            r_lo,
+            l_hi,
+            l_lo,
+            field_from_u64(fee),
+        ];
+        if !withdraw_verifier::verify(&Proof::from_le_bytes(&args.proof), &public_inputs) {
+            return Err(PoolError::InvalidProof.into());
+        }
+
+        // Spend the note: create its account, paid by the relayer.
+        let bump = [bump];
+        let seeds = [
+            Seed::from(NULLIFIER_SEED),
+            Seed::from(&state.denomination),
+            Seed::from(&args.nullifier_hash),
+            Seed::from(&bump),
+        ];
+        pinocchio_system::create_account_with_minimum_balance_signed(
+            nullifier,
+            Nullifier::LEN,
+            program_id,
+            relayer,
+            None,
+            &[Signer::from(&seeds)],
+        )?;
+        state.denomination()
+    };
+    nullifier.try_borrow_mut()?[0] = Nullifier::TAG;
+
+    // The pool is the program's, so its lamports move directly.
+    debit(pool, denomination)?;
+    credit(recipient, denomination - fee)?;
+    credit(relayer, fee)
+}
+
+fn debit(account: &mut AccountView, lamports: u64) -> ProgramResult {
+    let balance = account
+        .lamports()
+        .checked_sub(lamports)
+        .ok_or(ProgramError::InsufficientFunds)?;
+    account.set_lamports(balance);
+    Ok(())
+}
+
+fn credit(account: &mut AccountView, lamports: u64) -> ProgramResult {
+    let balance = account
+        .lamports()
+        .checked_add(lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    account.set_lamports(balance);
+    Ok(())
+}
+
+/// An address as the circuit's `Hash`: `[hi, lo]`, each 16-byte half read as a
+/// big-endian integer, as 32-byte little-endian field elements.
+fn address_halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
+    let half = |b: &[u8]| {
+        let mut out = [0u8; 32];
+        out[..16].copy_from_slice(b);
+        out[..16].reverse();
+        out
+    };
+    [half(&bytes[..16]), half(&bytes[16..])]
+}
+```
+
+The cheap checks come first: the nullifier's address, whether it's spent, the fee and the root,
+before the proof's verification, which is most of the instruction's compute. Then the public inputs: `root` and `nullifier_hash`
+from the instruction, the two addresses from the transaction's accounts and `fee` as the relayer
+sent it. A relayer who swaps the recipient for their own, or raises the fee, has a proof of
+another statement, which fails.
+
+Two more checks guard the payout:
+
+- **The recipient isn't the pool or the nullifier.** The proof binds the recipient, but the
+  depositor chose it, and a payout to one of the pool's own accounts would debit and credit the
+  same lamports. The payout is between three distinct accounts.
+- **The lamport arithmetic is checked.** `fee <= denomination` was checked above, so
+  `denomination - fee` can't wrap, and `debit` and `credit` fail rather than wrap. The runtime
+  also refuses any transaction that leaves the pool below rent exemption.
+
+The pool is owned by the program, so its lamports move directly, with no CPI. The recipient needs
+no SOL and signs nothing: the relayer pays the transaction fee and the nullifier's rent, and is
+paid back by `fee`.
+</Step>
+
+<Step>
+### Name the errors
+
+Append the errors and the two logs:
+
+```rust title="program/src/lib.rs"
+/// The program's own errors, as custom error codes from 6000.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum PoolError {
+    InvalidProof = 6000,
+    UnknownRoot,
+    FeeTooHigh,
+    TreeFull,
+    NullifierSpent,
+}
+
+impl From<PoolError> for ProgramError {
+    fn from(error: PoolError) -> Self {
+        ProgramError::Custom(error as u32)
+    }
+}
+
+impl PoolError {
+    /// What the program logs for error `code`: its name, then what it means.
+    fn message(code: u32) -> &'static str {
+        const MESSAGES: [&str; 5] = [
+            "InvalidProof: invalid proof",
+            "UnknownRoot: unknown or stale merkle root",
+            "FeeTooHigh: fee exceeds denomination",
+            "TreeFull: tree is full",
+            "NullifierSpent: nullifier already spent",
+        ];
+        let index = code.wrapping_sub(PoolError::InvalidProof as u32) as usize;
+        MESSAGES.get(index).copied().unwrap_or("unknown error")
+    }
+}
+
+/// `Program log: <message>`.
+fn log(message: &str) {
+    #[cfg(target_os = "solana")]
+    // SAFETY: the pointer and length are a valid `&str`'s.
+    unsafe {
+        pinocchio::syscalls::sol_log_(message.as_ptr(), message.len() as u64)
+    };
+    #[cfg(not(target_os = "solana"))]
+    let _ = message;
+}
+
+/// `Program data: <base64> <base64> ..`, one per slice.
+fn log_data(data: &[&[u8]]) {
+    #[cfg(target_os = "solana")]
+    // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
+    unsafe {
+        pinocchio::syscalls::sol_log_data(data.as_ptr().cast(), data.len() as u64)
+    };
+    #[cfg(not(target_os = "solana"))]
+    let _ = data;
+}
+```
+
+Account checks fail with the runtime's standard errors, as `accounts` returns them. The program's
+own five are custom codes from 6000, and the entrypoint logs each one's name.
+</Step>
+
+<Step>
+### Build the program
+
+```console
+$ cd program
+$ cargo build-sbf --arch v3
+...
+   Compiling withdraw-verifier v0.1.0 (.../withdraw/withdraw-verifier)
+   Compiling deposit-verifier v0.1.0 (.../deposit/deposit-verifier)
+   Compiling solana-instruction-view v2.1.0
+   Compiling pinocchio v0.11.2
+   Compiling pinocchio-system v0.6.1
+   Compiling shielded-pool v0.1.0 (.../program)
+    Finished `release` profile [optimized] target(s) in 0.91s
+```
+
+The program is at `program/target/deploy/shielded_pool.so`. There's no hash of the tree anywhere
+in it: the only hashing is the runtime's, deriving the PDAs. The program reads every other public
+input from its own state (`current_root`, `next_index`) or from the transaction (the recipient's
+and relayer's addresses), so a proof only holds for this pool, now, paying these accounts.
+</Step>
+
+<Step>
+### Deposit and withdraw onchain
+
+Back in `app/`, add the Solana packages:
+
+```sh
+cd ../app
+npm install @solana/kit litesvm
+```
+
+Add these imports at the top of `shielded-pool.test.ts`:
+
+```ts title="app/shielded-pool.test.ts"
+import {
+  AccountRole, address, appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner,
+  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
+  type Address, type Instruction, type KeyPairSigner,
+} from "@solana/kit";
+import { FailedTransactionMetadata, LiteSVM } from "litesvm";
+```
+
+Then add the helpers at the end: 01's `send`, the program's tags, and its instruction data.
+
+```ts title="app/shielded-pool.test.ts"
+// Send `instruction` in one transaction, paid by `payer`. Returns the compute
+// units it used, or throws with the program's logs.
+async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction) {
+  const tx = await pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayerSigner(payer, m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
+    (m) => appendTransactionMessageInstruction(instruction, m),
+    (m) => signTransactionMessageWithSigners(m),
+  );
+  const result = svm.sendTransaction(tx);
+  svm.expireBlockhash();
+  if (result instanceof FailedTransactionMetadata) {
+    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
+  }
+  return result.computeUnitsConsumed();
+}
+
+// The program's instruction tags.
+const INITIALIZE = 0;
+const DEPOSIT = 1;
+const WITHDRAW = 2;
+
+// An instruction's data: its tag, then its arguments' bytes.
+const instructionData = (tag: number, ...args: Uint8Array[]) => new Uint8Array(Buffer.concat([Uint8Array.of(tag), ...args]));
+
+// A u64, little-endian, as the program and the PDA seeds read it.
+function u64le(x: bigint) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, x, true);
+  return out;
+}
+```
+
+Finally, the test. Two people deposit 1 SOL each. The first then withdraws through a relayer, who
+signs and pays the transaction fee, to a fresh address that holds nothing. Each instruction's
+accounts are in the order the program destructures them:
+
+```ts title="app/shielded-pool.test.ts"
+test("deposit, someone else deposits, withdraw through a relayer, once", async () => {
+  const svm = new LiteSVM();
+  const program = (await generateKeyPairSigner()).address;
+  svm.addProgramFromFile(program, "../program/target/deploy/shielded_pool.so");
+  const system = { address: address("11111111111111111111111111111111"), role: AccountRole.READONLY };
+  const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
+  const signer = (s: KeyPairSigner) => ({ address: s.address, role: AccountRole.WRITABLE_SIGNER, signer: s });
+  const funded = async (sol: bigint) => {
+    const s = await generateKeyPairSigner();
+    svm.airdrop(s.address, lamports(sol * 1_000_000_000n));
+    return s;
+  };
+  const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
+
+  // A pool of 1 SOL notes. Its empty root is the circuit's.
+  const DENOMINATION = 1_000_000_000n;
+  const [pool] = await getProgramDerivedAddress({ programAddress: program, seeds: ["pool", u64le(DENOMINATION)] });
+  const authority = await funded(10n);
+  const initialized = await send(svm, authority, {
+    programAddress: program,
+    accounts: [writable(pool), signer(authority), system],
+    data: instructionData(INITIALIZE, u64le(DENOMINATION)),
+  });
+  console.log(`initialize in ${initialized} CU`);
+  let tip = Path.first();
+  const account = svm.getAccount(pool);
+  expect(account.exists && account.data.subarray(24, 56)).toEqual(tip.treeRoot().toBytes());
+
+  // Deposit `note` at the next free leaf, and move the tip past it.
+  async function deposit(note: Note) {
+    const leaf = Note.commitment(note);
+    const append = Append.of(tip, leaf);
+    const proof = deposits.prove({ path: tip, append });
+    const depositor = await funded(10n);
+    const units = await send(svm, depositor, {
+      programAddress: program,
+      accounts: [writable(pool), signer(depositor), system],
+      data: instructionData(DEPOSIT, leaf.toBytes(), append.newRoot.toBytes(), proof.toBytes()),
+    });
+    console.log(`deposit ${append.index} verified onchain in ${units} CU`);
+    const path = tip;
+    tip = tip.next(leaf);
+    return { path, leaf };
+  }
+
+  const mine = newNote();
+  let { path } = await deposit(mine);
+  // Someone deposits after me: my wallet updates my path.
+  const later = tip;
+  const { leaf } = await deposit(newNote());
+  path = path.update(later, leaf);
+
+  // A relayer submits my withdrawal to a fresh address, for a fee.
+  const relayer = await funded(10n);
+  const recipient = (await generateKeyPairSigner()).address;
+  const fee = 10_000_000n;
+  const statement = Withdrawal.of(mine, path, bytes(recipient), bytes(relayer.address), fee);
+  const proof = withdrawals.prove({ note: mine, path, withdrawal: statement });
+  const { root, nullifierHash } = statement;
+  const [nullifier] = await getProgramDerivedAddress({
+    programAddress: program,
+    seeds: ["nullifier", u64le(DENOMINATION), nullifierHash.toBytes()],
+  });
+  const withdraw = (to: Address) => ({
+    programAddress: program,
+    accounts: [writable(pool), writable(nullifier), writable(to), signer(relayer), system],
+    data: instructionData(WITHDRAW, proof.toBytes(), root.toBytes(), nullifierHash.toBytes(), u64le(fee)),
+  });
+
+  // The proof pays only the recipient it was made for.
+  const thief = (await generateKeyPairSigner()).address;
+  await expect(send(svm, relayer, withdraw(thief))).rejects.toThrow(/InvalidProof/);
+
+  const units = await send(svm, relayer, withdraw(recipient));
+  console.log(`withdrawal verified onchain in ${units} CU`);
+  expect(svm.getBalance(recipient)).toBe(DENOMINATION - fee);
+
+  // The nullifier is spent: the same note can't come out twice.
+  await expect(send(svm, relayer, withdraw(recipient))).rejects.toThrow(/NullifierSpent/);
+}, 60_000);
+```
+
+Run the tests:
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2302ms
+stdout | shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
+initialize in 4459 CU
+...
+deposit 0 verified onchain in 91559 CU
+...
+deposit 1 verified onchain in 92199 CU
+...
+withdrawal verified onchain in 111243 CU
+
+ ✓ shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4626ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+Creating the pool took a few thousand compute units, each deposit about 92,000 and the withdrawal
+about 111,000, proof verification included. `initialize` and `withdraw` vary by 1,500 for each
+extra try `find_program_address` takes to find a bump. Two deposits went in, and the first came
+out to an address that had never held SOL. The same proof was refused for another recipient with
+`InvalidProof`, and a second withdrawal of the note was refused with `NullifierSpent`, when the
+program found its nullifier account already there.
+</Step>
+
+</Steps>
+
+## What you built
+
+A shielded pool: 1 SOL went in from one wallet and came out at another, and nothing onchain links
+the two. The new ideas:
+
+- **Commitments in a Merkle tree, and nullifiers.** 02's commitments became 03's leaves. A
+  deposit's commitment is a leaf; a withdrawal proves the note behind *some* leaf is yours,
+  against a root the program remembers, with 03's Merkle path. Every
+  deposit in the tree is a candidate, so the anonymity set is the whole pool. Each note has one
+  nullifier hash, which the program records as a PDA, so a note pays out once, and the hash
+  reveals nothing about which commitment it belongs to.
+- **Two circuits and a wallet sharing a crate.** `pool` is ordinary Rust. Both circuits compile
+  its `Path::root` into constraints, and the TypeScript wallet runs its `first`, `next` and
+  `update` through the generated clients.
+- **The chain never hashes.** The deposit circuit proves the new root, so the program stores roots
+  and verifies proofs, and the circuits and the chain can't disagree about a hash.
+- **A Pinocchio program** around the two generated verifier crates: one-byte instruction tags, a
+  PDA per pool and per nullifier, and every account check written out.
+
+The pool hides *which* deposit a withdrawal spends, not *how much*: every note in a pool is the
+same size, which is why range proofs had little to do here. It also can't hide timing. A withdrawal right after the only deposit links them anyway.
+A deposit proof binds the current root and next index, so two deposits racing for the same slot
+can't both land: a real wallet reads the pool's state just before proving, and proves again if
+another deposit wins.
+
+<Callout type="warn" title="Before you deploy">
+`xark setup` made single-party keys: sound unless whoever ran it kept its randomness. A pool that
+holds value needs keys from a ceremony, and an audit. See
+[The trusted setup](/docs/trust/trusted-setup).
+</Callout>
+
+The finished example, with a `justfile` that runs every step, host tests of each account check,
+and a test of more refusals (another fee, an unknown root), is
+[04-shielded-pool](https://github.com/blueshift-gg/xark-examples/tree/main/04-shielded-pool) in
+xark-examples.
+
+Fixed denominations are the pool's limit: you can't pay someone 3.7 SOL, or split a note. The
+next tutorial lets notes carry any amount, and that is where range proofs become essential: once
+amounts are private and arbitrary, only a range check on each one stops a note from being worth
+"−1".
+
+<Cards>
+  <Card title="05 · Shielded transfer" href="/docs/tutorials/05-shielded-transfer" description="Merkle trees and range proofs together: private payments of any amount, with every value range-checked so the sums can't wrap." />
+  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="The xark-merkle gadget behind every root in this pool." />
+  <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="How a client runs the circuit crate's Rust." />
+</Cards>

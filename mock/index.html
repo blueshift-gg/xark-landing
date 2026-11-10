@@ -236,10 +236,10 @@
       <p>Each is built, proved, and verified end-to-end in an in-process Solana VM.</p>
     </div>
     <div class="grid4">
-      <a class="tile" href="#"><span class="pi">0 public inputs</span><div class="no">01</div><h3>Over 9000</h3><p>Prove a secret number beats a bound. The range-proof primitive.</p></a>
-      <a class="tile" href="#"><span class="pi">2 public inputs</span><div class="no">02</div><h3>Age verification</h3><p>Prove 18+ without a birthday. Commitments.</p></a>
-      <a class="tile" href="#"><span class="pi">4 + 7 public inputs</span><div class="no">03</div><h3>Shielded pool</h3><p>Unlinkable deposit → withdrawal. Merkle membership + nullifiers.</p></a>
-      <a class="tile" href="#"><span class="pi">12 public inputs</span><div class="no">04</div><h3>Shielded transfer</h3><p>Private, arbitrary-amount payments. Zcash-style notes + JoinSplit.</p></a>
+      <a class="tile" href="#"><span class="pi">0 public inputs</span><div class="no">01</div><h3>Over 9000</h3><p>Range proofs. A field has no order, so the circuit proves a secret number beats a bound one bit at a time.</p></a>
+      <a class="tile" href="#"><span class="pi">5 public inputs</span><div class="no">02</div><h3>zKYC</h3><p>Range proofs put to work: prove your age and net worth, and a nationality on an allow-list, against a salted commitment.</p></a>
+      <a class="tile" href="#"><span class="pi">4 + 7 public inputs</span><div class="no">03</div><h3>Shielded pool</h3><p>Merkle trees plus salted commitments. Notes and nullifiers make a withdrawal unlinkable to its deposit.</p></a>
+      <a class="tile" href="#"><span class="pi">12 public inputs</span><div class="no">04</div><h3>Shielded transfer</h3><p>Merkle trees and range proofs together. Private payments of any amount; range-checked values keep the sums from wrapping.</p></a>
     </div>
   </div>
 </section>
@@ -255,7 +255,7 @@
       <div class="row"><div class="cell k">trusted setup</div><div class="cell x">multi-party ceremony</div><div class="cell o">dev keys</div></div>
       <div class="row"><div class="cell k">soundness</div><div class="cell x">Lean proofs · fuzzing · diff-tested</div><div class="cell o">—</div></div>
       <div class="row"><div class="cell k">unsupported opcodes</div><div class="cell x">rejected, never mis-proved</div><div class="cell o">—</div></div>
-      <div class="row"><div class="cell k">on-chain verify</div><div class="cell x">Pinocchio low-CU path</div><div class="cell o">—</div></div>
+      <div class="row"><div class="cell k">onchain verify</div><div class="cell x">Pinocchio low-CU path</div><div class="cell o">—</div></div>
       <div class="row"><div class="cell k">snarkjs interop</div><div class="cell x">yes</div><div class="cell o">partial</div></div>
     </div>
   </div>

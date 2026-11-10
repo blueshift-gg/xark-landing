@@ -69,6 +69,12 @@ function shortHex(s: string): string {
   }
 }
 
+/** A proof's SHA-256, in hex: a name for it the player can compare. */
+async function proofHash(proof: Uint8Array): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", proof as BufferSource);
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** A cell's place, as a person reads it: 1-based. */
 function place(idx: number): string {
   return `row ${Math.floor(idx / N) + 1}, column ${(idx % N) + 1}`;
@@ -152,7 +158,10 @@ export function MinesweeperDemo() {
   const [commitment, setCommitment] = useState("0x…");
   const [proofs, setProofs] = useState(0);
   const [pending, setPending] = useState<"proving" | "verifying" | null>(null);
-  const [lastMs, setLastMs] = useState<number | null>(null);
+  // The last verified proof: its hash, and how long the house took to prove it.
+  const [lastProof, setLastProof] = useState<{ hash: string; ms: number } | null>(
+    null,
+  );
   // What the live region last announced: each proof's verdict.
   const [said, setSaid] = useState("");
   // The one cell in the tab order (a roving tabindex); arrows move it.
@@ -222,7 +231,9 @@ export function MinesweeperDemo() {
       if (game !== gameRef.current) return null;
       setPending(null);
       if (!ok) return "rejected";
-      setLastMs(answer.ms);
+      const hash = await proofHash(answer.proof);
+      if (game !== gameRef.current) return null;
+      setLastProof({ hash, ms: answer.ms });
       setProofs((p) => p + 1);
       applyView(answer.view);
       return answer.view;
@@ -237,6 +248,7 @@ export function MinesweeperDemo() {
     commitRef.current = null;
     setStatus("loading");
     setProofs(0);
+    setLastProof(null);
     setPending(null);
     setCells(blank());
     setCommitment("0x…");
@@ -510,6 +522,15 @@ export function MinesweeperDemo() {
               })}
             </div>
 
+            <div className="xk-commit-row xk-proof-row">
+              <span className="lbl">Proof {proofs > 0 ? `#${proofs}` : ""}</span>
+              <span className="val" title={lastProof?.hash}>
+                {lastProof
+                  ? `${lastProof.hash.slice(0, 8)}…${lastProof.hash.slice(-8)} · ${Math.round(lastProof.ms)} ms`
+                  : "—"}
+              </span>
+            </div>
+
             <p id="xk-ms-keys" className="xk-sr">
               Arrow keys move between cells, Enter opens one, F flags it.
             </p>
@@ -530,8 +551,8 @@ export function MinesweeperDemo() {
                       ? "Generating proof…"
                       : pending === "verifying"
                         ? "Verifying proof…"
-                        : lastMs !== null
-                          ? `Proved in ${Math.round(lastMs)} ms, in your browser.`
+                        : lastProof !== null
+                          ? "Proved and verified in your browser."
                           : "Proving locally in your browser."}
               </span>
               {status === "error" ? (

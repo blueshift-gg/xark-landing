@@ -101,7 +101,7 @@ with the circuit's `schema.json`, exactly as `xark prove --inputs` reads them:
   is reported as the statement that fails, e.g.
   `` the inputs fail the check at src/lib.rs:77:20: `id.nationality.require_one_of(allowed);` ``.
 - `proof` and `publicInputs` are the same bytes as the host's `proof.bin` / `public_inputs.bin`.
-  `verify` takes a proof in either form: compressed (128 bytes, as `prove` returns it) or on-chain
+  `verify` takes a proof in either form: compressed (128 bytes, as `prove` returns it) or onchain
   (256 bytes).
 
 ## Large circuits

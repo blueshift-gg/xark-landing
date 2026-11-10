@@ -31,7 +31,7 @@ Three things are load-bearing:
 - **Everything is little-endian.** Each `Fq`/`Fr` element is 32 bytes little-endian; a G1 point is
   `x ‖ y`, a G2 point is `x.c0 ‖ x.c1 ‖ y.c0 ‖ y.c1`, all uncompressed. This is what Solana's
   `alt_bn128` syscalls consume, not Arkworks' native byte order.
-- **`A` is already negated.** The exporter writes `−A ‖ B ‖ C`, so the on-chain check is a single
+- **`A` is already negated.** The exporter writes `−A ‖ B ‖ C`, so the onchain check is a single
   product of pairings.
 - **Public-input order is the circuit's order.** The N scalars appear in exactly the order the
   circuit declares its public parameters — the order `xark inspect` prints. Your program must
@@ -78,7 +78,7 @@ testable without a validator.
 <Callout title="What this costs">
 One proof with one public input verifies in about **77k compute units** (77,043 CU, measured in
 Mollusk). The fixed cost is the pairing; each public input adds one G1 scalar-mul and add. So a
-circuit's on-chain cost scales with its **number of public inputs**, not the size of the
+circuit's onchain cost scales with its **number of public inputs**, not the size of the
 computation it proves.
 </Callout>
 
@@ -92,7 +92,7 @@ exposes:
 | `verify(&Proof, &[[u8; 32]; N]) -> bool` | the proof from the transaction, the public inputs from your program |
 | `verify_instruction_data(&[u8]) -> bool` | `proof ‖ public_inputs`, both from the transaction |
 | `verify_strict`, `verify_instruction_data_strict` | also reject non-canonical point encodings |
-| `Proof::from_le_bytes(&[u8; 256])` | read a proof in the on-chain layout |
+| `Proof::from_le_bytes(&[u8; 256])` | read a proof in the onchain layout |
 | `NUM_PUBLIC_INPUTS`, `VK_BYTES` | the circuit's public-input count; the raw verifying key |
 | `SETUP` | how the embedded key was made: `seeded`, `single-party`, `ceremony` (two or more contributors) or `unknown` |
 
@@ -106,7 +106,7 @@ Groth16 proofs are re-randomizable: anyone holding a valid proof can make a diff
 the same public inputs, and the `_strict` functions don't change that. Never use proof bytes, or
 their hash, as a replay or "already used" key. Put replay protection in the public inputs — a
 nullifier or nonce the circuit derives from a secret, or the signer the proof is for — and record
-*that* on-chain.
+*that* onchain.
 </Callout>
 
 ## Many proofs in one call

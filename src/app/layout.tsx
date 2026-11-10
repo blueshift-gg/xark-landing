@@ -1,6 +1,6 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
 import type { Metadata } from "next";
-import { IBM_Plex_Mono } from "next/font/google";
+import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import localFont from "next/font/local";
 
 import { siteMetadata } from "@/site.config";
@@ -29,6 +29,14 @@ const mono = IBM_Plex_Mono({
   weight: ["400", "500", "600"],
 });
 
+// The docs' running text: Prolinea is a display face, too stylised to read at length, so it
+// stays on headings and the brand; Plex Sans pairs with the Plex Mono the code uses.
+const sans = IBM_Plex_Sans({
+  variable: "--font-ibm-plex-sans",
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+});
+
 export const metadata: Metadata = siteMetadata;
 
 export default function RootLayout({
@@ -38,7 +46,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${prolinea.variable} ${mono.variable}`}
+      className={`${prolinea.variable} ${sans.variable} ${mono.variable}`}
     >
       <body className="antialiased">
         <RootProvider

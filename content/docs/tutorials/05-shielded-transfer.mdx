@@ -1,0 +1,1671 @@
+---
+title: "05 · Shielded transfer"
+description: Merkle trees and range proofs together. Private payments of any amount, Zcash-style. Notes, a key hierarchy, a JoinSplit circuit, an SPL token pool and a relayer.
+---
+
+In this tutorial you'll build a shielded pool for an SPL token. Anyone can deposit tokens into it,
+pay anyone else any amount inside it, and withdraw. Onchain, an observer sees tokens go in and
+come out, but never who paid whom, or how much.
+
+This is where the story comes together: **Merkle trees and range proofs**.
+[04 · Shielded pool](/docs/tutorials/04-shielded-pool) used [03](/docs/tutorials/03-token-claim)'s
+Merkle tree and [02](/docs/tutorials/02-zkyc)'s commitments to move fixed amounts from a deposit to
+a withdrawal. Here notes carry any amount, and the circuit has to prove that what goes in equals
+what comes out without revealing either. That only works because every amount is a
+[range-checked](/docs/learn-zk/range-proofs) `u64`, the idea [01](/docs/tutorials/01-over-9000)
+started with. On top of 04, this one adds what a payment system needs:
+
+- **notes**: hidden amounts, each range-checked, each owned by an address;
+- a **key hierarchy**: one secret key, with a viewing key and any number of addresses derived from
+  it;
+- **JoinSplit**: one circuit that spends two notes and creates two, as long as the values balance;
+- **SPL tokens**: a token vault the program pays out of;
+- **relayers**: someone else submits your transaction, for a fee, so your wallet never appears
+  beside it.
+
+By the end, an end-to-end test will run this story against your program: Alice deposits 150
+tokens, pays Bob 100 privately and keeps 45 as change, with 5 to a relayer. Bob, who holds no SOL
+at all, withdraws 95 through the relayer, who takes another 5.
+
+<Callout type="warn" title="Educational, not audited">
+This is a reference for learning: unaudited, and not for production. Privacy tooling also carries
+real legal weight, which depends on your jurisdiction.
+</Callout>
+
+<Callout title="Prerequisites">
+Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
+`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf` (this tutorial was run
+with 4.1.0). It builds on all four earlier tutorials: [01](/docs/tutorials/01-over-9000) and
+[02](/docs/tutorials/02-zkyc) for the commands and the public inputs a program assembles,
+[03](/docs/tutorials/03-token-claim) for the SPL vault and PDA signing, and
+[04](/docs/tutorials/04-shielded-pool) for the tree. You'll need your `xark-pool/` directory from
+04: this tutorial reuses its `pool` crate.
+</Callout>
+
+This tutorial gets its own directory, beside `xark-pool/`, laid out as in 04:
+
+```text
+xark-transfer/
+├── pool/       04's tree, copied in
+├── transact/   the JoinSplit circuit
+├── program/    the Pinocchio program, with an SPL token vault
+└── app/        the TypeScript client and the end-to-end test
+```
+
+## One circuit for everything
+
+Every operation is one `transact`: spend two notes, create two notes, and balance the difference
+against two **public** amounts, `vpub_in` (value entering the pool) and `vpub_out` (value
+leaving it), plus the relayer's `fee`:
+
+```text
+spent (2 notes) + vpub_in  ==  created (2 notes) + vpub_out + fee
+```
+
+- A **deposit** has `vpub_in > 0`. Its spends are dummies.
+- A **transfer** has `vpub_in = vpub_out = 0`. No tokens move onchain, except a fee.
+- A **withdrawal** has `vpub_out > 0`.
+
+A slot you don't need takes a **dummy**: a note worth 0 that isn't checked against the tree. So
+every transaction has the same shape: one circuit, one instruction, the same public inputs.
+
+<Steps>
+
+<Step>
+### Start the project
+
+From the directory that holds `xark-pool/`:
+
+```sh
+mkdir xark-transfer && cd xark-transfer
+cp -r ../xark-pool/pool .
+xark init transact
+cd transact
+cargo add xark-poseidon2@0.3
+cargo add --path ../pool
+cd ..
+```
+
+The new circuit reuses the `pool` crate you wrote in 04: its `Path`, with the `first`, `next` and
+`update` a wallet keeps it current with, and its `Hash`, 32 bytes as two field elements. You'll
+see the copy is yours:
+
+```console
+$ grep -A3 '^\[dependencies\]' transact/Cargo.toml
+[dependencies]
+pool = { version = "0.1.0", path = "../pool" }
+xark = { version = "0.3" }
+xark-poseidon2 = "0.3"
+```
+</Step>
+
+<Step>
+### Write the circuit
+
+Replace `transact/src/lib.rs` with the circuit's types. Each `#[input]` type is an input
+the client takes as it is, and each `#[input] impl` is Rust the client can call:
+
+```rust title="transact/src/lib.rs"
+use pool::{Hash, Path};
+use xark::prelude::*;
+use xark_poseidon2::hash;
+
+// Domain tags: no two kinds of value hash to the same thing.
+const NULLIFIER_KEY: u64 = 1;
+const VIEWING_KEY: u64 = 2;
+const ADDRESS: u64 = 3;
+const COMMITMENT: u64 = 4;
+const NULLIFIER: u64 = 5;
+
+/// 32 bytes (a mint, a memo's hash) as the two field elements a `Hash` is, to hash.
+fn halves(x: Hash) -> [Field; 2] {
+    let mut halves = [Field::from(0u64); 2];
+    xark::input::write_fields(&x, &mut halves);
+    halves
+}
+
+/// A holder's spending key: their other keys and every address derive from it.
+#[input]
+pub struct Key {
+    pub secret: Field,
+}
+
+#[input]
+impl Key {
+    /// What nullifiers are made with.
+    pub fn nullifier_key(&self) -> Field {
+        hash([self.secret, Field::from(NULLIFIER_KEY)])
+    }
+
+    /// What addresses are made from: whoever has it recognizes the holder's addresses.
+    pub fn viewing_key(&self) -> Field {
+        hash([self.secret, Field::from(VIEWING_KEY)])
+    }
+
+    /// Address number `diversifier`: as many as the holder likes, unlinkable to
+    /// each other without the viewing key.
+    pub fn address(&self, diversifier: Field) -> Field {
+        hash([self.viewing_key(), diversifier, Field::from(ADDRESS)])
+    }
+}
+
+/// `value` of the pool's token, owned by `owner` (a `Key::address`). `rho` and
+/// `rseed` are the sender's randomness: they make every note unique and hidden.
+#[input]
+pub struct Note {
+    pub value: u64,
+    pub owner: Field,
+    pub rho: Field,
+    pub rseed: Field,
+}
+
+#[input]
+impl Note {
+    /// The leaf the note is in the tree as, in the pool of `asset` (its mint).
+    pub fn commitment(&self, asset: Hash) -> Field {
+        let [hi, lo] = halves(asset);
+        let [value, owner, rho, rseed] = self.to_fields();
+        hash([value, owner, rho, rseed, hi, lo, Field::from(COMMITMENT)])
+    }
+
+    /// What spending the note at `position` reveals: only `key`'s holder can make
+    /// it, and it's the same every time, so the program refuses a second spend.
+    pub fn nullifier(&self, key: Key, asset: Hash, position: u32) -> Field {
+        nullifier(key.nullifier_key(), self.commitment(asset), position)
+    }
+}
+
+fn nullifier(nullifier_key: Field, commitment: Field, position: u32) -> Field {
+    hash([nullifier_key, commitment, Field::from(position), Field::from(NULLIFIER)])
+}
+
+/// A note to spend, at `path`, owned by the spender's address `diversifier`.
+/// A dummy (`real: false`) is worth 0 and its path isn't checked.
+#[input]
+pub struct Spend {
+    pub note: Note,
+    pub diversifier: Field,
+    pub path: Path,
+    pub real: bool,
+}
+
+/// The value moving in and out of the pool: `vpub_in` from the user's token
+/// account, `vpub_out` to `recipient`, and `fee` to `relayer`, the token account
+/// of whoever submits the transaction.
+#[input]
+pub struct Flow {
+    pub vpub_in: u64,
+    pub vpub_out: u64,
+    pub fee: u64,
+    pub recipient: Hash,
+    pub relayer: Hash,
+}
+
+/// The public inputs, in the order the program assembles them.
+#[input]
+pub struct Transaction {
+    pub root: Field,
+    pub asset: Hash,
+    pub nullifiers: [Field; 2],
+    pub commitments: [Field; 2],
+    pub old_root: Field,
+    pub new_root: Field,
+    pub index: u32,
+    pub flow: Flow,
+    pub memos: [Hash; 2],
+}
+
+#[input]
+impl Transaction {
+    /// `key` spends `spends` and creates `outputs`, appended at `tip` (the next
+    /// free leaf's path) in the pool of `asset`.
+    #[cfg(not(xark))]
+    pub fn of(
+        key: Key,
+        spends: [Spend; 2],
+        outputs: [Note; 2],
+        tip: Path,
+        asset: Hash,
+        flow: Flow,
+        memos: [Hash; 2],
+    ) -> Transaction {
+        let commitments = outputs.map(|o| o.commitment(asset));
+        Transaction {
+            root: tip.tree_root(),
+            asset,
+            nullifiers: spends.map(|s| s.note.nullifier(key, asset, s.path.index)),
+            commitments,
+            old_root: tip.tree_root(),
+            new_root: pair_root(tip, commitments),
+            index: tip.index,
+            flow,
+            memos,
+        }
+    }
+}
+
+/// The root once `pair` is appended at `tip`, an even index: the second leaf's
+/// path is `tip` with the first leaf beside it.
+fn pair_root(tip: Path, pair: [Field; 2]) -> Field {
+    let mut siblings = tip.siblings;
+    siblings[0] = pair[0];
+    let second = Path {
+        index: tip.index + 1,
+        siblings,
+    };
+    second.root(pair[1])
+}
+```
+
+The key hierarchy is three hashes. Spending needs `secret`. `viewing_key` is enough to recognize
+your addresses, so you could hand it to an auditor without giving them your funds. `address` makes
+as many addresses as you like from one key, and nobody can tell two of them belong together.
+
+A note commits to its value, its owner, two random fields and the token's mint, so notes in
+different pools never collide. To hash the mint, `halves` splits its `Hash` into the two field
+elements it is. Its nullifier mixes in the owner's nullifier key and the note's
+position in the tree: only the owner can compute it, and it doesn't reveal which commitment it
+came from. `Transaction::of` builds the whole public statement from these helpers, for the client.
+It's `#[cfg(not(xark))]`: host code only, never part of the circuit.
+
+Now append the circuit itself:
+
+```rust title="transact/src/lib.rs"
+#[circuit]
+pub fn shielded_transact(
+    key: Private<Key>,
+    spends: Private<[Spend; 2]>,
+    outputs: Private<[Note; 2]>,
+    tip: Private<Path>,
+    tx: Public<Transaction>,
+) {
+    let nullifier_key = key.nullifier_key();
+
+    // Spend: each note is the spender's and burns the nullifier revealed. A real
+    // one is in the tree; a dummy is worth nothing.
+    let mut value_in = Field::from(tx.flow.vpub_in);
+    for (spend, revealed) in spends.into_iter().zip(tx.nullifiers) {
+        require_eq(spend.note.owner, key.address(spend.diversifier));
+        let commitment = spend.note.commitment(tx.asset);
+        if spend.real {
+            require_eq(spend.path.root(commitment), tx.root);
+        } else {
+            require(spend.note.value == 0);
+        }
+        require_eq(
+            nullifier(nullifier_key, commitment, spend.path.index),
+            revealed,
+        );
+        value_in += Field::from(spend.note.value);
+    }
+
+    // Create: the outputs are the commitments revealed.
+    let mut value_out = Field::from(tx.flow.vpub_out) + Field::from(tx.flow.fee);
+    for (output, revealed) in outputs.into_iter().zip(tx.commitments) {
+        require_eq(output.commitment(tx.asset), revealed);
+        value_out += Field::from(output.value);
+    }
+    // Every value is a range-checked `u64`, so these sums can't wrap the field.
+    require_eq(value_in, value_out);
+
+    // Append the pair at `index`, an even slot, as 04's deposit appends one.
+    require(tip.index == tx.index);
+    require(tx.index.is_multiple_of(2));
+    require_eq(tip.tree_root(), tx.old_root);
+    require_eq(pair_root(tip, tx.commitments), tx.new_root);
+
+    // Where the value, the fee and the memos go are the ones the proof was made for.
+    bind(tx.flow.recipient);
+    bind(tx.flow.relayer);
+    for memo in tx.memos {
+        bind(memo);
+    }
+}
+```
+
+In one proof, this checks that each spent note belongs to the spender, is in the tree (unless it's
+a dummy), and burns the nullifier revealed; that the outputs are the commitments revealed; and that
+value balances. As in 04, the chain never hashes: the circuit proves the two new notes take the
+tree from `old_root` to `new_root`, so the program only stores roots.
+
+<Callout title="Why every amount is range-checked">
+`require_eq(value_in, value_out)` is an equation in the field, where arithmetic wraps at `p`. On
+its own, it would accept a transaction that spends two dummies and brings nothing in, whose
+outputs are a note worth 1,000 and a note worth `p − 1,000`: the outputs sum to `p`, which is 0, the same as the inputs. The second note acts
+as −1,000, and 1,000 tokens appear from nowhere.
+
+What stops it is the type. `value`, `vpub_in`, `vpub_out` and `fee` are all `u64` inputs, so xark
+[range-checks](/docs/learn-zk/range-proofs) each to 64 bits as it's read, and `p − 1,000` has no
+64-bit decomposition. Each side then sums at most four values below 2^64, far below `p`, so the
+field equation is the integer equation: value is conserved, exactly. No comparison is needed; the
+range checks alone make the sum mean what it says.
+</Callout>
+
+The recipient, the relayer and the memos' hashes are used in no other constraint, so `bind`, as in
+04's withdraw circuit, ties each to the proof. Without it, a relayer could swap them freely.
+
+Build it:
+
+```console
+$ xark build transact
+xark building circuit `transact`
+xark 26116 vars, 26129 constraints, 26013 witness-gen ops
+xark most constraints come from
+       37%  src/lib.rs:168  require_eq(spend.path.root(commitment), tx.root);
+       19%  src/lib.rs:192  require_eq(pair_root(tip, tx.commitments), tx.new_root);
+       18%  src/lib.rs:191  require_eq(tip.tree_root(), tx.old_root);
+      `xark profile` breaks down every line
+xark circuit digest aa2e05477c68d7d50002397448d32796
+...
+```
+
+About 26,000 constraints, three quarters of them Merkle hashing: two membership paths, and the
+tree's root before and after the append. If your file matches this page, your digest matches too.
+</Step>
+
+<Step>
+### Test the circuit
+
+Append the tests to `transact/src/lib.rs`:
+
+```rust title="transact/src/lib.rs"
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xark::prover::ProveError;
+
+    fn asset() -> Hash {
+        [7; 32].into()
+    }
+
+    fn note(key: Key, value: u64, rho: u64) -> Note {
+        Note {
+            value,
+            owner: key.address(Field::from(1u64)),
+            rho: Field::from(rho),
+            rseed: Field::from(rho + 1),
+        }
+    }
+
+    fn spend(note: Note, path: Path) -> Spend {
+        Spend {
+            note,
+            diversifier: Field::from(1u64),
+            path,
+            real: true,
+        }
+    }
+
+    fn dummy(key: Key, rho: u64) -> Spend {
+        Spend {
+            real: false,
+            ..spend(note(key, 0, rho), Path::first())
+        }
+    }
+
+    /// Run the circuit on `spends` → `outputs`, the tree's next free leaf at `tip`,
+    /// with `(vpub_in, vpub_out, fee)`.
+    fn transact(
+        key: Key,
+        spends: [Spend; 2],
+        outputs: [Note; 2],
+        tip: Path,
+        vpub: (u64, u64, u64),
+    ) -> Result<(), ProveError> {
+        let flow = Flow {
+            vpub_in: vpub.0,
+            vpub_out: vpub.1,
+            fee: vpub.2,
+            recipient: [9; 32].into(),
+            relayer: [8; 32].into(),
+        };
+        let memos = [[1; 32].into(), [2; 32].into()];
+        let tx = Transaction::of(key, spends, outputs, tip, asset(), flow, memos);
+        shielded_transact(key, spends, outputs, tip, tx)
+    }
+
+    #[test]
+    fn deposit_then_pay_privately() {
+        let alice = Key { secret: Field::from(42u64) };
+        let bob = Key { secret: Field::from(99u64) };
+        let dummies = [dummy(alice, 100), dummy(alice, 101)];
+
+        // Alice deposits 150: nothing spent, 150 in. Not 151.
+        let mine = note(alice, 150, 1);
+        let deposit = [mine, note(alice, 0, 2)];
+        transact(alice, dummies, deposit, Path::first(), (150, 0, 0)).unwrap();
+        let greedy = [note(alice, 151, 1), deposit[1]];
+        assert!(transact(alice, dummies, greedy, Path::first(), (150, 0, 0)).is_err());
+
+        // Her note's path changed when the deposit's second output landed beside it.
+        let a = asset();
+        let after_mine = Path::first().next(mine.commitment(a));
+        let path = Path::first().update(after_mine, deposit[1].commitment(a));
+        let tip = after_mine.next(deposit[1].commitment(a));
+
+        // She pays Bob 100 and keeps 45; a relayer takes 5. Nothing moves publicly
+        // but the fee.
+        let spends = [spend(mine, path), dummy(alice, 102)];
+        let pay = [note(bob, 100, 3), note(alice, 45, 4)];
+        transact(alice, spends, pay, tip, (0, 0, 5)).unwrap();
+
+        // Bob can't spend Alice's note, and nobody can pay out more than they spend.
+        assert!(transact(bob, [spend(mine, path), dummy(bob, 102)], pay, tip, (0, 0, 5)).is_err());
+        assert!(transact(alice, spends, [note(bob, 101, 3), pay[1]], tip, (0, 0, 5)).is_err());
+    }
+}
+```
+
+The test is a small wallet: it tracks Alice's note's path with `Path::next` and `Path::update`
+from the `pool` crate, as 04's wallet did. Run it:
+
+```console
+$ xark test transact
+...
+running 1 test
+test tests::deposit_then_pay_privately ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.76s
+```
+
+Each call solves the whole 26,000-constraint circuit, so the test takes a few seconds. See
+[Test a circuit](/docs/guides/testing) for more on circuit tests.
+</Step>
+
+<Step>
+### Make the keys, the verifier crate and the client
+
+```console
+$ xark setup transact
+R1CS form: reduced (minimize saves 0.0% rows, 0.0% variables)
+...
+verifying key sha256: c624cc7d…61eb  # pin a client's verifier to it: { keyHash }
+
+$ xark export transact
+Generated verifier crate `transact-verifier` at .../transact/transact-verifier (19 public input(s), VK = 1728 B). ...
+✅ On-chain verifier crate ready (verifying key embedded).
+
+$ xark client transact --out app/
+✅ TypeScript client for `shielded_transact` at app/shielded_transact.ts
+```
+
+Your key hash will differ: the key comes from your machine's randomness.
+
+The 19 public inputs are the `Transaction`, flattened: each `Hash` is two field elements, and
+`Flow`'s three `u64`s are packed into one (`vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`), as
+[Packing](/docs/reference/inputs#packing) describes. You didn't make a proof before exporting, so
+the verifier crate has no bundled self-test this time. The end-to-end test is the check.
+
+`app/shielded_transact.ts` exports `Key`, `Note`, `Path` and `Transaction` with their Rust
+methods: `Key.address(key, d)`, `Note.commitment(note, mint)`,
+`Transaction.of(...)`, `Path.first()`, `path.update(...)`. The wallet runs the same code the proof
+checks. See [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
+</Step>
+
+<Step>
+### Start the program
+
+The program is Pinocchio, as in 01 to 04, and has two instructions:
+
+- `initialize` creates a pool for one SPL mint, at a PDA seeded by the mint, and its token vault.
+- `transact` checks the proof against the pool's state and the transaction's accounts, burns the
+  two nullifiers, moves the public amounts in or out of the vault, stores the new root and logs
+  the two memos.
+
+It's longer than 04's, so you'll write it in the same pieces. From `xark-transfer/`:
+
+```sh
+cargo new --lib program --name shielded-transfer
+```
+
+Replace `program/Cargo.toml` with:
+
+```toml title="program/Cargo.toml"
+[package]
+name = "shielded-transfer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+transact-verifier = { path = "../transact/transact-verifier" }
+pinocchio = "0.11"
+pinocchio-system = "0.6"
+pinocchio-token = "0.7"
+solana-sha256-hasher = { version = "3.1", features = ["sha2"] }
+
+# Onchain, PDAs come from the runtime's syscalls; a host build (your editor,
+# clippy) derives them in software.
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+solana-address = { version = "2", features = ["curve25519"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+# Token amounts are u64s: arithmetic the program doesn't check aborts, not wraps.
+[profile.release]
+overflow-checks = true
+```
+
+Besides 04's dependencies, it takes 03's `pinocchio-token` for the vault and `solana-sha256-hasher`
+for the memos' hashes. Replace `program/src/lib.rs` with the entrypoint:
+
+```rust title="program/src/lib.rs"
+#![no_std]
+
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    cpi::{Seed, Signer},
+    error::ProgramError,
+    program_entrypoint,
+};
+use pinocchio_token::{
+    instructions::{InitializeAccount3, Transfer},
+    state::{Account as TokenAccount, Mint},
+};
+use solana_sha256_hasher::hash;
+use transact_verifier::{NUM_PUBLIC_INPUTS, Proof, verify};
+
+program_entrypoint!(process_instruction);
+pinocchio::nostd_panic_handler!();
+pinocchio::no_allocator!();
+
+const TREE_HEIGHT: u32 = 20;
+const ROOT_HISTORY_SIZE: usize = 16;
+const POOL_SEED: &[u8] = b"pool";
+const VAULT_SEED: &[u8] = b"vault";
+const NULLIFIER_SEED: &[u8] = b"nullifier";
+
+// The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
+// a pool can't be seeded with another tree.
+const EMPTY_ROOT: [u8; 32] = [
+    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
+    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+];
+
+// The instructions' tags: the first byte of the instruction data.
+const INITIALIZE: u8 = 0;
+const TRANSACT: u8 = 1;
+
+fn process_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+) -> ProgramResult {
+    let result = match data.split_first() {
+        // `[0]`, and nothing else.
+        Some((&INITIALIZE, [])) => initialize(program_id, accounts),
+        Some((&TRANSACT, args)) => {
+            let (args, memos) = args
+                .split_at_checked(TransactArgs::LEN)
+                .ok_or(ProgramError::InvalidInstructionData)?;
+            transact(program_id, accounts, cast(args)?, &read_memos(memos)?)
+        }
+        _ => Err(ProgramError::InvalidInstructionData),
+    };
+    if let Err(ProgramError::Custom(code)) = result {
+        log(PoolError::message(code));
+    }
+    result
+}
+
+/// `[1] ‖ proof (256) ‖ root (32) ‖ nf[0] ‖ nf[1] ‖ cm_out[0] ‖ cm_out[1] ‖
+/// new_root (32 each) ‖ vpub_in ‖ vpub_out ‖ fee (u64 LE each)`, then two memos.
+#[repr(C)]
+struct TransactArgs {
+    proof: [u8; 256],
+    root: [u8; 32],
+    nf: [[u8; 32]; 2],
+    cm_out: [[u8; 32]; 2],
+    new_root: [u8; 32],
+    vpub_in: [u8; 8],
+    vpub_out: [u8; 8],
+    fee: [u8; 8],
+}
+
+/// Plain bytes: `#[repr(C)]`, made only of `u8` arrays, so alignment 1 and every
+/// bit pattern valid. A byte slice of exactly its size can be read as one.
+///
+/// # Safety
+///
+/// The implementor must be `#[repr(C)]` and made only of `u8` arrays.
+unsafe trait Plain: Sized {
+    const LEN: usize = size_of::<Self>();
+}
+
+unsafe impl Plain for TransactArgs {}
+
+/// The arguments `data` holds, if it is exactly their size.
+fn cast<T: Plain>(data: &[u8]) -> Result<&T, ProgramError> {
+    if data.len() != T::LEN {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    // SAFETY: `T` is plain bytes (alignment 1) and `data` is exactly its size.
+    Ok(unsafe { &*data.as_ptr().cast::<T>() })
+}
+
+/// The two memos: each its length as a u32 LE, then its bytes, and nothing after.
+fn read_memos(mut data: &[u8]) -> Result<[&[u8]; 2], ProgramError> {
+    let mut memo = || {
+        let (len, rest) = data
+            .split_first_chunk::<4>()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let (memo, rest) = rest
+            .split_at_checked(u32::from_le_bytes(*len) as usize)
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        data = rest;
+        Ok::<_, ProgramError>(memo)
+    };
+    let memos = [memo()?, memo()?];
+    if !data.is_empty() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    Ok(memos)
+}
+```
+
+The instruction data is 04's layout: a one-byte tag, then the arguments' bytes in order. A
+transact's fixed-size arguments are a `#[repr(C)]` struct of byte arrays, read in place with
+`cast`. The two memos come after them, each its length then its bytes, since a memo's size is up
+to the wallet. Short data, a memo longer than what's left, and trailing bytes all fail with
+`InvalidInstructionData`.
+</Step>
+
+<Step>
+### Lay out the accounts
+
+The program owns two kinds of account, each at a PDA, and creates a third:
+
+| PDA | Seeds | Owner | Size |
+|---|---|---|--:|
+| `pool` | `["pool", mint]` | this program | 554 |
+| `vault` | `["vault", mint]` | the token program: a token account owned by `pool` | 165 |
+| `nullifier` | `["nullifier", mint, nf]` | this program | 0 |
+
+A nullifier holds no data: that its account exists is what counts. Append the pool's layout to
+`program/src/lib.rs`:
+
+```rust title="program/src/lib.rs"
+/// A pool's account, 554 bytes: `mint`, `next_index` and `current_root_index`
+/// (u32 LE), a ring of the 16 most recent roots, then the pool's and the vault's
+/// bumps.
+#[repr(C)]
+struct Pool {
+    mint: [u8; 32],
+    next_index: [u8; 4],
+    current_root_index: [u8; 4],
+    roots: [[u8; 32]; ROOT_HISTORY_SIZE],
+    bump: u8,
+    vault_bump: u8,
+}
+
+unsafe impl Plain for Pool {}
+const _: () = assert!(Pool::LEN == 554);
+
+impl Pool {
+    /// The pool `data` holds, if it is a pool's size.
+    fn from_bytes(data: &[u8]) -> Result<&Pool, ProgramError> {
+        cast(data).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    /// As `from_bytes`, to write.
+    fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Pool, ProgramError> {
+        if data.len() != Pool::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: `Pool` is plain bytes and `data` is exactly its size.
+        Ok(unsafe { &mut *data.as_mut_ptr().cast::<Pool>() })
+    }
+
+    fn next_index(&self) -> u32 {
+        u32::from_le_bytes(self.next_index)
+    }
+
+    fn current_root(&self) -> &[u8; 32] {
+        let i = u32::from_le_bytes(self.current_root_index) as usize % ROOT_HISTORY_SIZE;
+        &self.roots[i]
+    }
+
+    /// Remember `root` as the newest in the ring, and advance the tree by a pair.
+    /// The caller has checked the tree has room.
+    fn push_root(&mut self, root: &[u8; 32]) {
+        let i = (u32::from_le_bytes(self.current_root_index) as usize + 1) % ROOT_HISTORY_SIZE;
+        self.current_root_index = (i as u32).to_le_bytes();
+        self.roots[i] = *root;
+        self.next_index = (self.next_index() + 2).to_le_bytes();
+    }
+
+    /// One of the recent roots. The ring's unused slots are zero; no root is.
+    fn knows_root(&self, root: &[u8; 32]) -> bool {
+        root != &[0; 32] && self.roots.contains(root)
+    }
+}
+```
+
+As in 04, every field is a byte array, so the account's data is the struct. The roots start at
+offset 40, which is where the test will read the empty root. A pool and a nullifier are told apart
+by size, 554 bytes or none.
+</Step>
+
+<Step>
+### Check every account
+
+The `accounts` module is 04's, with three more kinds of account: the token program, a mint, and a
+token account, and the vault built from them. Append:
+
+```rust title="program/src/lib.rs"
+/// What each kind of account must be, one function each.
+mod accounts {
+    use super::*;
+
+    /// An account the program writes to.
+    pub fn writable(account: &AccountView) -> ProgramResult {
+        if !account.is_writable() {
+            return Err(ProgramError::Immutable);
+        }
+        Ok(())
+    }
+
+    /// A payer: a signer, writable.
+    pub fn writable_signer(account: &AccountView) -> ProgramResult {
+        if !account.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        writable(account)
+    }
+
+    /// The system program, which creates the accounts.
+    pub fn system_program(account: &AccountView) -> ProgramResult {
+        if account.address() != &pinocchio_system::ID {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+        Ok(())
+    }
+
+    /// The token program, which holds the vault and moves the tokens.
+    pub fn token_program(account: &AccountView) -> ProgramResult {
+        if account.address() != &pinocchio_token::ID {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+        Ok(())
+    }
+
+    /// An account about to be created: owned by the system program, with no data.
+    /// It may already hold lamports, which anyone can send it; creation tops them
+    /// up to rent exemption.
+    pub fn is_uninitialized(account: &AccountView) -> bool {
+        account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
+    }
+
+    /// An SPL mint: the token program's, a mint's size, initialized.
+    pub fn mint(account: &AccountView) -> ProgramResult {
+        if !Mint::from_account_view(account)?.is_initialized() {
+            return Err(ProgramError::UninitializedAccount);
+        }
+        Ok(())
+    }
+
+    /// A token account of `mint`: writable, the token program's, a token
+    /// account's size, initialized.
+    pub fn token_account(account: &AccountView, mint: &[u8; 32]) -> ProgramResult {
+        writable(account)?;
+        let token = TokenAccount::from_account_view(account)?;
+        if !token.is_initialized() {
+            return Err(ProgramError::UninitializedAccount);
+        }
+        if token.mint().as_array() != mint {
+            return Err(PoolError::WrongMint.into());
+        }
+        Ok(())
+    }
+
+    /// A pool: writable, owned by this program, a pool's size, at the address its
+    /// own mint and stored bump derive.
+    pub fn pool(program_id: &Address, pool: &AccountView) -> ProgramResult {
+        writable(pool)?;
+        if !pool.owned_by(program_id) {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+        let data = pool.try_borrow()?;
+        let state = Pool::from_bytes(&data)?;
+        let address =
+            Address::derive_address(&[POOL_SEED, &state.mint], Some(state.bump), program_id);
+        if pool.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        Ok(())
+    }
+
+    /// The pool's vault: at the address its mint and stored bump derive, a
+    /// writable token account of the pool's mint, owned by the pool.
+    pub fn vault(program_id: &Address, vault: &AccountView, pool: &AccountView) -> ProgramResult {
+        let data = pool.try_borrow()?;
+        let state = Pool::from_bytes(&data)?;
+        let seeds = [VAULT_SEED, &state.mint];
+        let address = Address::derive_address(&seeds, Some(state.vault_bump), program_id);
+        if vault.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        token_account(vault, &state.mint)?;
+        if TokenAccount::from_account_view(vault)?.owner() != pool.address() {
+            return Err(ProgramError::IncorrectAuthority);
+        }
+        Ok(())
+    }
+}
+```
+
+`writable`, `writable_signer`, `system_program`, `is_uninitialized` and `pool` prevent what they
+did in 04. The new ones:
+
+- **`token_program`**: the token CPIs call the token program by its address, so a fake couldn't
+  be called in its place; the check names a wrong account list first, with `IncorrectProgramId`.
+- **`mint`**: `Mint::from_account_view` refuses an account that isn't the token program's or isn't
+  a mint's size, so no one can open a pool for a fake mint.
+- **`token_account`**: an initialized token account of the pool's mint. The token program would
+  refuse a transfer between two mints anyway; checking first fails with `WrongMint` before
+  verification spends its compute units.
+- **`vault`**: at its PDA, a token account of the pool's mint, owned by the pool. Without it, a
+  depositor could name a token account of their own as the vault: the tokens would go back to
+  them, and their new note would be backed by nothing.
+</Step>
+
+<Step>
+### Create a pool
+
+Append `initialize`:
+
+```rust title="program/src/lib.rs"
+/// Create the pool for one SPL mint, with the empty tree's root, and its vault.
+fn initialize(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+    let [pool, vault, mint, authority, token, system, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    accounts::writable_signer(authority)?;
+    accounts::token_program(token)?;
+    accounts::system_program(system)?;
+    accounts::mint(mint)?;
+    accounts::writable(pool)?;
+    accounts::writable(vault)?;
+    // One pool and one vault per mint, each at its canonical bump.
+    let mint_key = mint.address().as_array();
+    let (address, bump) = Address::find_program_address(&[POOL_SEED, mint_key], program_id);
+    let (vault_address, vault_bump) =
+        Address::find_program_address(&[VAULT_SEED, mint_key], program_id);
+    if pool.address() != &address || vault.address() != &vault_address {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if !accounts::is_uninitialized(pool) || !accounts::is_uninitialized(vault) {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+
+    let bump = [bump];
+    let seeds = [
+        Seed::from(POOL_SEED),
+        Seed::from(mint_key),
+        Seed::from(&bump),
+    ];
+    pinocchio_system::create_account_with_minimum_balance_signed(
+        pool,
+        Pool::LEN,
+        program_id,
+        authority,
+        None,
+        &[Signer::from(&seeds)],
+    )?;
+    {
+        let mut data = pool.try_borrow_mut()?;
+        let state = Pool::from_bytes_mut(&mut data)?; // created zeroed: the ring is empty
+        state.mint = *mint_key;
+        state.roots[0] = EMPTY_ROOT;
+        state.bump = bump[0];
+        state.vault_bump = vault_bump;
+    }
+
+    // The vault: a token account of `mint` at its PDA, owned by the pool.
+    let vault_bump = [vault_bump];
+    let seeds = [
+        Seed::from(VAULT_SEED),
+        Seed::from(mint_key),
+        Seed::from(&vault_bump),
+    ];
+    pinocchio_system::create_account_with_minimum_balance_signed(
+        vault,
+        TokenAccount::LEN,
+        &pinocchio_token::ID,
+        authority,
+        None,
+        &[Signer::from(&seeds)],
+    )?;
+    InitializeAccount3::new(vault, mint, pool.address()).invoke()
+}
+```
+
+The pool is 04's: one per mint, at its canonical bump, created zeroed by `pinocchio-system` with
+only the first root set. The vault is 03's: a token account at a PDA, created by the program and
+initialized with `InitializeAccount3`, with the pool's PDA as its owner, so only this program,
+signing with the pool's seeds, can move its tokens. The pool stores both canonical bumps, so
+`accounts::pool` and `accounts::vault` derive the two addresses without searching again.
+</Step>
+
+<Step>
+### Transact
+
+Append `transact`:
+
+```rust title="program/src/lib.rs"
+/// One JoinSplit: spend 2 notes, create 2, with `vpub_in` entering the pool,
+/// `vpub_out` leaving it and `fee` paid to the relayer.
+fn transact(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &TransactArgs,
+    memos: &[&[u8]; 2],
+) -> ProgramResult {
+    let [
+        pool,
+        vault,
+        nullifier0,
+        nullifier1,
+        user,
+        user_token,
+        recipient_token,
+        relayer_token,
+        token,
+        system,
+        ..,
+    ] = accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    accounts::pool(program_id, pool)?;
+    accounts::vault(program_id, vault, pool)?;
+    accounts::writable_signer(user)?;
+    accounts::token_program(token)?;
+    accounts::system_program(system)?;
+    let (mint, bump, index) = {
+        let data = pool.try_borrow()?;
+        let state = Pool::from_bytes(&data)?;
+        (state.mint, state.bump, state.next_index())
+    };
+    // A token account the transaction doesn't use is passed as this program's
+    // address, and the proof binds that address in its place.
+    let optional = |account: &AccountView| -> Result<Option<AccountView>, ProgramError> {
+        if account.address() == program_id {
+            return Ok(None);
+        }
+        accounts::token_account(account, &mint)?;
+        Ok(Some(*account))
+    };
+    let user_token = optional(user_token)?;
+    let recipient_token = optional(recipient_token)?;
+    let relayer_token = optional(relayer_token)?;
+
+    // Each nullifier's account, at its canonical bump, per mint, not yet created.
+    let mut bumps = [0u8; 2];
+    for (i, nullifier) in [&*nullifier0, &*nullifier1].into_iter().enumerate() {
+        accounts::writable(nullifier)?;
+        let seeds = [NULLIFIER_SEED, &mint, &args.nf[i]];
+        let (address, bump) = Address::find_program_address(&seeds, program_id);
+        if nullifier.address() != &address {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if !accounts::is_uninitialized(nullifier) {
+            return Err(PoolError::NullifierSpent.into());
+        }
+        bumps[i] = bump;
+    }
+    if u64::from(index) + 2 > 1 << TREE_HEIGHT {
+        return Err(PoolError::TreeFull.into());
+    }
+    if !proves(
+        pool,
+        args,
+        memos,
+        &recipient_token,
+        &relayer_token,
+        program_id,
+    )? {
+        return Err(PoolError::InvalidProof.into());
+    }
+
+    // Spend the notes: create each nullifier's account, empty, paid by the user.
+    for (i, nullifier) in [nullifier0, nullifier1].into_iter().enumerate() {
+        let bump = [bumps[i]];
+        let seeds = [
+            Seed::from(NULLIFIER_SEED),
+            Seed::from(&mint),
+            Seed::from(&args.nf[i]),
+            Seed::from(&bump),
+        ];
+        pinocchio_system::create_account_with_minimum_balance_signed(
+            nullifier,
+            0,
+            program_id,
+            user,
+            None,
+            &[Signer::from(&seeds)],
+        )?;
+    }
+
+    // Value entering the pool: user → vault, signed by the user.
+    let vpub_in = u64::from_le_bytes(args.vpub_in);
+    if vpub_in > 0 {
+        let from = user_token.ok_or(PoolError::NoSource)?;
+        Transfer::new(&from, vault, user, vpub_in).invoke()?;
+    }
+
+    // Value leaving it, signed by the pool PDA: `vpub_out` to the recipient, `fee`
+    // to the relayer.
+    let bump = [bump];
+    let seeds = [Seed::from(POOL_SEED), Seed::from(&mint), Seed::from(&bump)];
+    let payouts = [
+        (args.vpub_out, recipient_token, PoolError::NoRecipient),
+        (args.fee, relayer_token, PoolError::NoRelayer),
+    ];
+    for (amount, to, missing) in payouts {
+        let amount = u64::from_le_bytes(amount);
+        if amount > 0 {
+            let to = to.ok_or(missing)?;
+            Transfer::new(vault, &to, pool, amount).invoke_signed(&[Signer::from(&seeds)])?;
+        }
+    }
+
+    // The chain never hashes the tree: it takes the new root the proof checked.
+    Pool::from_bytes_mut(&mut pool.try_borrow_mut()?)?.push_root(&args.new_root);
+    // What a wallet scans for: each new note's leaf index, commitment and memo.
+    for (i, (commitment, memo)) in args.cm_out.iter().zip(memos).enumerate() {
+        let leaf_index = (index + i as u32).to_le_bytes();
+        log_data(&[&leaf_index, commitment, memo]);
+    }
+    Ok(())
+}
+```
+
+Every check runs before anything changes. On top of `accounts`:
+
+- **Each nullifier is at its canonical PDA.** `find_program_address` returns the one bump; another
+  would be a second account for the same nullifier, and a second spend of the note.
+- **Each nullifier is not yet created**, or the note is spent, with `NullifierSpent`. As in 04, it
+  may already hold lamports, so no one can block a spend by funding its nullifier's address.
+- **A token account the transaction doesn't use is the program's address.** That's how a client
+  leaves an optional account out. Every one it does use passes `accounts::token_account`.
+
+Which accounts the payouts go to isn't checked here: the proof binds the recipient and the relayer,
+so `verify` checks them. Then the nullifiers are burned, paid for by `user`, and the value moves. A
+deposit moves `vpub_in` from the user's token account with a plain `Transfer`, signed by the user. A
+withdrawal and a fee move out of the vault with `invoke_signed`, signed by the pool PDA's seeds, as
+03's claim pays out. Last, the pool takes the new root the proof checked, and `log_data` publishes
+each new note's leaf index, commitment and encrypted memo as `Program data:`, for wallets to scan.
+</Step>
+
+<Step>
+### Assemble the public inputs
+
+Append `proves`, which builds the 19 public inputs and makes the one typed `verify` call:
+
+```rust title="program/src/lib.rs"
+/// Does the proof verify against the circuit's public `Transaction`, assembled
+/// here? It checks `root` against the pool's ring first. In its own stack frame:
+/// the inputs and the pairing check's locals don't fit beside `transact`'s.
+#[inline(never)]
+fn proves(
+    pool: &AccountView,
+    args: &TransactArgs,
+    memos: &[&[u8]; 2],
+    recipient: &Option<AccountView>,
+    relayer: &Option<AccountView>,
+    program_id: &Address,
+) -> Result<bool, ProgramError> {
+    let data = pool.try_borrow()?;
+    let state = Pool::from_bytes(&data)?;
+    if !state.knows_root(&args.root) {
+        return Err(PoolError::UnknownRoot.into());
+    }
+    // A left-out recipient or relayer is the program's address.
+    let address =
+        |a: &Option<AccountView>| *a.as_ref().map_or(program_id, |a| a.address()).as_array();
+    let [asset_hi, asset_lo] = halves(&state.mint);
+    let [recipient_hi, recipient_lo] = halves(&address(recipient));
+    let [relayer_hi, relayer_lo] = halves(&address(relayer));
+    let [memo0_hi, memo0_lo] = halves(&hash(memos[0]).to_bytes());
+    let [memo1_hi, memo1_lo] = halves(&hash(memos[1]).to_bytes());
+    let public_inputs: [[u8; 32]; NUM_PUBLIC_INPUTS] = [
+        args.root,
+        asset_hi,
+        asset_lo,
+        args.nf[0],
+        args.nf[1],
+        args.cm_out[0],
+        args.cm_out[1],
+        *state.current_root(),
+        args.new_root,
+        field_from_u64(u64::from(state.next_index())),
+        flow(args),
+        recipient_hi,
+        recipient_lo,
+        relayer_hi,
+        relayer_lo,
+        memo0_hi,
+        memo0_lo,
+        memo1_hi,
+        memo1_lo,
+    ];
+    Ok(verify(&Proof::from_le_bytes(&args.proof), &public_inputs))
+}
+
+/// A u64 as a 32-byte little-endian field element.
+fn field_from_u64(x: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..8].copy_from_slice(&x.to_le_bytes());
+    out
+}
+
+/// `Flow`'s three amounts packed into one field element, as xark packs them:
+/// `vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`.
+fn flow(args: &TransactArgs) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..8].copy_from_slice(&args.vpub_in);
+    out[8..16].copy_from_slice(&args.vpub_out);
+    out[16..24].copy_from_slice(&args.fee);
+    out
+}
+
+/// 32 bytes (an address, a hash) as the circuit's `Hash`: `[hi, lo]`, each
+/// 16-byte half read as a big-endian integer, as 32-byte little-endian field
+/// elements.
+fn halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
+    let half = |b: &[u8]| {
+        let mut out = [0u8; 32];
+        out[..16].copy_from_slice(b);
+        out[..16].reverse();
+        out
+    };
+    [half(&bytes[..16]), half(&bytes[16..])]
+}
+```
+
+The pattern is 04's: the program never parses the proof's claims. It assembles the 19 public
+inputs itself, in the circuit's order, from its own state (the mint, the current root, the next
+index) and from the transaction (the nullifiers, the commitments, the amounts, the token accounts
+and the memos' SHA-256). `NUM_PUBLIC_INPUTS` comes from the verifier crate, so a wrong count
+doesn't compile. A proof made for other accounts or other memos doesn't verify. See
+[Where the public inputs come from](/docs/guides/how-verification-works#where-the-public-inputs-come-from).
+
+The memos stay off-circuit: the program hashes each one and the circuit only binds the hash, so
+encryption costs no constraints. `proves` is `#[inline(never)]`, so the 19 inputs and the pairing check's
+locals get a stack frame of their own rather than crowding `transact`'s.
+</Step>
+
+<Step>
+### Name the errors
+
+Append the errors and the two logs, as in 04:
+
+```rust title="program/src/lib.rs"
+/// The program's own errors, as custom error codes from 6000.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum PoolError {
+    InvalidProof = 6000,
+    UnknownRoot,
+    TreeFull,
+    NullifierSpent,
+    NoSource,
+    NoRecipient,
+    NoRelayer,
+    WrongMint,
+}
+
+impl From<PoolError> for ProgramError {
+    fn from(error: PoolError) -> Self {
+        ProgramError::Custom(error as u32)
+    }
+}
+
+impl PoolError {
+    /// What the program logs for error `code`: its name, then what it means.
+    fn message(code: u32) -> &'static str {
+        const MESSAGES: [&str; 8] = [
+            "InvalidProof: invalid proof",
+            "UnknownRoot: unknown or stale merkle root",
+            "TreeFull: tree is full",
+            "NullifierSpent: nullifier already spent",
+            "NoSource: a deposit (vpub_in > 0) needs user_token",
+            "NoRecipient: a withdrawal (vpub_out > 0) needs recipient_token",
+            "NoRelayer: a fee (fee > 0) needs relayer_token",
+            "WrongMint: a token account of another mint than the pool's",
+        ];
+        let index = code.wrapping_sub(PoolError::InvalidProof as u32) as usize;
+        MESSAGES.get(index).copied().unwrap_or("unknown error")
+    }
+}
+
+/// `Program log: <message>`.
+fn log(message: &str) {
+    #[cfg(target_os = "solana")]
+    // SAFETY: the pointer and length are a valid `&str`'s.
+    unsafe {
+        pinocchio::syscalls::sol_log_(message.as_ptr(), message.len() as u64)
+    };
+    #[cfg(not(target_os = "solana"))]
+    let _ = message;
+}
+
+/// `Program data: <base64> <base64> ..`, one per slice.
+fn log_data(data: &[&[u8]]) {
+    #[cfg(target_os = "solana")]
+    // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
+    unsafe {
+        pinocchio::syscalls::sol_log_data(data.as_ptr().cast(), data.len() as u64)
+    };
+    #[cfg(not(target_os = "solana"))]
+    let _ = data;
+}
+```
+
+Account checks fail with the runtime's standard errors. The program's own eight are custom codes
+from 6000, and the entrypoint logs each one's name, so the test can match `InvalidProof` and
+`NullifierSpent`.
+</Step>
+
+<Step>
+### Build the program
+
+```console
+$ cd program
+$ cargo build-sbf --arch v3
+...
+   Compiling transact-verifier v0.1.0 (.../transact/transact-verifier)
+   Compiling solana-instruction-view v2.1.0
+   Compiling pinocchio v0.11.2
+   Compiling pinocchio-token v0.7.0
+   Compiling pinocchio-system v0.6.1
+   Compiling shielded-transfer v0.1.0 (.../program)
+    Finished `release` profile [optimized] target(s) in 0.98s
+```
+
+The program is at `program/target/deploy/shielded_transfer.so`.
+</Step>
+
+<Step>
+### Set up the app
+
+`xark client` already made `app/`. Set it up as in 01, with two more packages: the SPL Token
+program's client, as in 03, to make a mint and token accounts, and the Compute Budget program's, to
+raise a transaction's compute limit.
+
+```sh
+cd ../app
+npm init -y
+npm pkg set type=module
+npm install @blueshift-gg/xark@^0.3.0 vitest @solana/kit litesvm @solana-program/token @solana-program/compute-budget
+```
+</Step>
+
+<Step>
+### Write the wallet
+
+Create `app/shielded-transfer.test.ts`. Start with the prover and 04's helpers, with one change:
+`send` takes several instructions, so a transaction can carry a compute budget.
+
+```ts title="app/shielded-transfer.test.ts"
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import {
+  AccountRole, address, appendTransactionMessageInstructions, createTransactionMessage, generateKeyPairSigner,
+  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
+  type Address, type Instruction, type KeyPairSigner,
+} from "@solana/kit";
+import { getSetComputeUnitLimitInstruction } from "@solana-program/compute-budget";
+import {
+  AccountState, TOKEN_PROGRAM_ADDRESS, getMintEncoder, getMintSize, getTokenDecoder, getTokenEncoder, getTokenSize,
+} from "@solana-program/token";
+import { createPool, type WorkerPool } from "@blueshift-gg/xark/pool";
+import { FailedTransactionMetadata, LiteSVM } from "litesvm";
+import { afterAll, beforeAll, expect, test } from "vitest";
+import {
+  Field, Key, Path, ShieldedTransact, Transaction,
+  type Note, type PathValue, type ShieldedTransactProver, type Spend,
+} from "./shielded_transact";
+
+// What `xark build`, `xark setup` and `xark client` wrote.
+const out = "../transact/target/xark/transact/";
+const read = (file: string) => new Uint8Array(readFileSync(out + file));
+
+// The prover runs on a pool of worker threads, one per core.
+let prover: ShieldedTransactProver;
+let workers: WorkerPool;
+beforeAll(async () => {
+  workers = await createPool();
+  prover = await ShieldedTransact.prover(
+    { circuit: read("circuit.xbc"), provingKey: read("pk.bin"), sources: readFileSync(out + "sources.json", "utf8"), client: read("client.wasm") },
+    { digest: ShieldedTransact.digest, pool: workers },
+  );
+}, 60_000);
+afterAll(() => workers.terminate());
+
+// Send `instructions` in one transaction, paid by `payer`. Returns the compute
+// units used, or throws with the program's logs.
+async function send(svm: LiteSVM, payer: KeyPairSigner, ...instructions: Instruction[]) {
+  const tx = await pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayerSigner(payer, m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
+    (m) => appendTransactionMessageInstructions(instructions, m),
+    (m) => signTransactionMessageWithSigners(m),
+  );
+  const result = svm.sendTransaction(tx);
+  svm.expireBlockhash();
+  if (result instanceof FailedTransactionMetadata) {
+    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
+  }
+  return result.computeUnitsConsumed();
+}
+
+// The program's instruction tags.
+const INITIALIZE = 0;
+const TRANSACT = 1;
+
+// An instruction's data: its tag, then its arguments' bytes.
+const instructionData = (tag: number, ...args: Uint8Array[]) => new Uint8Array(Buffer.concat([Uint8Array.of(tag), ...args]));
+
+// A u64, little-endian, as the program reads it.
+function u64le(x: bigint) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, x, true);
+  return out;
+}
+
+const program = address("CUCcJJBRbK6tK4nPP2zgmvdYbKWSCGGVdRegtJ2GPJtF");
+const system = address("11111111111111111111111111111111");
+const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
+const random = () => new Field(crypto.getRandomValues(new Uint8Array(31)));
+const signer = (s: KeyPairSigner) => ({ address: s.address, role: AccountRole.WRITABLE_SIGNER, signer: s });
+const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
+const readonly = (a: Address) => ({ address: a, role: AccountRole.READONLY });
+// A memo as the program reads it: its length as a `u32`, then its bytes.
+const vec = (b: Uint8Array) => new Uint8Array([...new Uint8Array(new Uint32Array([b.length]).buffer), ...b]);
+const sha256 = (b: Uint8Array) => new Uint8Array(createHash("sha256").update(b).digest());
+// A transact uses 168k to 192k compute units, close to the default limit of 200k.
+const budget = getSetComputeUnitLimitInstruction({ units: 250_000 });
+```
+
+The program takes its own address from the runtime, so any address works; the test loads it at a
+fixed one.
+
+Then the wallet itself. Append:
+
+```ts title="app/shielded-transfer.test.ts"
+/** A new keypair holding `sol` SOL. */
+async function funded(svm: LiteSVM, sol = 10n) {
+  const s = await generateKeyPairSigner();
+  svm.airdrop(s.address, lamports(sol * 1_000_000_000n));
+  return s;
+}
+
+/** A note a wallet holds: enough to spend it. */
+interface Owned { note: Note; diversifier: Field; path: PathValue }
+
+/** A fresh mint and its pool, and what the wallets know of its tree. */
+async function pool() {
+  const svm = new LiteSVM();
+  svm.addProgramFromFile(program, "../program/target/deploy/shielded_transfer.so");
+  const payer = await funded(svm);
+  const mint = (await generateKeyPairSigner()).address;
+  const mintData = getMintEncoder().encode({ mintAuthority: payer.address, supply: 1_000n, decimals: 0, isInitialized: true, freezeAuthority: null });
+  svm.setAccount({ address: mint, data: new Uint8Array(mintData), executable: false, lamports: lamports(svm.minimumBalanceForRentExemption(BigInt(getMintSize()))), programAddress: TOKEN_PROGRAM_ADDRESS, space: BigInt(getMintSize()) });
+  const [poolAddress] = await getProgramDerivedAddress({ programAddress: program, seeds: ["pool", bytes(mint)] });
+  const [vault] = await getProgramDerivedAddress({ programAddress: program, seeds: ["vault", bytes(mint)] });
+  await send(svm, payer, {
+    programAddress: program,
+    accounts: [writable(poolAddress), writable(vault), readonly(mint), signer(payer), readonly(TOKEN_PROGRAM_ADDRESS), readonly(system)],
+    data: instructionData(INITIALIZE),
+  });
+  // The program's empty root, at offset 40 of the pool's data, is the circuit's.
+  const tip = Path.first();
+  const account = svm.getAccount(poolAddress);
+  expect(account.exists && account.data.subarray(40, 72)).toEqual(tip.treeRoot().toBytes());
+  return { svm, mint, poolAddress, vault, tip, held: [] as Owned[] };
+}
+type Pool = Awaited<ReturnType<typeof pool>>;
+
+/** A token account of `mint` for `owner`, holding `amount`. */
+async function tokenAccount(svm: LiteSVM, mint: Address, owner: Address, amount: bigint) {
+  const at = (await generateKeyPairSigner()).address;
+  const data = getTokenEncoder().encode({ mint, owner, amount, delegate: null, state: AccountState.Initialized, isNative: null, delegatedAmount: 0, closeAuthority: null });
+  svm.setAccount({ address: at, data: new Uint8Array(data), executable: false, lamports: lamports(svm.minimumBalanceForRentExemption(BigInt(getTokenSize()))), programAddress: TOKEN_PROGRAM_ADDRESS, space: BigInt(getTokenSize()) });
+  return at;
+}
+const balance = (svm: LiteSVM, at: Address) => {
+  const account = svm.getAccount(at);
+  return account.exists ? getTokenDecoder().decode(account.data).amount : 0n;
+};
+
+/** Spend nothing: a dummy, worth 0. */
+const dummy = (key: Key): Spend => {
+  const diversifier = random();
+  return { note: { value: 0, owner: Key.address(key, diversifier), rho: random(), rseed: random() }, diversifier, path: Path.first(), real: false };
+};
+const spend = ({ note, diversifier, path }: Owned): Spend => ({ note, diversifier, path, real: true });
+
+/** A new note of `value` for `owner`, at a fresh address of theirs. */
+type Output = { note: Note; diversifier: Field };
+const pay = (owner: Key, value: bigint): Output => {
+  const diversifier = random();
+  return { diversifier, note: { value, owner: Key.address(owner, diversifier), rho: random(), rseed: random() } };
+};
+
+/** What moves publicly, and between which token accounts. */
+interface Moves { vpubIn?: bigint; vpubOut?: bigint; fee?: bigint; userToken?: Address; recipient?: Address; relayerToken?: Address }
+
+/**
+ * Prove one transaction: `key` spends `spends` and creates `outputs`. `instruction`
+ * is what to send; `landed` records the new notes in every wallet once it has.
+ */
+async function prepare(p: Pool, key: Key, spends: [Spend, Spend], outputs: [Output, Output], moves: Moves = {}) {
+  const { vpubIn = 0n, vpubOut = 0n, fee = 0n } = moves;
+  const memos = outputs.map(() => crypto.getRandomValues(new Uint8Array(48))); // each note, encrypted to its owner
+  const flow = { vpubIn, vpubOut, fee, recipient: bytes(moves.recipient ?? program), relayer: bytes(moves.relayerToken ?? program) };
+  const notes = [outputs[0].note, outputs[1].note] as const;
+  // The public statement, computed by the circuit's own Rust.
+  const tx = Transaction.of(key, spends, notes, p.tip, bytes(p.mint), flow, [sha256(memos[0]), sha256(memos[1])]);
+  const proof = prover.prove({ key, spends, outputs: notes, tip: p.tip, tx });
+  const [n0, n1] = await Promise.all(tx.nullifiers.map((n) => getProgramDerivedAddress({ programAddress: program, seeds: ["nullifier", bytes(p.mint), n.toBytes()] })));
+  const optional = (a?: Address) => (a ? writable(a) : readonly(program)); // the program's "none"
+
+  return {
+    instruction: (user: KeyPairSigner, accounts: Moves = moves): Instruction => ({
+      programAddress: program,
+      accounts: [
+        writable(p.poolAddress), writable(p.vault), writable(n0[0]), writable(n1[0]), signer(user),
+        optional(accounts.userToken), optional(accounts.recipient), optional(accounts.relayerToken),
+        readonly(TOKEN_PROGRAM_ADDRESS), readonly(system),
+      ],
+      data: instructionData(
+        TRANSACT, proof.toBytes(), tx.root.toBytes(), ...tx.nullifiers.map((n) => n.toBytes()), ...tx.commitments.map((c) => c.toBytes()),
+        tx.newRoot.toBytes(), u64le(vpubIn), u64le(vpubOut), u64le(fee), vec(memos[0]), vec(memos[1]),
+      ),
+    }),
+    landed(): Owned[] {
+      const created: Owned[] = [];
+      for (const [i, leaf] of tx.commitments.entries()) {
+        for (const held of [...p.held, ...created]) held.path = held.path.update(p.tip, leaf);
+        created.push({ ...outputs[i], path: p.tip });
+        p.tip = p.tip.next(leaf);
+      }
+      p.held.push(...created);
+      return created;
+    },
+  };
+}
+
+/** Prove and send one transaction, signed by `user`; returns the new notes. */
+async function transact(p: Pool, user: KeyPairSigner, key: Key, spends: [Spend, Spend], outputs: [Output, Output], moves: Moves = {}) {
+  const t = await prepare(p, key, spends, outputs, moves);
+  const units = await send(p.svm, user, budget, t.instruction(user));
+  console.log(`transact verified onchain in ${units} CU`);
+  return t.landed();
+}
+```
+
+A few things to notice:
+
+- **The wallet never re-implements the circuit.** `Key.address`, `Transaction.of`, `Path.first`,
+  `path.update` and `path.next` are the Rust you wrote, run from TypeScript.
+- **The account lists are the program's.** `initialize` takes six accounts and `transact` ten, in
+  the order the program destructures them, and the data is the tag, then the arguments in the
+  order `TransactArgs` lays them out.
+- **Every note gets a fresh address.** `pay` picks a random diversifier each time, so Bob's notes
+  don't share an owner field anyone could link.
+- **The memos are stand-ins.** A real wallet encrypts each note's value, `rho` and `rseed` to its
+  owner; here they're random bytes. The proof binds their SHA-256 either way, and the program
+  recomputes it.
+- **An unused token account is the program's address.** The program reads it as none, and the
+  proof binds the same address in its place.
+- **The mint and the token accounts are written straight into LiteSVM** with `setAccount`, rather
+  than created through the token program: a test doesn't need the transactions that make them.
+- **The prover proves on a worker pool** from `@blueshift-gg/xark/pool`, which spreads each proof
+  over your cores. See [Prove on several threads](/docs/guides/typescript-clients#prove-on-several-threads).
+</Step>
+
+<Step>
+### Write the end-to-end test
+
+Append the tests to `app/shielded-transfer.test.ts`:
+
+```ts title="app/shielded-transfer.test.ts"
+test("deposit, pay privately, withdraw, through a relayer", async () => {
+  const p = await pool();
+  const [alice, bob] = [{ secret: random() }, { secret: random() }];
+  const aliceSol = await funded(p.svm);
+  const aliceToken = await tokenAccount(p.svm, p.mint, aliceSol.address, 150n);
+  // Bob holds no SOL: a relayer submits for him, for a fee in the token.
+  const bobToken = await tokenAccount(p.svm, p.mint, (await generateKeyPairSigner()).address, 0n);
+  const relayer = await funded(p.svm);
+  const relayerToken = await tokenAccount(p.svm, p.mint, relayer.address, 0n);
+
+  // 1. Alice shields 150.
+  const [deposited] = await transact(p, aliceSol, alice, [dummy(alice), dummy(alice)], [pay(alice, 150n), pay(alice, 0n)], { vpubIn: 150n, userToken: aliceToken });
+  expect(balance(p.svm, p.vault)).toBe(150n);
+
+  // 2. She pays Bob 100 and keeps 45, through the relayer for 5. No wallet of hers signs.
+  const [toBob] = await transact(p, relayer, alice, [spend(deposited), dummy(alice)], [pay(bob, 100n), pay(alice, 45n)], { fee: 5n, relayerToken });
+  expect(balance(p.svm, relayerToken)).toBe(5n);
+  expect(balance(p.svm, p.vault)).toBe(145n);
+
+  // 3. Bob withdraws 95 to his token account, 5 to the relayer. Nobody can redirect either.
+  const withdrawal = await prepare(p, bob, [spend(toBob), dummy(bob)], [pay(bob, 0n), pay(bob, 0n)], { vpubOut: 95n, fee: 5n, recipient: bobToken, relayerToken });
+  const thief = await funded(p.svm);
+  const elsewhere = await tokenAccount(p.svm, p.mint, thief.address, 0n);
+  await expect(send(p.svm, thief, budget, withdrawal.instruction(thief, { recipient: elsewhere, relayerToken }))).rejects.toThrow(/InvalidProof/);
+  await expect(send(p.svm, thief, budget, withdrawal.instruction(thief, { recipient: bobToken, relayerToken: elsewhere }))).rejects.toThrow(/InvalidProof/);
+  const units = await send(p.svm, relayer, budget, withdrawal.instruction(relayer));
+  console.log(`withdrawal verified onchain in ${units} CU`);
+  withdrawal.landed();
+  expect(balance(p.svm, bobToken)).toBe(95n);
+  expect(balance(p.svm, p.vault)).toBe(45n); // Alice's change, still shielded
+
+  // Bob's note is spent: its nullifier account exists.
+  await expect(send(p.svm, relayer, budget, withdrawal.instruction(relayer))).rejects.toThrow(/NullifierSpent/);
+}, 60_000);
+
+test("only a note's owner can spend it", async () => {
+  const p = await pool();
+  const [alice, mallory] = [{ secret: random() }, { secret: random() }];
+  const user = await funded(p.svm);
+  const token = await tokenAccount(p.svm, p.mint, user.address, 150n);
+  const [note] = await transact(p, user, alice, [dummy(alice), dummy(alice)], [pay(alice, 150n), pay(alice, 0n)], { vpubIn: 150n, userToken: token });
+  await expect(transact(p, user, mallory, [spend(note), dummy(mallory)], [pay(mallory, 150n), pay(mallory, 0n)])).rejects.toThrow(/key\.address\(spend\.diversifier\)/);
+}, 60_000);
+```
+
+Look at who signs what. Alice's SOL wallet signs her deposit, because tokens leave her account.
+The relayer signs her payment and Bob's withdrawal, so neither Alice nor Bob appears beside them.
+The relayer can't cheat for it: the withdrawal's proof names Bob's token account and the relayer's,
+so a thief who redirects either one gets `InvalidProof`. A second withdrawal of the same note fails
+with `NullifierSpent`, because its nullifier account already exists. And when Mallory tries to
+spend Alice's note, the client refuses to prove, naming the circuit line that fails.
+</Step>
+
+<Step>
+### Run it
+
+From `app/`:
+
+```console
+$ npx vitest run --reporter=verbose
+stdout | shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
+transact verified onchain in 173117 CU
+...
+transact verified onchain in 171242 CU
+...
+withdrawal verified onchain in 180406 CU
+
+ ✓ shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 4372ms
+stdout | shielded-transfer.test.ts > only a note's owner can spend it
+transact verified onchain in 171617 CU
+
+ ✓ shielded-transfer.test.ts > only a note's owner can spend it 2153ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+Four transactions were proved, each in about a second on the worker pool, and verified by your
+program in 171,000 to 181,000 compute units, almost all of it the proof's verification. The number
+varies with the public inputs, and by 1,500 for each extra try `find_program_address` takes to find
+a nullifier's bump: across runs, from 168,000 to 192,000, close to the default limit of 200,000, so
+each transaction carries `budget`, a limit of 250,000. The vault ends at 45: Alice's change, still
+shielded, with nothing onchain saying it's hers. Mallory's spend was refused before any proof was
+made.
+</Step>
+
+</Steps>
+
+## What you built
+
+A shielded pool for any SPL token. Alice deposited, paid Bob privately and kept her change; Bob
+withdrew without ever holding SOL. Onchain there was a deposit into the vault, a withdrawal
+out of it, two fees and three transactions of commitments and nullifiers, with no link between
+the deposit and the withdrawal.
+
+The pieces were the ones from earlier tutorials, combined. A note is 02's salted commitment,
+carrying a value. A spend is 03's Merkle membership with 04's nullifier. The vault is 03's. And
+01's range proof is what makes it a payment system: every amount is a range-checked `u64`, so the
+balance equation that ties the spends to the outputs can't wrap around the field and mint money.
+The public inputs let a relayer submit your transaction without being able to change it.
+
+That's the whole arc: range proofs make comparisons and sums mean what they say, commitments hide
+values while fixing them, Merkle trees prove membership in a set without naming the member, and
+together they make private payments.
+
+This is a teaching version of a deployed system. Before any real use, it would still need:
+
+- real memo encryption (for example x25519 with ChaCha20-Poly1305) and a wallet that
+  trial-decrypts memos to find its notes;
+- a way to order transactions: each proof binds the current root and append index, so when two
+  land at once, the second must be proved again;
+- an audit, legal review, and keys from a ceremony.
+
+<Callout type="warn" title="Before you deploy">
+`xark setup` made a single-party key: anyone who kept its randomness could forge proofs and drain
+the vault. A pool that holds value needs a key from a multi-party ceremony. See
+[The trusted setup](/docs/trust/trusted-setup).
+</Callout>
+
+The finished example is
+[05-shielded-transfer](https://github.com/blueshift-gg/xark-examples/tree/main/05-shielded-transfer)
+in xark-examples. It adds npm scripts that run every step, a demo proof bundled as the verifier
+crate's self-test, host tests that feed each account check the accounts it exists to refuse, and
+more refusals in its end-to-end test.
+
+<Cards>
+  <Card title="The trusted setup" href="/docs/trust/trusted-setup" description="Run a multi-party ceremony for keys that hold value." />
+  <Card title="Hashes" href="/docs/gadgets/hashes" description="Poseidon2, SHA-256 and the rest: what each costs in a circuit." />
+  <Card title="Commitments and Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle and Pedersen, the gadgets under every shielded pool." />
+  <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="Pin the circuit and key, prove on threads, and handle errors in an app." />
+</Cards>

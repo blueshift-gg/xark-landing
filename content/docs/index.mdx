@@ -32,8 +32,9 @@ fn only_a_square_root_proves() {
 <Cards>
   <Card title="Quickstart" href="/docs/quickstart" description="From cargo install to a Solana verifier crate, in five steps." />
   <Card title="Gadgets" href="/docs/gadgets" description="Hashes, signatures, curves, and AES — the crates you add with cargo." />
+  <Card title="Tutorials" href="/docs/tutorials/01-over-9000" description="Five apps, one story: range proofs (Over 9000), put to work in zKYC, Merkle trees (Token claim), a shielded pool, and shielded transfers." />
   <Card title="New to zero-knowledge?" href="/docs/learn-zk/01-what-is-a-zk-proof" description="The mental model, from zero — no maths." />
-  <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the on-chain byte layout." />
+  <Card title="How verification works" href="/docs/guides/how-verification-works" description="The alt_bn128 pairing check and the onchain byte layout." />
   <Card title="The Rust subset xark accepts" href="/docs/reference/supported-subset" description="What lowers to a circuit — and what's rejected before you spend a setup." />
 </Cards>
 
@@ -53,12 +54,12 @@ fn only_a_square_root_proves() {
   [MPC ceremony](/docs/trust/trusted-setup) with Schnorr proofs of contribution and δ-consistency
   checks.
 - **Machine-checked where it counts.** The core gadgets carry [Lean 4 proofs](/docs/trust/formal-proofs-and-audit)
-  over the constraints they emit, and the on-chain verifier is checked with Kani.
-- **A tiny, `no_std` on-chain verifier** with a [reproducible build](/docs/trust/reproducible-builds)
+  over the constraints they emit, and the onchain verifier is checked with Kani.
+- **A tiny, `no_std` onchain verifier** with a [reproducible build](/docs/trust/reproducible-builds)
   you can hash-match against what's actually deployed.
 
 <Callout type="warn" title="Status: experimental">
-xark is **experimental and not externally audited**, and its on-chain verifier has never been
+xark is **experimental and not externally audited**, and its onchain verifier has never been
 deployed to mainnet. The formal proofs and test suite are real, but they are not a substitute for an
 external audit. Don't hold value on it yet.
 </Callout>
