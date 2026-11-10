@@ -7,6 +7,11 @@ import { TypeTable } from "fumadocs-ui/components/type-table";
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { MDXComponents } from "mdx/types";
 
+import { DaysRange } from "./widgets/DaysRange";
+import { IntegerWidths } from "./widgets/IntegerWidths";
+import { Packing } from "./widgets/Packing";
+import { WhoSeesWhat } from "./widgets/WhoSeesWhat";
+
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
@@ -21,6 +26,10 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Tab,
     Tabs,
     TypeTable,
+    DaysRange,
+    IntegerWidths,
+    Packing,
+    WhoSeesWhat,
     ...components,
   };
 }

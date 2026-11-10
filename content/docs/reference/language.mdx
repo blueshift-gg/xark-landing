@@ -46,6 +46,8 @@ Each parameter of the `#[circuit]` function is an input, `Private<T>` or `Public
 Public inputs reach the verifier in the order the circuit declares them; `xark inspect` prints it.
 See [Inputs](/docs/reference/inputs) for `#[input]` and the everyday types.
 
+<WhoSeesWhat />
+
 ## Constraints
 
 `require(cond)` takes a circuit `bool`, such as a comparison; `require_eq(a, b)` and its siblings
@@ -95,6 +97,8 @@ There is no bare `Field < Field`: a silent default width would be a footgun for 
 A value too wide for the width you state makes the circuit unsatisfiable, never an unsound accept.
 Decompositions are cached per `(value, width)`, so comparing and shifting the same value at the
 same width pays for one range check.
+
+<IntegerWidths />
 
 `Field::from(b)` turns a `bool` into a `{0, 1}` field value at no cost, so a comparison can select
 between two values:
