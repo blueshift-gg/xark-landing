@@ -19,7 +19,7 @@ Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 
 `xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. The program uses
 the `anchor-lang` crate, which Cargo fetches; you don't need the Anchor CLI to build or test it.
 This tutorial assumes you've done [01](/docs/tutorials/01-over-9000) and
-[02](/docs/tutorials/02-age-verification), and doesn't re-explain their commands.
+[02](/docs/tutorials/02-zkyc), and doesn't re-explain their commands.
 </Callout>
 
 <Callout type="warn">
@@ -445,7 +445,7 @@ mod tests {
 
 `recipient`, `relayer` and `fee` are public inputs the program fills in from the transaction, so
 whoever submits the proof can't redirect the payout. The two addresses are only bound, as the
-holder was in [02](/docs/tutorials/02-age-verification). `fee` is a `u64`, and its range check
+holder was in [02](/docs/tutorials/02-zkyc). `fee` is a `u64`, and its range check
 already uses it.
 
 ```console

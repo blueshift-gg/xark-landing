@@ -11,9 +11,9 @@ const examples = [
   },
   {
     no: "02",
-    name: "Age verification",
-    pi: "4 public inputs",
-    blurb: "Prove 18+ without a birthday, for one wallet. Commitments.",
+    name: "zkyc",
+    pi: "5 public inputs",
+    blurb: "Prove you pass KYC without showing your ID, for one wallet. Commitments and policies.",
   },
   {
     no: "03",

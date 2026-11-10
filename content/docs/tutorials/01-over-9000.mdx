@@ -416,8 +416,8 @@ When you change the circuit, rerun `xark setup`, `xark prove`, `xark export` and
 then rebuild the program. The client and verifier follow the circuit.
 
 The proof says someone knows *a* number over 9000. It doesn't tie that number to anything: anyone
-can pick 9001. The next tutorial binds a hidden value to a published commitment, and the same
-range check becomes an age gate.
+can pick 9001. The next tutorial binds hidden values to a published commitment, and the same
+range check becomes a KYC check.
 
 <Callout type="warn" title="Before you deploy">
 `xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
@@ -429,7 +429,7 @@ The finished example, with a `justfile` that runs every step, is
 xark-examples.
 
 <Cards>
-  <Card title="02 · Age verification" href="/docs/tutorials/02-age-verification" description="Prove you're 18 or older without revealing your birth date: commitments and typed policies." />
+  <Card title="02 · zkyc" href="/docs/tutorials/02-zkyc" description="Prove you pass a KYC check without showing your ID: commitments, typed inputs and a policy the program picks." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the pairing check, and the crate your program calls." />
   <Card title="The CLI, command by command" href="/docs/reference/cli" description="Every subcommand, its flags, and what it writes." />
 </Cards>
