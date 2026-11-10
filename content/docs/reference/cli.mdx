@@ -138,9 +138,9 @@ randomness. Either way it prints how the key was made and the verifying key's SH
 - `--ptau-file <PATH>` — phase 2 on a Powers-of-Tau (`.ptau`) transcript.
 - `--phase2-seed <HEX>` — 32-byte seed for the phase-2 `(γ, δ)` derivation (from OS randomness when
   omitted). Only its hash is recorded; discard the seed.
-- `--insecure-dev-mode` — make the key from OS randomness even if a `.ptau` is found.
 - `--deterministic-rng <SEED>` — derive the key from a seed, for reproducible test fixtures
-  **only**: anyone who knows the seed can forge proofs. Requires `--insecure-dev-mode`.
+  **only**: anyone who knows the seed can forge proofs. Skips an auto-detected `.ptau`, and is
+  refused with `--ptau-file`.
 - `--out <DIR>` — where to write the keys (default `target/xark/<name>/`).
 - `--r1cs-form <auto|reduced|minimized>` — which form of the constraints to key. `auto` (the
   default) picks `reduced` at or above 2²⁰ constraints, and `minimized` below that only where it
@@ -248,7 +248,7 @@ xark export examples/cube
   self-test.
 
 Any key exports. The crate's `SETUP` constant, its README, and `export`'s output record how the key
-was made: `seeded`, `single-party`, `ceremony`, or `unknown`.
+was made: `seeded`, `single-party`, `ceremony` (two or more contributors), or `unknown`.
 
 <Files>
   <Folder name="<name>-verifier" defaultOpen>

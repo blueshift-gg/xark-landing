@@ -1,16 +1,19 @@
 [package]
 name = "minesweeper"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [lib]
 path = "src/lib.rs"
 
-# Local-checkout dependencies. `xark build` compiles this crate with the pinned
-# nightly (xark as RUSTC), so the `xark` lib + gadget rlibs carry matching MIR.
 [dependencies]
-xark = { path = "../../../xark/crates/xark", default-features = false }
-xark-poseidon2 = { path = "../../../xark/crates/xark-poseidon2" }
+xark = "0.3"
+xark-poseidon2 = "0.3"
+
+# `xark build` compiles the crate for wasm32 with `--cfg xark`; host code that only
+# tests and the TypeScript client run sits behind `#[cfg(not(xark))]`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(xark)'] }
 
 [workspace]

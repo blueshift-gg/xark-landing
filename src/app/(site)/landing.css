@@ -189,11 +189,31 @@
   background: #191919;
   transition: transform 0.08s, background 0.12s;
 }
-.xk .xk-ms-cell.hidden:not(:disabled):not(.flagged):hover::before {
+.xk .xk-ms-cell.hidden:not([aria-disabled="true"]):not(.flagged):hover::before {
   background: #262626;
 }
-.xk .xk-ms-cell.hidden:not(:disabled):not(.flagged):active::before {
+.xk .xk-ms-cell.hidden:not([aria-disabled="true"]):not(.flagged):active::before {
   transform: scale(0.93);
+}
+.xk .xk-ms-cell:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 1px;
+  z-index: 1;
+}
+.xk .xk-ms-cell[aria-disabled="true"] {
+  cursor: default;
+}
+/* Read by screen readers, not shown: the live region and the key help. */
+.xk .xk-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 .xk .xk-ms-flag {
   position: relative;
@@ -306,6 +326,10 @@
 .xk .xk-ms-reset:hover {
   border-color: var(--lime);
   color: var(--lime);
+}
+.xk .xk-ms-reset:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
 }
 
 /* hero */
@@ -597,6 +621,11 @@
 .xk .xk-btn-dark:hover {
   background: var(--white);
   color: var(--ink);
+}
+/* On the lime result card a lime ring wouldn't show: ink instead. */
+.xk .xk-result-actions :focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 
 /* interior pages (examples) */

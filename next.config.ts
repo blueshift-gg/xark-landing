@@ -15,7 +15,7 @@ try {
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: import.meta.dirname,
-  serverExternalPackages: ["@blueshift-gg/xark-wasm"],
+  serverExternalPackages: ["@blueshift-gg/xark"],
 };
 
 const withMDX = createMDX();
