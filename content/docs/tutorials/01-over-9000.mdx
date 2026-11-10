@@ -1,0 +1,429 @@
+---
+title: "01 · Over 9000"
+description: Prove a secret number is greater than 9000, then verify the proof in a Solana program. A range proof, and the whole xark loop.
+---
+
+In this tutorial you'll prove that you know a number greater than 9000 without revealing it, and
+check that proof in a Solana program. By the end you'll have built the whole xark loop by hand:
+
+- a **circuit**: four lines of Rust that state the rule;
+- its **tests**, run with `xark test`;
+- **keys**, and a proof from the command line;
+- a **TypeScript client** that proves in Node;
+- a **Solana program** that verifies the proof;
+- an **end-to-end test** that sends the proof to the program and sees it accepted.
+
+<Callout title="Prerequisites">
+- Stable Rust **1.89 or newer** ([rustup](https://rustup.rs)).
+- The xark CLI 0.3: `cargo install xark-cli`.
+- Node **22 or newer**, with npm.
+- The [Anza CLI](https://docs.anza.xyz/cli/install), for `cargo-build-sbf`. This tutorial was run
+  with `cargo-build-sbf` 4.1.0.
+
+`xark doctor` checks the Rust and xark side.
+</Callout>
+
+Everything goes in one directory, with a folder per part:
+
+```text
+xark-tutorial/
+├── over-9000/   the circuit crate
+├── program/     the Solana program
+└── app/         the TypeScript client and the end-to-end test
+```
+
+<Steps>
+
+<Step>
+### Create the circuit crate
+
+```sh
+mkdir xark-tutorial && cd xark-tutorial
+xark init over-9000
+```
+
+`xark init` writes a circuit crate that depends on `xark = "0.3"`. Its `src/lib.rs` holds a
+sample circuit named after the crate, `over_9000`. You'll replace it.
+</Step>
+
+<Step>
+### Write the rule
+
+Replace `over-9000/src/lib.rs` with:
+
+```rust title="over-9000/src/lib.rs"
+use xark::prelude::*;
+
+#[circuit]
+pub fn over_9000(power_level: Private<u64>) {
+    require(power_level > 9000u64);
+}
+```
+
+That's the whole circuit. `Private` means the prover supplies `power_level` but the proof never
+reveals it. `require` states what must hold: if it doesn't, there is no proof to make.
+
+The `u64` does real work. A circuit computes over a large prime field, not machine integers, so
+xark constrains `power_level` to 64 bits before it compares it. That bound is what makes `>`
+mean what it says, and it's the range proof under every balance, age or price check you'll write.
+See [Integers](/docs/reference/language#integers) and
+[Circuits and constraints](/docs/learn-zk/02-circuits-and-constraints).
+
+`9000` is a literal, so it's fixed into the circuit. The circuit has no public inputs at all.
+</Step>
+
+<Step>
+### Add tests
+
+Append two tests to the same file:
+
+```rust title="over-9000/src/lib.rs"
+#[cfg(test)]
+mod tests {
+    use super::over_9000;
+
+    #[test]
+    fn accepts_a_value_over_9000() {
+        over_9000(9001).unwrap();
+    }
+
+    #[test]
+    fn rejects_the_boundary() {
+        assert!(over_9000(9000).is_err());
+    }
+}
+```
+
+`#[circuit]` lets a test call the circuit like a function. It returns `Ok` when the inputs satisfy
+every constraint. The second test is as important as the first: it checks that the circuit
+refuses what it should.
+</Step>
+
+<Step>
+### Run the tests
+
+```console
+$ xark test over-9000
+xark building circuit `over-9000`
+xark 129 vars, 131 constraints, 128 witness-gen ops
+xark circuit digest 4816ee24881c12772e0ef0b08f3c8578
+...
+running 2 tests
+test tests::rejects_the_boundary ... ok
+test tests::accepts_a_value_over_9000 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The first run compiles xark and takes a little while. 128 of the 131 constraints are range checks,
+one per bit: for `power_level`, and for the difference the comparison checks. `xark profile
+over-9000` breaks them down by source line. The digest is the circuit's fingerprint: you'll get
+the same one. For more on writing tests, see [Test a circuit](/docs/guides/testing).
+</Step>
+
+<Step>
+### Make the keys and a first proof
+
+```console
+$ xark setup over-9000
+R1CS form: reduced (minimize saves 0.0% rows, 0.0% variables)
+...
+Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
+```
+
+This writes the proving key `pk.bin` and the verifying key `vk.bin` to
+`over-9000/target/xark/over-9000/`. Now prove that 9001 is over 9000:
+
+```console
+$ xark prove over-9000 --inputs '{"power_level": 9001}'
+...
+✅ Proof produced and self-checked (0 public input(s)).
+```
+
+And try 9000:
+
+```console
+$ xark prove over-9000 --inputs '{"power_level": 9000}'
+error: witness does not satisfy the circuit
+
+  src/lib.rs:5:5  require(power_level > 9000u64);
+```
+
+There's no proof of a false statement. xark names the line that fails.
+</Step>
+
+<Step>
+### Generate the TypeScript client
+
+```console
+$ xark client over-9000 --out app/
+✅ TypeScript client for `over_9000` at app/over_9000.ts
+```
+
+`app/over_9000.ts` types the circuit's inputs: `power_level: Private<u64>` becomes
+`powerLevel: U64`. Set up a Node project around it, with the xark runtime and a test runner:
+
+```sh
+cd app
+npm init -y
+npm pkg set type=module
+npm install @blueshift-gg/xark@^0.3.0 vitest
+```
+
+The [TypeScript clients](/docs/guides/typescript-clients) guide covers what else the generated
+file holds.
+</Step>
+
+<Step>
+### Prove from TypeScript
+
+Create `app/over-9000.test.ts`:
+
+```ts title="app/over-9000.test.ts"
+import { readFileSync } from "node:fs";
+import { beforeAll, expect, test } from "vitest";
+import { CheckFailed, Over9000, type Over9000Prover } from "./over_9000";
+
+// What `xark build` and `xark setup` wrote. A web app would serve this
+// directory and pass its URL instead.
+const out = "../over-9000/target/xark/over-9000/";
+const read = (file: string) => new Uint8Array(readFileSync(out + file));
+
+let prover: Over9000Prover;
+beforeAll(async () => {
+  prover = await Over9000.prover(
+    { circuit: read("circuit.xbc"), provingKey: read("pk.bin"), sources: readFileSync(out + "sources.json", "utf8") },
+    { digest: Over9000.digest },
+  );
+});
+
+test("a proof of 9001 verifies", async () => {
+  const proof = prover.prove({ powerLevel: 9001 });
+  expect(proof.toBytes().length).toBe(256);
+
+  const verifier = await Over9000.verifier(read("vk.bin"));
+  expect(verifier.verify(proof.toBytes(), {})).toBe(true);
+});
+
+test("9000 has no proof", () => {
+  expect(() => prover.prove({ powerLevel: 9000 })).toThrow(CheckFailed);
+  expect(() => prover.prove({ powerLevel: 9000 })).toThrow(/power_level > 9000/);
+});
+```
+
+`{ digest: Over9000.digest }` pins the prover to the circuit this client was generated from, so a
+different circuit file is refused. The verifier's `{}` is the public inputs: this circuit has none.
+
+Run it from `app/`:
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ over-9000.test.ts > a proof of 9001 verifies 52ms
+ ✓ over-9000.test.ts > 9000 has no proof 47ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+A proof is always 256 bytes. When inputs fail, the client throws a `CheckFailed` that names the
+same source line `xark prove` did: ``the inputs fail the check at src/lib.rs:5:5: `require(power_level > 9000u64);` ``.
+</Step>
+
+<Step>
+### Export the verifier crate
+
+Back in `xark-tutorial/`:
+
+```console
+$ cd ..
+$ xark export over-9000
+Generated verifier crate `over-9000-verifier` at .../over-9000/over-9000-verifier (0 public input(s), VK = 512 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+...
+✅ On-chain verifier crate ready (verifying key embedded).
+```
+
+The crate has the verifying key built in, and the proof of 9001 you made earlier bundled as its
+self-test:
+
+```console
+$ cd over-9000/over-9000-verifier && cargo test && cd ../..
+...
+test tests::bundled_proof_verifies ... ok
+```
+
+[How verification works](/docs/guides/how-verification-works) explains what the crate checks and
+how.
+</Step>
+
+<Step>
+### Write the Solana program
+
+```sh
+cargo new --lib program --name over-9000-program
+```
+
+Replace `program/Cargo.toml` with:
+
+```toml title="program/Cargo.toml"
+[package]
+name = "over-9000-program"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+over-9000-verifier = { path = "../over-9000/over-9000-verifier" }
+pinocchio = "0.11"
+```
+
+and `program/src/lib.rs` with:
+
+```rust title="program/src/lib.rs"
+#![no_std]
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
+
+program_entrypoint!(process_instruction);
+pinocchio::nostd_panic_handler!();
+pinocchio::no_allocator!();
+
+fn process_instruction(_program_id: &Address, _accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    // The instruction data is the 256-byte proof and nothing else.
+    if data.len() == 256 && over_9000_verifier::verify_instruction_data(data) {
+        Ok(())
+    } else {
+        Err(ProgramError::InvalidInstructionData)
+    }
+}
+```
+
+The program is one call. With no public inputs, the instruction data is the proof itself.
+</Step>
+
+<Step>
+### Build the program
+
+```console
+$ cd program
+$ cargo build-sbf --arch v3
+...
+   Compiling over-9000-verifier v0.1.0 (.../over-9000/over-9000-verifier)
+   Compiling over-9000-program v0.1.0 (.../program)
+    Finished `release` profile [optimized] target(s) in 0.33s
+```
+
+The program is at `program/target/deploy/over_9000_program.so`. Build for SBPF v3 (`--arch v3`):
+the generated verifier calls the `alt_bn128` syscalls the way only a v3 program loads.
+</Step>
+
+<Step>
+### Verify the proof on-chain
+
+The last test sends the proof to the program in [LiteSVM](https://github.com/LiteSVM/litesvm),
+an in-process Solana VM with the same `alt_bn128` syscalls as mainnet, and no validator or
+network. Back in `app/`, add the Solana packages:
+
+```sh
+cd ../app
+npm install @solana/kit litesvm
+```
+
+Add these imports at the top of `over-9000.test.ts`:
+
+```ts title="app/over-9000.test.ts"
+import {
+  appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner, lamports, pipe,
+  setTransactionMessageFeePayerSigner, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
+  type Address, type KeyPairSigner,
+} from "@solana/kit";
+import { FailedTransactionMetadata, LiteSVM } from "litesvm";
+```
+
+and this at the end:
+
+```ts title="app/over-9000.test.ts"
+// Send `data` to `program` in one transaction, paid by `payer`. Returns the
+// compute units it used, or throws with the program's logs.
+async function send(svm: LiteSVM, payer: KeyPairSigner, program: Address, data: Uint8Array) {
+  const tx = await pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayerSigner(payer, m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
+    (m) => appendTransactionMessageInstruction({ programAddress: program, data }, m),
+    (m) => signTransactionMessageWithSigners(m),
+  );
+  const result = svm.sendTransaction(tx);
+  svm.expireBlockhash();
+  if (result instanceof FailedTransactionMetadata) {
+    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
+  }
+  return result.computeUnitsConsumed();
+}
+
+test("the program accepts the proof, and only the proof", async () => {
+  const svm = new LiteSVM();
+  const program = (await generateKeyPairSigner()).address;
+  svm.addProgramFromFile(program, "../program/target/deploy/over_9000_program.so");
+  const payer = await generateKeyPairSigner();
+  svm.airdrop(payer.address, lamports(1_000_000_000n));
+
+  const proof = prover.prove({ powerLevel: 9001 }).toBytes();
+  const units = await send(svm, payer, program, proof);
+  console.log(`verified on-chain in ${units} CU`);
+
+  const tampered = proof.slice();
+  tampered[0] ^= 1;
+  await expect(send(svm, payer, program, tampered)).rejects.toThrow(/invalid instruction data/);
+});
+```
+
+The program takes any address, so the test makes one up. Flipping one bit of the proof must make
+the program refuse it. Run the tests:
+
+```console
+$ npx vitest run --reporter=verbose
+ ✓ over-9000.test.ts > a proof of 9001 verifies 52ms
+ ✓ over-9000.test.ts > 9000 has no proof 47ms
+stdout | over-9000.test.ts > the program accepts the proof, and only the proof
+verified on-chain in 74358 CU
+
+ ✓ over-9000.test.ts > the program accepts the proof, and only the proof 40ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+```
+
+Your proof was verified on-chain, in about 74,000 compute units, and the tampered one was refused.
+</Step>
+
+</Steps>
+
+## What you built
+
+A secret number went into a TypeScript prover, and a 256-byte proof came out. A Solana program
+checked it and learned only that the number is over 9000. Along the way you used each part of
+xark: `xark test` for the circuit, `xark setup` and `xark prove` for keys and proofs, `xark client`
+for the app, and `xark export` for the program.
+
+When you change the circuit, rerun `xark setup`, `xark prove`, `xark export` and `xark client`,
+then rebuild the program. The client and verifier follow the circuit.
+
+The proof says someone knows *a* number over 9000. It doesn't tie that number to anything: anyone
+can pick 9001. The next tutorial binds a hidden value to a published commitment, and the same
+range check becomes an age gate.
+
+<Callout type="warn" title="Before you deploy">
+`xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
+that guards value needs a key from a ceremony. See [The trusted setup](/docs/trust/trusted-setup).
+</Callout>
+
+The finished example, with a `justfile` that runs every step, is
+[01-over-9000](https://github.com/blueshift-gg/xark-examples/tree/main/01-over-9000) in
+xark-examples.
+
+<Cards>
+  <Card title="02 · Age verification" href="/docs/tutorials/02-age-verification" description="Prove you're 18 or older without revealing your birth date: commitments and typed policies." />
+  <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the pairing check, and the crate your program calls." />
+  <Card title="The CLI, command by command" href="/docs/reference/cli" description="Every subcommand, its flags, and what it writes." />
+</Cards>
