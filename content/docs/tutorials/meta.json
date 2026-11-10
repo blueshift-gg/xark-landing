@@ -1,4 +1,11 @@
 {
   "title": "Tutorials",
-  "pages": ["01-over-9000", "02-zkyc", "03-token-claim", "04-shielded-pool", "05-shielded-transfer"]
+  "pages": [
+    "01-over-9000",
+    "02-zkyc",
+    "03-token-claim",
+    "04-shielded-pool",
+    "05-anonymous-voting",
+    "06-shielded-transfer"
+  ]
 }

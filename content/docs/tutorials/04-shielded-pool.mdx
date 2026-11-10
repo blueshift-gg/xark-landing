@@ -255,7 +255,7 @@ mod tests {
 As in 03, `root` is the one function a circuit calls; `first`, `next` and `update` are host-only
 (`#[cfg(not(xark))]`), and `#[input] impl` puts all of them in the TypeScript clients. What's new
 is that the crate is its own: both circuits depend on it, and so does
-[05](/docs/tutorials/05-shielded-transfer). The test checks every path against a tree hashed from
+[06](/docs/tutorials/06-shielded-transfer). The test checks every path against a tree hashed from
 scratch. Run it:
 
 ```console
@@ -1786,13 +1786,15 @@ and a test of more refusals (another fee, an unknown root), is
 [04-shielded-pool](https://github.com/blueshift-gg/xark-examples/tree/main/04-shielded-pool) in
 xark-examples.
 
-Fixed denominations are the pool's limit: you can't pay someone 3.7 SOL, or split a note. The
-next tutorial lets notes carry any amount, and that is where range proofs become essential: once
-amounts are private and arbitrary, only a range check on each one stops a note from being worth
-"−1".
+A note here has one nullifier for its whole life, and a pool needs no more. The next tutorial,
+anonymous voting, keeps the tree of commitments and scopes the nullifier: a voter's changes with
+every poll, so each poll counts them once and no two polls can be linked. Fixed denominations are
+this pool's other limit: you can't pay someone 3.7 SOL, or split a note. After voting,
+[06 · Shielded transfer](/docs/tutorials/06-shielded-transfer) lets notes carry any amount, and
+that is where range proofs become essential.
 
 <Cards>
-  <Card title="05 · Shielded transfer" href="/docs/tutorials/05-shielded-transfer" description="Merkle trees and range proofs together: private payments of any amount, with every value range-checked so the sums can't wrap." />
+  <Card title="05 · Anonymous voting" href="/docs/tutorials/05-anonymous-voting" description="Merkle membership plus a nullifier scoped to a poll: one vote per voter per poll, and no vote linked to a voter." />
   <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="The xark-merkle gadget behind every root in this pool." />
   <Card title="TypeScript clients" href="/docs/guides/typescript-clients" description="How a client runs the circuit crate's Rust." />
 </Cards>

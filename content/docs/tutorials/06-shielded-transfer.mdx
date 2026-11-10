@@ -1,5 +1,5 @@
 ---
-title: "05 · Shielded transfer"
+title: "06 · Shielded transfer"
 description: Merkle trees and range proofs together. Private payments of any amount, Zcash-style. Notes, a key hierarchy, a JoinSplit circuit, an SPL token pool and a relayer.
 ---
 
@@ -10,8 +10,9 @@ come out, but never who paid whom, or how much.
 This is where the story comes together: **Merkle trees and range proofs**.
 [04 · Shielded pool](/docs/tutorials/04-shielded-pool) used [03](/docs/tutorials/03-token-claim)'s
 Merkle tree and [02](/docs/tutorials/02-zkyc)'s commitments to move fixed amounts from a deposit to
-a withdrawal. Here notes carry any amount, and the circuit has to prove that what goes in equals
-what comes out without revealing either. That only works because every amount is a
+a withdrawal, and [05 · Anonymous voting](/docs/tutorials/05-anonymous-voting) made each nullifier
+from a secret key and what it's scoped to. Here notes carry any amount, and the circuit has to
+prove that what goes in equals what comes out without revealing either. That only works because every amount is a
 [range-checked](/docs/learn-zk/range-proofs) `u64`, the idea [01](/docs/tutorials/01-over-9000)
 started with. On top of 04, this one adds what a payment system needs:
 
@@ -35,10 +36,11 @@ real legal weight, which depends on your jurisdiction.
 <Callout title="Prerequisites">
 Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
 `xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf` (this tutorial was run
-with 4.1.0). It builds on all four earlier tutorials: [01](/docs/tutorials/01-over-9000) and
+with 4.1.0). It builds on all five earlier tutorials: [01](/docs/tutorials/01-over-9000) and
 [02](/docs/tutorials/02-zkyc) for the commands and the public inputs a program assembles,
-[03](/docs/tutorials/03-token-claim) for the SPL vault and PDA signing, and
-[04](/docs/tutorials/04-shielded-pool) for the tree. You'll need your `xark-pool/` directory from
+[03](/docs/tutorials/03-token-claim) for the SPL vault and PDA signing,
+[04](/docs/tutorials/04-shielded-pool) for the tree, and
+[05](/docs/tutorials/05-anonymous-voting) for nullifier keys and relayers. You'll need your `xark-pool/` directory from
 04: this tutorial reuses its `pool` crate.
 </Callout>
 
@@ -263,8 +265,8 @@ as many addresses as you like from one key, and nobody can tell two of them belo
 
 A note commits to its value, its owner, two random fields and the token's mint, so notes in
 different pools never collide. To hash the mint, `halves` splits its `Hash` into the two field
-elements it is. Its nullifier mixes in the owner's nullifier key and the note's
-position in the tree: only the owner can compute it, and it doesn't reveal which commitment it
+elements it is. Its nullifier mixes in the owner's nullifier key, as a voter's did in
+[05](/docs/tutorials/05-anonymous-voting), and the note's position in the tree: only the owner can compute it, and it doesn't reveal which commitment it
 came from. `Transaction::of` builds the whole public statement from these helpers, for the client.
 It's `#[cfg(not(xark))]`: host code only, never part of the circuit.
 
@@ -1878,7 +1880,7 @@ out of it, two fees and three transactions of commitments and nullifiers, with n
 the deposit and the withdrawal.
 
 The pieces were the ones from earlier tutorials, combined. A note is 02's salted commitment,
-carrying a value. A spend is 03's Merkle membership with 04's nullifier. The vault is 03's. And
+carrying a value. A spend is 03's Merkle membership with 04's nullifier, made from a key as 05's was. The vault is 03's. And
 01's range proof is what makes it a payment system: every amount is a range-checked `u64`, so the
 balance equation that ties the spends to the outputs can't wrap around the field and mint money.
 The public inputs let a relayer submit your transaction without being able to change it.
@@ -1902,7 +1904,7 @@ the vault. A pool that holds value needs a key from a multi-party ceremony. See
 </Callout>
 
 The finished example is
-[05-shielded-transfer](https://github.com/blueshift-gg/xark-examples/tree/main/05-shielded-transfer)
+[06-shielded-transfer](https://github.com/blueshift-gg/xark-examples/tree/main/06-shielded-transfer)
 in xark-examples. It adds npm scripts that run every step, a demo proof bundled as the verifier
 crate's self-test, host tests that feed each account check the accounts it exists to refuse, and
 more refusals in its end-to-end test.

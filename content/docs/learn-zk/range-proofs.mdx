@@ -66,7 +66,7 @@ You rarely write a decomposition yourself; the types do it.
   default. See [The xark crate](/docs/reference/language#field).
 - **Sums can't wrap either.** When every amount is a range-checked `u64`, a sum of a few of them
   stays far below `p`. So `inputs == outputs` means what it says, with no "negative" note minting
-  money. [Shielded transfer](/docs/tutorials/05-shielded-transfer) relies on exactly this.
+  money. [Shielded transfer](/docs/tutorials/06-shielded-transfer) relies on exactly this.
 
 <IntegerWidths />
 
@@ -76,7 +76,9 @@ You rarely write a decomposition yourself; the types do it.
   bound.
 - [02 · zKYC](/docs/tutorials/02-zkyc): range proofs on dates and money. Born on or before a day
   (a 17-bit comparison), net worth at least a minimum (64-bit), the document not expired.
-- [05 · Shielded transfer](/docs/tutorials/05-shielded-transfer): range-checked amounts, so value is
+- [05 · Anonymous voting](/docs/tutorials/05-anonymous-voting): the choice below the poll's
+  number of options, a comparison between two public `u8`s.
+- [06 · Shielded transfer](/docs/tutorials/06-shielded-transfer): range-checked amounts, so value is
   conserved without wrapping.
 
 Next: [the proof system these examples use →](/docs/learn-zk/03-groth16-in-one-page)
