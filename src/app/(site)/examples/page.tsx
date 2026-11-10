@@ -29,6 +29,12 @@ const examples = [
   },
   {
     no: "05",
+    name: "Anonymous voting",
+    pi: "4 public inputs",
+    blurb: "Merkle membership plus a nullifier scoped to a poll: one vote per voter per poll, unlinkable across polls, and a range proof keeps the choice among the options.",
+  },
+  {
+    no: "06",
     name: "Shielded transfer",
     pi: "19 public inputs",
     blurb: "Merkle trees and range proofs together. Private payments of any amount; range-checked values keep the sums from wrapping.",
@@ -43,7 +49,7 @@ export default function ExamplesPage() {
           <div className="xk-kicker" style={{ marginBottom: 16 }}>
             Examples
           </div>
-          <h1>Five examples, easiest to hardest.</h1>
+          <h1>Six examples, easiest to hardest.</h1>
           <p>
             Each is built, proved, and verified end-to-end in an in-process
             Solana VM.

@@ -1,15 +1,16 @@
 ---
 title: The examples
-description: Five worked examples, easiest to hardest — each built, proved, and verified end-to-end.
+description: Six worked examples, easiest to hardest — each built, proved, and verified end-to-end.
 ---
 
-The [xark-examples](https://github.com/blueshift-gg/xark-examples) repo is a difficulty ladder: five
+The [xark-examples](https://github.com/blueshift-gg/xark-examples) repo is a difficulty ladder: six
 examples that tell one story, each introducing one new idea, and every one is built, proved, and
 verified end-to-end inside an in-process Solana VM ([LiteSVM](https://github.com/LiteSVM/litesvm): no
 validator, no network). Over 9000 teaches [range proofs](/docs/learn-zk/range-proofs); zKYC puts them
 to work beside a salted commitment and an allow-list; Token claim brings Merkle trees into the
-circuit; Shielded pool combines Merkle trees with commitments; and Shielded transfer adds range
-proofs back, for private payments of any amount. Read them in order, or build each one yourself,
+circuit; Shielded pool combines Merkle trees with commitments; Anonymous voting scopes a nullifier
+to a poll and range-proves the choice; and Shielded transfer adds range proofs on amounts, for
+private payments of any amount. Read them in order, or build each one yourself,
 step by step, in the [tutorials](/docs/tutorials/01-over-9000).
 
 <Cards>
@@ -17,7 +18,8 @@ step by step, in the [tutorials](/docs/tutorials/01-over-9000).
   <Card title="02 · zKYC" href="https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc" description="Range proofs put to work: prove your age and net worth, and a nationality on an allow-list, against a salted commitment. The program's own policy, a bound signer." />
   <Card title="03 · Token claim" href="https://github.com/blueshift-gg/xark-examples/tree/main/03-token-claim" description="Merkle trees in a circuit. Prove your address and amount are on the airdrop list, with the path kept private. An SPL vault, a receipt per claimant." />
   <Card title="04 · Shielded pool" href="https://github.com/blueshift-gg/xark-examples/tree/main/04-shielded-pool" description="Merkle trees plus salted commitments. Notes and nullifiers make a withdrawal unlinkable to its deposit. Two circuits; the chain never hashes." />
-  <Card title="05 · Shielded transfer" href="https://github.com/blueshift-gg/xark-examples/tree/main/05-shielded-transfer" description="Merkle trees and range proofs together. Private payments of any amount (Zcash-style); range-checked values keep the sums from wrapping. A key hierarchy, JoinSplit, native SPL." />
+  <Card title="05 · Anonymous voting" href="https://github.com/blueshift-gg/xark-examples/tree/main/05-anonymous-voting" description="Merkle membership plus a nullifier scoped to a poll. One vote per voter per poll, unlinkable across polls; a range proof keeps the choice among the options. A relayer submits, so no voter's wallet appears." />
+  <Card title="06 · Shielded transfer" href="https://github.com/blueshift-gg/xark-examples/tree/main/06-shielded-transfer" description="Merkle trees and range proofs together. Private payments of any amount (Zcash-style); range-checked values keep the sums from wrapping. A key hierarchy, JoinSplit, native SPL." />
 </Cards>
 
 ## The pattern they share

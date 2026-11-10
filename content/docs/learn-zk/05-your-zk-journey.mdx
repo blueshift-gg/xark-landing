@@ -24,16 +24,18 @@ loops, functions, and what the [supported subset](/docs/reference/supported-subs
 nationality without naming it, and a salted commitment binds the hidden values to something public.
 This is the leap from "toy proof" to "useful claim". Most real ZK apps are variations on it.
 
-**Step 4 — Merkle trees, then a shielded pool (examples 03, 04 and 05).**
+**Step 4 — Merkle trees, then shielded pools and votes (examples 03 to 06).**
 [`03-token-claim`](/examples) brings Merkle trees into the circuit: a private path proves your
 address and amount are on a list. [`04-shielded-pool`](/examples) puts 02's salted commitments in
 that tree and adds nullifiers, so a withdrawal is unlinkable to its deposit.
-[`05-shielded-transfer`](/examples) adds range proofs back: notes of any amount, each range-checked
+[`05-anonymous-voting`](/examples) scopes the nullifier to a poll, so a voter votes once per poll
+and no two polls can be linked, and range-proves the choice below the poll's number of options.
+[`06-shielded-transfer`](/examples) adds range proofs back: notes of any amount, each range-checked
 so value can't be minted by wrapping the field. When you understand why the chain never hashes, you
 understand ZK system *design*, not just circuits.
 
 **Step 5 — Design your own.**
-Pick a problem where something should be *hidden but provable*: private votes, sealed-bid auctions,
+Pick a problem where something should be *hidden but provable*: sealed-bid auctions,
 proof-of-solvency, private airdrops, compliance-without-doxxing. Sketch the public/private split
 first (that's 80% of the design), then the circuit, then the program.
 

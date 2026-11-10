@@ -274,7 +274,7 @@ test tests::another_identity_fails ... ok
 test tests::a_compliant_holder_passes ... ok
 test tests::each_check_can_fail ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 ```
 
 A compliant holder passes, each failed check fails it, and nobody passes with someone else's
@@ -483,8 +483,8 @@ test("an identity that fails the policy has no proof", () => {
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ zkyc.test.ts > a compliant holder has a proof 248ms
- ✓ zkyc.test.ts > an identity that fails the policy has no proof 655ms
+ ✓ zkyc.test.ts > a compliant holder has a proof 253ms
+ ✓ zkyc.test.ts > an identity that fails the policy has no proof 657ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -527,18 +527,38 @@ zkyc = { path = "../zkyc" }
 xark = "0.3"
 ```
 
-Then replace `program/src/lib.rs` with the entrypoint:
+The program has the usual Pinocchio layout: `lib.rs` only dispatches, each instruction has its own
+file, and the program's own errors have theirs. This one has a single instruction, `VerifyKyc`:
+
+```text
+program/src/
+├── lib.rs                      the entrypoint
+├── errors.rs                   the program's own errors
+├── instructions/
+│   ├── mod.rs
+│   └── verify_kyc.rs           the instruction: its accounts, its data, the check
+└── policy.rs                   the program's policy (next step)
+```
+
+```sh
+mkdir program/src/instructions
+```
+
+Replace `program/src/lib.rs` with the entrypoint. The first byte of the instruction data is a
+discriminator that says which instruction it is; `VerifyKyc`'s is `0`, and anything else is
+refused:
 
 ```rust title="program/src/lib.rs"
 #![cfg_attr(not(test), no_std)]
 
-use pinocchio::{
-    AccountView, Address, ProgramResult,
-    error::ProgramError,
-    program_entrypoint,
-    sysvars::{Sysvar, clock::Clock},
-};
-use zkyc_verifier::{Proof, verify};
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
+
+mod errors;
+mod instructions;
+mod policy;
+
+pub use errors::*;
+pub use instructions::*;
 
 program_entrypoint!(process_instruction);
 #[cfg(not(test))]
@@ -546,33 +566,130 @@ pinocchio::nostd_panic_handler!();
 #[cfg(not(test))]
 pinocchio::no_allocator!();
 
-/// Accounts: the holder, a signer. Data: proof (256 B) ‖ commitment (32 B).
 fn process_instruction(
     _program_id: &Address,
     accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let Some((proof, commitment)) = instruction_data.split_first_chunk::<256>() else {
-        return Err(ProgramError::InvalidInstructionData);
-    };
-    let commitment: [u8; 32] = commitment
-        .try_into()
-        .map_err(|_| ProgramError::InvalidInstructionData)?;
-    let [holder, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if !holder.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
+    match instruction_data.split_first() {
+        Some((VerifyKyc::DISCRIMINATOR, data)) => {
+            VerifyKyc::try_from((data, &*accounts))?.process()
+        }
+        _ => Err(ProgramError::InvalidInstructionData),
     }
-    // The public inputs, in the circuit's order: commitment, the policy's two field
-    // elements, holder.hi, holder.lo.
-    let [packed, allowed] = policy(Clock::get()?.unix_timestamp);
-    let [holder_hi, holder_lo] = halves(holder.address().as_array());
-    let public_inputs = [commitment, packed, allowed, holder_hi, holder_lo];
-    if verify(&Proof::from_le_bytes(proof), &public_inputs) {
+}
+```
+
+Most failures have a built-in Solana error: a missing account is `NotEnoughAccountKeys`, an
+unsigned holder `MissingRequiredSignature`, malformed data `InvalidInstructionData`. Only a proof
+that doesn't verify needs one of the program's own. Create `program/src/errors.rs`:
+
+```rust title="program/src/errors.rs"
+use pinocchio::error::ProgramError;
+
+/// The program's own errors, as `ProgramError::Custom` codes.
+#[repr(u32)]
+pub enum ZkycError {
+    /// The proof doesn't verify against the public inputs the program assembles.
+    InvalidProof = 0,
+}
+
+impl From<ZkycError> for ProgramError {
+    fn from(e: ZkycError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
+}
+```
+
+and `program/src/instructions/mod.rs`:
+
+```rust title="program/src/instructions/mod.rs"
+pub mod verify_kyc;
+
+pub use verify_kyc::*;
+```
+
+The instruction itself is three structs. `VerifyKycAccounts` takes the accounts and checks them,
+`VerifyKycInstructionData` takes the data and checks its length, and `VerifyKyc` holds both and
+verifies the proof. Create `program/src/instructions/verify_kyc.rs`:
+
+```rust title="program/src/instructions/verify_kyc.rs"
+use pinocchio::{
+    AccountView, ProgramResult,
+    error::ProgramError,
+    sysvars::{Sysvar, clock::Clock},
+};
+use zkyc_verifier::{Proof, verify};
+
+use crate::{ZkycError, policy::policy};
+
+/// Accounts: the holder, a signer.
+pub struct VerifyKycAccounts<'a> {
+    pub holder: &'a AccountView,
+}
+
+impl<'a> TryFrom<&'a [AccountView]> for VerifyKycAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a [AccountView]) -> Result<Self, Self::Error> {
+        let [holder, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        if !holder.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        Ok(Self { holder })
+    }
+}
+
+/// Data: proof (256 B) ‖ commitment (32 B).
+pub struct VerifyKycInstructionData<'a> {
+    pub proof: &'a [u8; 256],
+    pub commitment: &'a [u8; 32],
+}
+
+impl<'a> TryFrom<&'a [u8]> for VerifyKycInstructionData<'a> {
+    type Error = ProgramError;
+
+    fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
+        let (proof, commitment) = data
+            .split_first_chunk::<256>()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        let commitment = commitment
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        Ok(Self { proof, commitment })
+    }
+}
+
+pub struct VerifyKyc<'a> {
+    pub accounts: VerifyKycAccounts<'a>,
+    pub data: VerifyKycInstructionData<'a>,
+}
+
+impl<'a> TryFrom<(&'a [u8], &'a [AccountView])> for VerifyKyc<'a> {
+    type Error = ProgramError;
+
+    fn try_from((data, accounts): (&'a [u8], &'a [AccountView])) -> Result<Self, Self::Error> {
+        let accounts = VerifyKycAccounts::try_from(accounts)?;
+        let data = VerifyKycInstructionData::try_from(data)?;
+        Ok(Self { accounts, data })
+    }
+}
+
+impl<'a> VerifyKyc<'a> {
+    pub const DISCRIMINATOR: &'a u8 = &0;
+
+    pub fn process(&mut self) -> ProgramResult {
+        // The public inputs, in the circuit's order: commitment, the policy's two field
+        // elements, holder.hi, holder.lo.
+        let [packed, allowed] = policy(Clock::get()?.unix_timestamp);
+        let [holder_hi, holder_lo] = halves(self.accounts.holder.address().as_array());
+        let public_inputs = [*self.data.commitment, packed, allowed, holder_hi, holder_lo];
+        if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+            return Err(ZkycError::InvalidProof.into());
+        }
         Ok(())
-    } else {
-        Err(ProgramError::InvalidInstructionData)
     }
 }
 
@@ -589,6 +706,19 @@ fn halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
 }
 ```
 
+Each check closes a door:
+
+- **The holder must sign.** The proof is bound to the holder's address, and the signature shows
+  the address's owner sent it, so a copied proof can't be submitted from another wallet.
+- **The data must be exactly 288 bytes** after the discriminator. Shorter or longer data is
+  refused before anything reads it, so a malformed proof or commitment never reaches the verifier.
+- **The clock is the cluster's.** `Clock::get()` reads today from the Clock sysvar, so the prover
+  can't backdate or postdate the policy.
+- **The holder's address comes from the account.** The program fills `holder` in from the signer,
+  never from the data, so the proof verifies only for the wallet that signed.
+- **The proof must verify.** Against the commitment, the program's policy today and that address;
+  anything else is `InvalidProof`.
+
 Unlike 01, the instruction data isn't the whole statement: the program only takes the proof and
 the commitment from the transaction. That, with the signer's address, is all that goes onchain:
 the program stores nothing, and the identity and its salt stay with the holder and the issuer. See
@@ -604,9 +734,9 @@ transaction: it builds its own, and the proof verifies only if the holder proved
 that. The circuit stays the same for every verifier; each picks its rules by what it supplies.
 
 The program can't link xark, so it builds the policy as the circuit takes it: the two field
-elements from `xark inspect`, packed by hand. Append to `program/src/lib.rs`:
+elements from `xark inspect`, packed by hand. Create `program/src/policy.rs`:
 
-```rust title="program/src/lib.rs"
+```rust title="program/src/policy.rs"
 // The program's policy: 18 or older, worth at least 500,000, a national of DE, FR,
 // GB or US, with a document valid today.
 const MIN_AGE: i64 = 18;
@@ -617,7 +747,7 @@ const ALLOWED: [u8; 32] = countries(&[56, 74, 76, 232]);
 /// The program's `Policy` on the day holding the Unix time `unix`, as the circuit
 /// takes it: `today | born_by << 17 | min_net_worth << 34` in one field element,
 /// then `allowed` in its own.
-fn policy(unix: i64) -> [[u8; 32]; 2] {
+pub fn policy(unix: i64) -> [[u8; 32]; 2] {
     let day = unix.div_euclid(86_400);
     let packed = u128::from(since_1900(day))
         | u128::from(born_by(day)) << 17
@@ -712,9 +842,9 @@ $ cd program
 $ cargo test
 ...
 running 1 test
-test tests::the_policy_is_the_circuits ... ok
+test policy::tests::the_policy_is_the_circuits ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
 ```
 
 Change a position in `ALLOWED` and the test fails on its first day, `(1918, 1, 1)`, with both
@@ -729,7 +859,7 @@ $ cargo build-sbf --arch v3
 ...
    Compiling zkyc-verifier v0.1.0 (.../zkyc/zkyc-verifier)
    Compiling zkyc-program v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.39s
+    Finished `release` profile [optimized] target(s) in 0.41s
 ```
 
 The program is at `program/target/deploy/zkyc_program.so`.
@@ -778,11 +908,12 @@ async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction
   return result.computeUnitsConsumed();
 }
 
-// The program's instruction: signed by `holder`, with data proof ‖ commitment.
+// The program's instruction: signed by `holder`, with data 0 (`VerifyKyc`'s
+// discriminator) ‖ proof ‖ commitment.
 const verifyKyc = (program: Address, holder: KeyPairSigner, proof: Uint8Array, commitment: Field) => ({
   programAddress: program,
   accounts: [{ address: holder.address, role: AccountRole.READONLY_SIGNER, signer: holder }],
-  data: new Uint8Array([...proof, ...commitment.toBytes()]),
+  data: new Uint8Array([0, ...proof, ...commitment.toBytes()]),
 });
 
 // Set the VM's clock to noon UTC on `day`.
@@ -818,21 +949,21 @@ test("the program accepts the proof for its holder, today, under its policy", as
 
   // Someone who copies the proof can't submit it from their own wallet,
   const copycat = await generateKeyPairSigner();
-  await expect(send(svm, payer, verifyKyc(program, copycat, proof, commitment))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, payer, verifyKyc(program, copycat, proof, commitment))).rejects.toThrow(/custom program error: 0x0/);
   // or for someone else's commitment,
   const other = Identity.commitment(credential());
-  await expect(send(svm, payer, verifyKyc(program, holder, proof, other))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, payer, verifyKyc(program, holder, proof, other))).rejects.toThrow(/custom program error: 0x0/);
 
   // A holder worth 100 proves against a policy with no net-worth check: a valid
   // proof, of a statement the program doesn't ask about.
   const poor = credential({ netWorth: 100 });
   const lax = { ...programs("2026-10-22"), minNetWorth: 0 };
   const laxProof = prover.prove({ id: poor, commitment: Identity.commitment(poor), policy: lax, holder: address }).toBytes();
-  await expect(send(svm, payer, verifyKyc(program, holder, laxProof, Identity.commitment(poor)))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, payer, verifyKyc(program, holder, laxProof, Identity.commitment(poor)))).rejects.toThrow(/custom program error: 0x0/);
 
   // And tomorrow the program's policy has moved on.
   setDay(svm, "2026-10-23");
-  await expect(send(svm, payer, verifyKyc(program, holder, proof, commitment))).rejects.toThrow(/invalid instruction data/);
+  await expect(send(svm, payer, verifyKyc(program, holder, proof, commitment))).rejects.toThrow(/custom program error: 0x0/);
 });
 ```
 
@@ -840,19 +971,20 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ zkyc.test.ts > a compliant holder has a proof 255ms
- ✓ zkyc.test.ts > an identity that fails the policy has no proof 658ms
+ ✓ zkyc.test.ts > a compliant holder has a proof 256ms
+ ✓ zkyc.test.ts > an identity that fails the policy has no proof 694ms
 stdout | zkyc.test.ts > the program accepts the proof for its holder, today, under its policy
-verified onchain in 100901 CU
+verified onchain in 100887 CU
 
- ✓ zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 445ms
+ ✓ zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 514ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```
 
 The proof verified onchain, in about 101,000 compute units, and was refused from another wallet,
-for another commitment, and the next day. The lax proof was refused too: the prover made it, but
+for another commitment, and the next day, each time with `custom program error: 0x0`, the
+program's `InvalidProof`. The lax proof was refused too: the prover made it, but
 the program checked it against its own policy. A proof is for one UTC day: one that lands after
 midnight UTC has to be made again.
 </Step>
