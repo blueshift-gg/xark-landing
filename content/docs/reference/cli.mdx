@@ -14,32 +14,57 @@ cargo install xark-cli
 Each command takes the circuit crate's directory, the current one by default, and infers every
 path from the crate's `target/xark/<name>/`, where `<name>` is the crate's package name. Most
 commands also accept that output directory itself. Flags below override an inferred path.
+
+At a [project](/docs/guides/projects)'s root, `xark build`, `xark test` and `xark check` act on the
+whole project, and a command that takes one circuit uses the project's only one (with several,
+name it: `xark prove circuits/claim`). A project's keys are in `keys/<name>/` and its generated
+clients in `clients/<name>/`.
 `xark <command> --help` lists every option; `xark` alone prints the path from a new circuit to an
 onchain proof.
 
 ## `xark doctor`
 
 Check the toolchain: `cargo`, `rustc` 1.89+, `rustup`, the `wasm32-unknown-unknown` target, the
-`xark` that `cargo test` and `rust-analyzer` will run, and (optionally) `node` for `xark client`.
-Exits non-zero when a required check fails.
+`xark` that `cargo test` and `rust-analyzer` will run, `cargo build-sbf` and `node`. The last two
+are required in a project with programs (`xark build` and `xark test` use them), optional
+elsewhere. Exits non-zero when a required check fails.
 
 ## `xark init [name]`
 
-Scaffold a circuit crate (alias `xark new`). With no name, initializes the current directory; the
-name may be a path, and the crate and its `#[circuit]` function are named after its last component.
+Start a project (alias `xark new`): a `xark.toml`, a Cargo workspace, and a starter circuit in
+`circuits/<name>/`. With no name, initializes the current directory; the name may be a path, and
+the project, its circuit and the circuit's `#[circuit]` function are named after its last
+component.
 
 ```sh
 xark init my-circuit
 ```
 
-Writes `Cargo.toml` (depending on `xark` at the CLI's own minor version), `src/lib.rs` (a
-square-root circuit and two tests), `rust-analyzer.toml`, `.vscode/settings.json`, and
-`.gitignore`. Existing files are kept.
+Writes `xark.toml`, `Cargo.toml` (the workspace), `.gitignore`, `rust-analyzer.toml`,
+`.vscode/settings.json`, `.github/workflows/ci.yml` (`xark build --check`, then `xark test`), and
+the circuit crate: `Cargo.toml` (depending on `xark` at the CLI's own minor version) and
+`src/lib.rs` (a square-root circuit and two tests). A `.gitignore`, workflow or editor setting
+already there is kept. Refuses a directory that already has a `Cargo.toml`.
+
+## `xark add circuit <name>`
+
+Add a circuit to the project: the crate `xark init` makes, in `circuits/<name>/`. A name can't end
+in `-program` or `-verifier`: those are the crates `xark add` makes beside it.
+
+## `xark add program <name> [--circuit <circuit>]`
+
+Add a Pinocchio program that verifies a circuit's proofs (the one named `<name>`, or `--circuit`):
+`programs/<name>/` (the crate `<name>-program`: `lib.rs`, `errors.rs`, `instructions/verify.rs`),
+and a LiteSVM test, `tests/<name>.test.ts`, that proves with the circuit's TypeScript client and
+sends the proof to it. Builds the circuit's keys and clients first if they're missing, and writes
+`package.json`, `tsconfig.json` and `vitest.config.ts` if the project has none.
 
 ## `xark build [crate-dir]`
 
 Compile a circuit crate — Rust → wasm32 → xark-IR → R1CS — into `target/xark/<name>/`, and print
-its size and circuit digest.
+its size and circuit digest. At a project's root, build every circuit, make its keys if there are
+none, generate its clients (`clients/<name>/{rust,ts}`), then build the programs with
+`cargo build-sbf`, failing when a function's stack frame passes SBF's 4 KiB.
 
 ```sh
 xark build examples/cube
@@ -50,6 +75,8 @@ xark build examples/cube
   decimal, to count constraints over another field.
 - `--emit-json` — also write `circuit.json` and `r1cs.json`, human-readable views for debugging.
   Nothing reads them back, and they are multi-GB on large circuits, so they're off by default.
+- `--check` — at a project's root, for CI: build everything, but fail if the committed clients
+  aren't what the source generates, or a key is missing or for an older circuit. Writes nothing.
 
 <Files>
   <Folder name="target/xark/<name>" defaultOpen>
@@ -65,7 +92,8 @@ A rebuild with nothing changed reuses the previous outputs.
 ## `xark check [crate-dir]`
 
 Validate a circuit crate and report Rust the circuit can't express as compiler diagnostics, with
-source spans. This is what `rust-analyzer` runs on save in a crate `xark init` made.
+source spans. This is what `rust-analyzer` runs on save in a project `xark init` made: at the root,
+`cargo check` over the whole workspace, then each circuit's validation.
 
 ```sh
 xark check examples/cube --message-format=json
@@ -91,7 +119,8 @@ overrideCommand = ["xark", "check", ".", "--message-format=json"]
 
 Build the circuit, then run the crate's tests with `cargo test --release`. Arguments after the
 crate directory go to `cargo test` verbatim: a test-name filter, cargo flags, and after `--` the
-test binary's own.
+test binary's own. At a project's root, test every circuit, then build the project and run the
+programs' and verifier crates' Rust tests and `npm test`.
 
 ```sh
 xark test examples/cube
@@ -141,7 +170,9 @@ randomness. Either way it prints how the key was made and the verifying key's SH
 - `--deterministic-rng <SEED>` — derive the key from a seed, for reproducible test fixtures
   **only**: anyone who knows the seed can forge proofs. Skips an auto-detected `.ptau`, and is
   refused with `--ptau-file`.
-- `--out <DIR>` — where to write the keys (default `target/xark/<name>/`).
+- `--out <DIR>` — where to write the keys (default `keys/<name>/` in a project, where they're
+  committed, otherwise `target/xark/<name>/`). A proving key over 50 MB gets a note to commit it
+  with Git LFS.
 - `--r1cs-form <auto|reduced|minimized>` — which form of the constraints to key. `auto` (the
   default) picks `reduced` at or above 2²⁰ constraints, and `minimized` below that only where it
   saves enough to matter. `--streamable` is shorthand for `--r1cs-form reduced`.
@@ -153,15 +184,15 @@ randomness. Either way it prints how the key was made and the verifying key's SH
   `xark prove` skips decompressing them.
 
 <Files>
-  <Folder name="target/xark/<name>" defaultOpen>
+  <Folder name="keys/<name>" defaultOpen>
     <File name="pk.bin" />
     <File name="vk.bin" />
     <File name="metadata.json" />
-    <File name="inputs.example.json" />
   </Folder>
 </Files>
 
-`inputs.example.json` lists every input in its natural form, to fill in for `xark prove`. A
+It also writes `inputs.example.json` to `target/xark/<name>/`: every input in its natural form, to
+fill in for `xark prove`. A
 `minimized` key also gets `r1cs.stream`, which `xark prove` streams. See
 [The trusted setup](/docs/trust/trusted-setup) for which setup to use when.
 
@@ -238,20 +269,22 @@ Generate the Solana verifier crate, with the verifying key embedded.
 xark export examples/cube
 ```
 
-- `--out <DIR>` — the generated crate's root. Default `<crate>/<name>-verifier/`, beside the
-  circuit's sources. An existing `Cargo.toml` or `src/lib.rs` that `xark export` didn't write is
-  never replaced.
-- `--crate-name <NAME>` — the generated crate's package name (default: the `--out` directory's
-  name).
+`xark build` runs it for every circuit of a project.
+
+- `--out <DIR>` — the generated crate's root. Default `clients/<name>/rust/` at a project's root
+  (or `<crate>/clients/rust/` for a crate outside a project). An existing `Cargo.toml` or
+  `src/lib.rs` that `xark export` didn't write is never replaced.
+- `--crate-name <NAME>` — the generated crate's package name (default `<name>-verifier`).
 - `--verifying-key`, `--proof`, `--public-inputs` — override the inferred paths. The proof is
   bundled as the crate's self-test; without one (or with one for another key) the crate has no
-  self-test.
+  self-test. A sample the crate already bundles is kept while it still verifies, so a rebuild
+  doesn't change the crate.
 
 Any key exports. The crate's `SETUP` constant, its README, and `export`'s output record how the key
 was made: `seeded`, `single-party`, `ceremony` (two or more contributors), or `unknown`.
 
 <Files>
-  <Folder name="<name>-verifier" defaultOpen>
+  <Folder name="clients/<name>/rust" defaultOpen>
     <File name="Cargo.toml" />
     <File name="src/lib.rs" />
     <File name="README.md" />
@@ -270,8 +303,10 @@ verifies it. See [How verification works](/docs/guides/how-verification-works) f
 Generate a typed TypeScript client from the build's `schema.json`, building the circuit first if
 needed. No setup or proof is required.
 
+`xark build` runs it for every circuit of a project.
+
 - `--out`, `-o <PATH>` — an output file, or a directory to write `<circuit>.ts` in (default
-  `target/xark/<name>/<circuit>.ts`).
+  `clients/<name>/ts/<circuit>.ts` at a project's root).
 - `--lang ts` — the client language; TypeScript is the one there is.
 - `--no-functions` — skip the Rust client functions (`#[input]` on an `impl`), for a crate whose
   host code doesn't build for wasm.

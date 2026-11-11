@@ -1,16 +1,16 @@
 ---
 title: Quickstart
-description: From a Rust circuit to a proof and a Solana verifier crate, in five steps.
+description: From a Rust circuit to a proof verified by a Solana program, in five steps.
 ---
 
 In this quickstart you'll write a circuit that proves you know a square root of a public number,
-test it, prove it, and generate the crate a Solana program uses to verify the proof.
+test it, prove it, and verify the proof in a Solana program.
 
 <Callout title="Prerequisites">
 Stable Rust **1.89 or newer** ([rustup](https://rustup.rs)). `xark build` adds the
 `wasm32-unknown-unknown` target with `rustup` the first time it runs. To build the Solana program
-that uses the verifier at the end, you'll also want the [Anza CLI](https://docs.anza.xyz/cli/install)
-(`cargo-build-sbf`).
+at the end, you'll also want the [Anza CLI](https://docs.anza.xyz/cli/install) (`cargo-build-sbf`)
+and [Node](https://nodejs.org).
 </Callout>
 
 <Steps>
@@ -27,14 +27,15 @@ xark doctor
 </Step>
 
 <Step>
-### Create a circuit
+### Start a project
 
 ```sh
-xark init my-circuit
+xark init my-circuit && cd my-circuit
 ```
 
-This writes a circuit crate that depends on `xark = "0.3"`, set up so `rust-analyzer` shows
-circuit errors inline. Open `my-circuit/src/lib.rs`:
+This makes a project: a `xark.toml`, one Cargo workspace, and a circuit crate in
+`circuits/my-circuit/` that depends on `xark = "0.4"`, set up so `rust-analyzer` shows circuit
+errors inline. Open `circuits/my-circuit/src/lib.rs`:
 
 ```rust
 use xark::prelude::*;
@@ -69,10 +70,10 @@ like a function, with plain integers for its `Field` inputs.
 <Step>
 ### Test it
 
-`xark test` builds the circuit, then runs the crate's tests:
+At the project's root, `xark test` builds the circuit, then runs its tests:
 
 ```console
-$ xark test my-circuit
+$ xark test
 xark building circuit `my-circuit`
 xark 2 vars, 1 constraints, 0 witness-gen ops
 xark circuit digest 75e3ce529473dfaa2f89a85a0d588228
@@ -89,59 +90,71 @@ same for every build of this circuit, whichever Rust compiled it.
 ### Prove
 
 ```console
-$ xark prove my-circuit --inputs '{"secret": 3, "result": 9}'
+$ xark prove --inputs '{"secret": 3, "result": 9}'
 ...
 ✅ Proof produced and self-checked (1 public input(s)).
 ```
 
-The first proof also makes the proving and verifying keys. Now try inputs that don't satisfy the
-circuit — xark shows you the line that fails:
+The first proof also makes the proving and verifying keys, in `keys/my-circuit/`. Now try inputs
+that don't satisfy the circuit — xark shows you the line that fails:
 
 ```console
-$ xark prove my-circuit --inputs '{"secret": 3, "result": 10}'
+$ xark prove --inputs '{"secret": 3, "result": 10}'
 error: witness does not satisfy the circuit
 
-  src/lib.rs:6:16  require_eq(secret * secret, result);
+  circuits/my-circuit/src/lib.rs:6:16  require_eq(secret * secret, result);
 ```
 </Step>
 
 <Step>
-### Verify, then export the Solana verifier
+### Verify it on Solana
+
+`xark add program` writes a Pinocchio program that verifies the circuit's proofs, and a LiteSVM
+test that proves with the generated TypeScript client and sends the proof to it. `xark build`
+builds the circuit, its clients and the program; `xark test` runs every test:
 
 ```console
-$ xark verify my-circuit
-✅ Proof verified
-
-$ xark export my-circuit
+$ xark add program my-circuit
+$ xark build
 ...
-✅ On-chain verifier crate ready (verifying key embedded).
+✅ Onchain verifier crate ready (verifying key embedded).
+✅ TypeScript client for `my_circuit` at clients/my-circuit/ts/my_circuit.ts
+xark building the programs (cargo build-sbf)
+$ npm install && xark test
+...
+ Test Files  1 passed (1)
 ```
 
-`export` writes `my-circuit/my-circuit-verifier/`: a crate with the verifying key embedded,
-and the proof you just made bundled as its self-test.
+Commit everything `xark build` writes, `keys/` included: the generated clients embed the
+verifying key.
 </Step>
 
 </Steps>
 
-## Then, on Solana
+## The program's side
 
-Your program depends on the generated crate. It reads the 256-byte proof from the instruction
-data and supplies the public inputs it requires itself, from its own state:
+The program depends on `clients/my-circuit/rust/`, the verifier crate `xark build` generates
+(`my-circuit-verifier`). It reads the 256-byte proof from the instruction data and supplies the
+public inputs it requires itself, from its own state, by name:
 
 ```rust
 let Some(proof) = instruction_data.first_chunk::<256>() else {
     return Err(ProgramError::InvalidInstructionData);
 };
 let proof = my_circuit_verifier::Proof::from_le_bytes(proof);
-let public_inputs: [[u8; 32]; 1] = [/* from your program's state */];
-if !my_circuit_verifier::verify(&proof, &public_inputs) {
+let inputs = my_circuit_verifier::PublicInputs {
+    result: /* from your program's state, 32 bytes little-endian */,
+};
+if !my_circuit_verifier::verify(&proof, inputs) {
     return Err(ProgramError::InvalidArgument);
 }
 ```
 
-Re-run `xark export` whenever the circuit changes; the generated crate is the only thing that
-updates. For the byte layout and the syscalls behind that one call, see
-[How verification works](/docs/guides/how-verification-works).
+`PublicInputs` has the circuit's public inputs by name, and `verify` packs them as the circuit
+does. When the circuit changes, `xark build` regenerates the crate; your program's code stays put.
+For the byte layout and the syscalls behind that one call, see
+[How verification works](/docs/guides/how-verification-works), and for the project's layout,
+[Projects](/docs/guides/projects).
 
 <Callout type="warn" title="Before you deploy">
 The key `xark prove` made is a single-party setup: sound unless whoever ran it kept its

@@ -9,9 +9,12 @@ uses zKYC (`examples/zkyc`), a private credential check against a public policy.
 
 ## Generate the client
 
+In a project, `xark build` writes each circuit's client to `clients/<circuit>/ts/`; `xark client`
+writes just that one:
+
 ```sh
-xark client                                  # writes target/xark/<circuit>/<circuit>.ts
-npm install @blueshift-gg/xark@0.3           # the runtime it imports
+xark client                                  # writes clients/<circuit>/ts/<circuit>.ts
+npm install @blueshift-gg/xark@0.4           # the runtime it imports
 ```
 
 `xark client` builds the circuit if needed and writes one `.ts` file: a type per enum, an
@@ -58,9 +61,25 @@ verifier.verify(bytes, { commitment, policy: required }); // true
 Outside a browser, pass the files' bytes instead of a URL:
 `Zkyc.prover({ circuit: readFileSync("…/circuit.xbc"), provingKey: …, client: … })`.
 
-`proof.toBytes()` is the proof as the Solana verifier `xark export` generates reads it (256
-bytes), so a program checks it against public inputs it supplies itself.
-`proof.toBytesCompressed()` is half the size, for anywhere else; a verifier reads either.
+`proof.toBytes()` is the proof as the generated Solana verifier reads it (256 bytes), so a program
+checks it against public inputs it supplies itself. `proof.toFields()` is its public inputs as that
+verifier's `Fields` (32 bytes each, little-endian, in proof order), and `proof.toInstructionData()`
+the proof then those, for a program that takes both. `proof.toBytesCompressed()` is half the size,
+for anywhere else; a verifier reads either.
+
+## Test against your program
+
+`@blueshift-gg/xark/testing` (with `litesvm` and `@solana/kit` installed) loads a circuit's build
+output and keys by name and runs a project's programs in LiteSVM, the way the tests
+`xark add program` writes do:
+
+```ts
+import { circuit, funded, program, send, vm } from "@blueshift-gg/xark/testing";
+
+const prover = await Zkyc.prover(circuit("zkyc"), { digest: Zkyc.digest });
+const svm = vm({ [id]: program("zkyc") });       // target/deploy/zkyc_program.so
+await send(svm, await funded(svm), { programAddress: id, data: proof.toBytes() });
+```
 
 ## Call the circuit's Rust from TypeScript
 

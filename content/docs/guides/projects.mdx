@@ -1,0 +1,107 @@
+---
+title: Projects
+description: One directory for your circuits, the Solana programs that verify them, the clients xark generates, and their tests.
+---
+
+A project holds everything a zero-knowledge app on Solana needs: the circuits, the programs that
+verify their proofs, the Rust and TypeScript clients xark generates from each circuit, the keys,
+and the tests. It's one Cargo workspace, and `xark build` and `xark test` at its root build and
+test all of it.
+
+```sh
+xark init claim && cd claim       # a project with a starter circuit in circuits/claim/
+xark add program claim            # a Pinocchio program that verifies its proofs, and a LiteSVM test
+xark build                        # the circuits, their keys and clients, then the programs
+npm install && xark test          # every test: circuits, programs, then proofs verified onchain
+```
+
+## The layout
+
+```text
+claim/
+  xark.toml                 the xark release the project is made with
+  Cargo.toml                the workspace: members, default-members, the programs' release profile
+  rust-analyzer.toml        `xark check .` on save (and .vscode/settings.json)
+  package.json  tsconfig.json  vitest.config.ts
+  circuits/claim/           a circuit crate: src/lib.rs and its tests
+  programs/claim/           a Pinocchio program: lib.rs, errors.rs, instructions/verify.rs
+  clients/claim/rust/       generated: the verifier crate `claim-verifier`
+  clients/claim/ts/         generated: the TypeScript client
+  keys/claim/               the proving and verifying keys
+  tests/claim.test.ts       prove with the client, verify onchain in LiteSVM
+  .github/workflows/ci.yml  `xark build --check`, then `xark test`
+```
+
+- **Circuits** live in `circuits/`, one crate each. `xark add circuit <name>` adds another. A crate
+  there without a `#[circuit]` is a library the circuits share: a member of the workspace, but not
+  a circuit.
+- **Programs** live in `programs/`. `xark add program <name>` writes one for the circuit of the
+  same name, or another with `--circuit`. Its crate is `<name>-program`.
+- **Clients** are generated from each circuit into `clients/<circuit>/`: the verifier crate a
+  program depends on, and the typed TypeScript client.
+- **Commands** at the root act on every circuit, or on the only one: `xark prove`, `xark export`
+  and `xark inspect` need a circuit named (`xark prove circuits/claim`) only when there are several.
+
+## What to commit
+
+Everything `xark build` writes outside `target/`: `clients/` and `keys/`. The verifier crate embeds
+the verifying key, so the keys go with it: a key that lived only in `target/` would be replaced on
+a fresh clone, and the program would stop accepting proofs made with the deployed key. For the same
+reason, `xark build` never makes a key while a committed verifier embeds one; a new key is an
+explicit `xark setup`. A proving key over 50 MB belongs in Git LFS.
+
+A rebuild leaves `clients/` exactly as it was, so `xark build --check` (CI) can fail whenever the
+committed clients aren't what the source builds. `cargo fmt` and clippy leave the generated crate
+alone.
+
+## The programs' build
+
+The workspace's `default-members` are the programs, so a bare `cargo build-sbf` at the root builds
+them alone: built with the circuits, the circuits' host dependencies would join the SBF build.
+`xark build` runs it for you, and fails when a function's stack frame passes SBF's 4 KiB, which
+`cargo build-sbf` only warns about and which corrupts the stack at run time.
+
+The root `[profile.release]` is the programs' (fat LTO, one codegen unit). A circuit builds with
+its own settings, so the profile doesn't change it, and `xark test` runs the Rust tests without the
+fat LTO, so they relink fast.
+
+## In your program
+
+The verifier crate has the circuit's public inputs by name, as `PublicInputs`, and packs them as
+the circuit's `#[input]` does. From the [token claim tutorial](/docs/tutorials/03-token-claim)'s
+program:
+
+```rust
+let inputs = PublicInputs {
+    root,
+    claim: token_claim_verifier::Claim {
+        claimant: *accounts.claimant.address().as_array(),
+        amount: data.amount,
+    },
+};
+if !verify(&Proof::from_le_bytes(data.proof), inputs) {
+    return Err(TokenClaimError::InvalidProof.into());
+}
+```
+
+`verify` takes anything that converts into `Fields`, the field elements in proof order: a
+`PublicInputs`, the elements themselves, or a struct of your own with a `From` impl packed with
+`xark_verifier::fields::Packer`. See [How verification works](/docs/guides/how-verification-works).
+
+## In TypeScript tests
+
+`@blueshift-gg/xark/testing` loads a circuit's build output and keys by name and runs the project's
+programs in LiteSVM:
+
+```ts
+import { circuit, funded, program, send, vm } from "@blueshift-gg/xark/testing";
+import { Claim } from "../clients/claim/ts/claim";
+
+const prover = await Claim.prover(circuit("claim"), { digest: Claim.digest });
+const svm = vm({ [id]: program("claim") });
+await send(svm, await funded(svm), { programAddress: id, data: proof.toInstructionData() });
+```
+
+A proof's `toBytes()` is the 256-byte proof; `toFields()` its public inputs as the program's
+`Fields`; `toInstructionData()` both, for a program that takes its public inputs in the instruction
+data.

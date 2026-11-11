@@ -31,9 +31,10 @@ never hashes.** All Poseidon2 hashing happens inside the circuit; it proves that
 extends the old one, so the onchain program only stores roots and verifies proofs. Circuit and chain
 agree by construction instead of by carefully matching two Poseidon2 implementations.
 
-To run one, `npm ci` at the repo's root, then `npm run build` in `01-over-9000/` takes it from circuit
-to a deployable `.so`, and `npm test` proves and verifies it; the repo's `RUNBOOK.md` has the full
-toolchain and devnet deployment.
+Each example is an xark [project](/docs/guides/projects). To run one, `npm ci` at the repo's root,
+then `xark build` in `01-over-9000/` takes it from circuit to a deployable `.so`, and `xark test`
+runs its tests, proving and verifying onchain; the repo's `RUNBOOK.md` has the full toolchain and
+devnet deployment.
 
 <Callout type="warn">
 The examples are reference implementations for learning — unaudited, not for production. The shielded

@@ -3,10 +3,10 @@ title: How verification works
 description: The byte layout, the alt_bn128 pairing check, and the one function your program calls.
 ---
 
-`xark export` gives your Solana program a verifier crate with one job:
+`xark build` gives your Solana program a verifier crate (`clients/<circuit>/rust/`) with one job:
 
 ```rust
-if !my_circuit_verifier::verify(&proof, &public_inputs) {
+if !my_circuit_verifier::verify(&proof, inputs) {
     return Err(ProgramError::InvalidArgument);
 }
 ```
@@ -34,9 +34,10 @@ Three things are load-bearing:
 - **`A` is already negated.** The exporter writes `−A ‖ B ‖ C`, so the onchain check is a single
   product of pairings.
 - **Public-input order is the circuit's order.** The N scalars appear in exactly the order the
-  circuit declares its public parameters — the order `xark inspect` prints. Your program must
-  supply them the same way, or verification fails. Each scalar must be canonical (`< r`); a
-  non-canonical input is rejected outright.
+  circuit declares its public parameters — the order `xark inspect` prints — with a struct's
+  narrow fields packed together as its `#[input]` packs them. The generated crate's
+  `PublicInputs` does that for you. Each scalar must be canonical (`< r`); a non-canonical input
+  is rejected outright.
 
 ## Where the public inputs come from
 
@@ -50,15 +51,18 @@ let Some(proof) = instruction_data.first_chunk::<256>() else {
     return Err(ProgramError::InvalidInstructionData);
 };
 let proof = my_circuit_verifier::Proof::from_le_bytes(proof);
-let public_inputs: [[u8; 32]; 1] = [/* from your program's state */];
-if !my_circuit_verifier::verify(&proof, &public_inputs) {
+let inputs = my_circuit_verifier::PublicInputs {
+    result: /* from your program's state, 32 bytes little-endian */,
+};
+if !my_circuit_verifier::verify(&proof, inputs) {
     return Err(ProgramError::InvalidArgument);
 }
 ```
 
-When the transaction does carry the public inputs too (`proof ‖ public_inputs`),
-`verify_instruction_data(instruction_data)` checks both. Make sure your program then acts only on
-the public inputs it just verified.
+When the transaction carries the public inputs too (`proof ‖ public_inputs`, a TypeScript
+client's `proof.toInstructionData()`), split them off after the proof's 256 bytes into `Fields`
+and pass those to `verify`. Make sure your program then acts only on the public inputs it just
+verified.
 
 ## The check
 
@@ -84,16 +88,18 @@ computation it proves.
 
 ## The generated crate
 
-The crate `xark export` writes embeds the verifying key as a `const VERIFIER: Verifier<N>` and
-exposes:
+The crate `xark build` generates (`xark export` alone also writes it) embeds the verifying key as a
+`const VERIFIER: Verifier<N>` and exposes:
 
 | Item | Use |
 | --- | --- |
-| `verify(&Proof, &[[u8; 32]; N]) -> bool` | the proof from the transaction, the public inputs from your program |
-| `verify_instruction_data(&[u8]) -> bool` | `proof ‖ public_inputs`, both from the transaction |
-| `verify_strict`, `verify_instruction_data_strict` | also reject non-canonical point encodings |
+| `PublicInputs` | the circuit's public inputs by name, in Rust types (integers, `[u8; 32]`, `Days<FROM, TO>`, an enum per `Choice`, a `Bitfield` per set); `to_fields()` packs them, as a `const fn` |
+| `verify(&Proof, impl Into<Fields>) -> bool` | a `PublicInputs`, the field elements themselves, or your own struct with a `From` impl |
+| `verify_strict` | also rejects non-canonical point encodings |
+| `Fields` | `[[u8; 32]; N]`: the public inputs as field elements, in proof order, little-endian |
+| `fields::Packer` | packs your own struct the way `#[input]` does, each width a const generic |
 | `Proof::from_le_bytes(&[u8; 256])` | read a proof in the onchain layout |
-| `NUM_PUBLIC_INPUTS`, `VK_BYTES` | the circuit's public-input count; the raw verifying key |
+| `NUM_PUBLIC_INPUTS` | the circuit's public-input count |
 | `SETUP` | how the embedded key was made: `seeded`, `single-party`, `ceremony` (two or more contributors) or `unknown` |
 
 Every function returns `false` on any failure — a non-holding pairing, a malformed point, or a
@@ -103,7 +109,7 @@ a verifier whose key it doesn't accept; see [The trusted setup](/docs/trust/trus
 
 <Callout type="warn" title="A proof is not a replay key">
 Groth16 proofs are re-randomizable: anyone holding a valid proof can make a different valid proof of
-the same public inputs, and the `_strict` functions don't change that. Never use proof bytes, or
+the same public inputs, and `verify_strict` doesn't change that. Never use proof bytes, or
 their hash, as a replay or "already used" key. Put replay protection in the public inputs — a
 nullifier or nonce the circuit derives from a secret, or the signer the proof is for — and record
 *that* onchain.
