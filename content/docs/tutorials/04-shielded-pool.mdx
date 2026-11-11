@@ -23,7 +23,7 @@ because every deposit is the same amount. By the end you'll have:
 
 <Callout title="Prerequisites">
 Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
-`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new: Cargo
+`xark-cli` 0.4, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new: Cargo
 fetches `pinocchio` and `pinocchio-system`. This tutorial assumes you've done
 [01](/docs/tutorials/01-over-9000), [02](/docs/tutorials/02-zkyc) and
 [03](/docs/tutorials/03-token-claim), and doesn't re-explain their commands. You don't need
@@ -64,49 +64,55 @@ the program by construction.
 For the gadgets underneath, see [Commitments & Merkle trees](/docs/gadgets/commitments) and
 [Hashes](/docs/gadgets/hashes).
 
-This tutorial gets its own directory:
+This tutorial gets its own project, with two circuits, the crate they share and one program:
 
 ```text
-xark-pool/
-├── pool/       the tree, shared by both circuits and the wallet
-├── deposit/    the deposit circuit
-├── withdraw/   the withdraw circuit
-├── program/    the Pinocchio program
-└── app/        the TypeScript clients and the end-to-end test
+shielded-pool/
+├── circuits/
+│   ├── pool/                     the tree, shared by both circuits and the wallet
+│   ├── shielded-pool-deposit/    the deposit circuit
+│   └── shielded-pool-withdraw/   the withdraw circuit
+├── programs/shielded-pool/       the Pinocchio program
+├── clients/                      each circuit's verifier crate and TypeScript client
+├── keys/                         each circuit's proving and verifying keys
+└── tests/                        the wallet and the end-to-end test
 ```
 
 <Steps>
 
 <Step>
-### Create the crates
+### Create the project
+
+`xark init` makes the project with its first circuit, which `--circuit` names apart from the
+project. Then add the second circuit, and the shared crate beside them:
 
 ```sh
-mkdir xark-pool && cd xark-pool
-cargo new --lib pool
-xark init deposit
-xark init withdraw
+xark init shielded-pool --circuit shielded-pool-deposit && cd shielded-pool
+xark add circuit shielded-pool-withdraw
+cargo new --lib --vcs none circuits/pool
 ```
 
-`pool` is an ordinary Rust library, not a circuit: it has no `#[circuit]`. Both circuits will
-depend on it, and xark compiles it into each of them like any other dependency.
+Every command from here on runs at the project's root, `shielded-pool/`. `pool` is an ordinary
+Rust library, not a circuit: it has no `#[circuit]`. xark builds it only as part of the two
+circuits that depend on it, and compiles it into each of them like any other dependency.
 </Step>
 
 <Step>
 ### Write the tree
 
-Replace `pool/Cargo.toml` with:
+Replace `circuits/pool/Cargo.toml` with:
 
-```toml title="pool/Cargo.toml"
+```toml title="circuits/pool/Cargo.toml"
 [package]
 name = "pool"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-xark = "0.3"
-xark-hash = "0.3"
-xark-merkle = "0.3"
-xark-poseidon = "0.3"
+xark = "0.4"
+xark-hash = "0.4"
+xark-merkle = "0.4"
+xark-poseidon = "0.4"
 
 # `xark` is set only when xark compiles a circuit.
 [lints.rust]
@@ -117,9 +123,9 @@ The tree is [03's](/docs/tutorials/03-token-claim): a `Path` with the same `firs
 `update`, kept by the wallet as the **path of the next free leaf**. Two things differ. Its root is
 `xark-merkle`'s `merkle_root`, whose nodes are Poseidon, a different permutation from the notes'
 Poseidon2, so a node can't pass for a note. And 03's `list_root` is `tree_root` here: that path's
-root over the still-empty slot. Replace `pool/src/lib.rs` with:
+root over the still-empty slot. Replace `circuits/pool/src/lib.rs` with:
 
-```rust title="pool/src/lib.rs"
+```rust title="circuits/pool/src/lib.rs"
 //! What both circuits share: a path into the Merkle tree of notes, and
 //! Solana addresses as circuit inputs.
 use xark::prelude::*;
@@ -259,13 +265,12 @@ is that the crate is its own: both circuits depend on it, and so does
 scratch. Run it:
 
 ```console
-$ cd pool
-$ cargo test --release
+$ cargo test --release -p pool
 ...
 running 1 test
 test tests::paths_agree_with_the_whole_tree ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
 ```
 </Step>
 
@@ -275,14 +280,14 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 Add `pool` to the deposit crate:
 
 ```sh
-cd ../deposit
-cargo add --path ../pool
+cargo add -p shielded-pool-deposit --path circuits/pool
 ```
 
 A deposit proves one statement, its public `Append`: the program's root and next index, the new
-leaf, and the root once the leaf is appended. Replace `deposit/src/lib.rs` with:
+leaf, and the root once the leaf is appended. Replace `circuits/shielded-pool-deposit/src/lib.rs`
+with:
 
-```rust title="deposit/src/lib.rs"
+```rust title="circuits/shielded-pool-deposit/src/lib.rs"
 use pool::Path;
 use xark::prelude::*;
 
@@ -311,7 +316,7 @@ impl Append {
 }
 
 #[circuit]
-pub fn deposit(path: Private<Path>, append: Public<Append>) {
+pub fn shielded_pool_deposit(path: Private<Path>, append: Public<Append>) {
     require_eq(Append::of(path, append.leaf), append);
 }
 
@@ -323,11 +328,11 @@ mod tests {
     fn appends_to_the_tree() {
         let tip = Path::first().next(Field::from(7u64));
         let append = Append::of(tip, Field::from(8u64));
-        deposit(tip, append).unwrap();
+        shielded_pool_deposit(tip, append).unwrap();
         // Another index, or the empty tree's root: each is refused.
-        assert!(deposit(tip, Append { index: 2, ..append }).is_err());
+        assert!(shielded_pool_deposit(tip, Append { index: 2, ..append }).is_err());
         let empty = Path::first().tree_root();
-        assert!(deposit(tip, Append { old_root: empty, ..append }).is_err());
+        assert!(shielded_pool_deposit(tip, Append { old_root: empty, ..append }).is_err());
     }
 }
 ```
@@ -337,9 +342,8 @@ path. Only the tree's true siblings hash up to the program's `old_root`, so the 
 the true `new_root`. The depositor can't slip a different tree in.
 
 ```console
-$ cd ..
-$ xark test deposit
-xark building circuit `deposit`
+$ xark test circuits/shielded-pool-deposit
+xark building circuit `shielded-pool-deposit`
 xark 9626 vars, 9647 constraints, 9601 witness-gen ops
 xark circuit digest d43e8c0d55297486007612c4e210a6cc
 ...
@@ -357,15 +361,13 @@ these if your circuits do.
 The withdraw crate also hashes notes, with Poseidon2:
 
 ```sh
-cd withdraw
-cargo add xark-poseidon2@0.3
-cargo add --path ../pool
-cd ..
+cargo add -p shielded-pool-withdraw xark-poseidon2@0.4
+cargo add -p shielded-pool-withdraw --path circuits/pool
 ```
 
-Replace `withdraw/src/lib.rs` with:
+Replace `circuits/shielded-pool-withdraw/src/lib.rs` with:
 
-```rust title="withdraw/src/lib.rs"
+```rust title="circuits/shielded-pool-withdraw/src/lib.rs"
 use pool::{Hash, Path};
 use xark::prelude::*;
 use xark_poseidon2::hash;
@@ -416,7 +418,7 @@ impl Withdrawal {
 }
 
 #[circuit]
-pub fn withdraw(note: Private<Note>, path: Private<Path>, withdrawal: Public<Withdrawal>) {
+pub fn shielded_pool_withdraw(note: Private<Note>, path: Private<Path>, withdrawal: Public<Withdrawal>) {
     // The note is in the tree, and this is its nullifier hash.
     require_eq(path.root(note.commitment()), withdrawal.root);
     require_eq(note.nullifier_hash(), withdrawal.nullifier_hash);
@@ -444,12 +446,12 @@ mod tests {
 
         let ok = Withdrawal::of(mine, path, [1; 32].into(), [2; 32].into(), 5);
         assert_eq!(ok.root, root);
-        withdraw(mine, path, ok).unwrap();
+        shielded_pool_withdraw(mine, path, ok).unwrap();
         // Their note at my path, or a root my note isn't in: refused.
         let theirs_here = Withdrawal { nullifier_hash: theirs.nullifier_hash(), ..ok };
-        assert!(withdraw(theirs, path, theirs_here).is_err());
+        assert!(shielded_pool_withdraw(theirs, path, theirs_here).is_err());
         let stale = Withdrawal { root: tip.tree_root(), ..ok };
-        assert!(withdraw(mine, path, stale).is_err());
+        assert!(shielded_pool_withdraw(mine, path, stale).is_err());
     }
 }
 ```
@@ -466,8 +468,8 @@ at most the denomination before paying it out. The leaf index in `Path` is a `u3
 path. Amounts need no range proof at all: every note in a pool is the same denomination.
 
 ```console
-$ xark test withdraw
-xark building circuit `withdraw`
+$ xark test circuits/shielded-pool-withdraw
+xark building circuit `shielded-pool-withdraw`
 xark 5387 vars, 5382 constraints, 5357 witness-gen ops
 xark circuit digest 5bfbf4d76ed90e8aa38b9bd0ea431e5d
 ...
@@ -475,10 +477,11 @@ running 1 test
 test tests::withdraws_a_note_in_the_tree ... ok
 ```
 
-The program will assemble the public inputs in the circuit's order. List them:
+These are the public inputs the program will check a withdrawal against, in the circuit's order.
+List them:
 
 ```console
-$ xark inspect withdraw --json | tail -10
+$ xark inspect circuits/shielded-pool-withdraw --json | tail -10
   "public_inputs": [
     "withdrawal.root",
     "withdrawal.nullifier_hash",
@@ -490,77 +493,76 @@ $ xark inspect withdraw --json | tail -10
   ]
 }
 ```
+
+Each address is two field elements, its `Hash`'s halves. The program won't split them, or lay out
+any of these itself: the verifier crate xark generates next takes them by name.
 </Step>
 
 <Step>
 ### Make the keys, the verifier crates and the clients
 
-The same three commands as in 02, once per circuit:
+A program verifies the circuits' proofs. `xark add program` starts one: it makes the deposit
+circuit's keys, its verifier crate and TypeScript client, then a starter Pinocchio program in
+`programs/shielded-pool/` and a LiteSVM test. `xark build` then does the same for every circuit
+that has no keys or clients yet, the withdraw circuit here, and builds the program:
 
 ```console
-$ xark setup deposit
+$ xark add program shielded-pool --circuit shielded-pool-deposit
+...
+Wrote .../keys/shielded-pool-deposit/pk.bin
 ...
 Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
+...
+Generated verifier crate `shielded-pool-deposit-verifier` at .../clients/shielded-pool-deposit/rust (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
+...
+✅ TypeScript client for `shielded_pool_deposit` at .../clients/shielded-pool-deposit/ts/shielded_pool_deposit.ts
 
-$ xark setup withdraw
+xark added program `shielded-pool-program` in .../programs/shielded-pool, verifying `shielded-pool-deposit`
 ...
 
-$ xark export deposit
-Generated verifier crate `deposit-verifier` at .../deposit/deposit-verifier (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+$ xark build
 ...
-
-$ xark export withdraw
-Generated verifier crate `withdraw-verifier` at .../withdraw/withdraw-verifier (7 public input(s), VK = 960 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
+xark building circuit `shielded-pool-withdraw`
 ...
+Wrote .../keys/shielded-pool-withdraw/pk.bin
+...
+Generated verifier crate `shielded-pool-withdraw-verifier` at .../clients/shielded-pool-withdraw/rust (7 public input(s), VK = 960 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
+...
+✅ TypeScript client for `shielded_pool_withdraw` at .../clients/shielded-pool-withdraw/ts/shielded_pool_withdraw.ts
 
-$ xark client deposit --out app/
-✅ TypeScript client for `deposit` at app/deposit.ts
-
-$ xark client withdraw --out app/
-✅ TypeScript client for `withdraw` at app/withdraw.ts
+xark building the programs (cargo build-sbf)
+...
+    Finished `release` profile [optimized] target(s) in 0.40s
 ```
 
-Each client carries its crate's Rust as `client.wasm`, `pool` included: `Path.first()`,
-`Append.of` and `Note.commitment` all run from TypeScript.
+Each circuit now has its keys in `keys/<circuit>/`, and in `clients/<circuit>/` a Rust verifier
+crate for the program and a TypeScript client for the wallet. Each client carries its crate's
+Rust as `client.wasm`, `pool` included: `Path.first()`, `Append.of` and `Note.commitment` all run
+from TypeScript.
 </Step>
 
 <Step>
 ### Keep a wallet in TypeScript
 
-Set up `app/` as in 01:
+`xark add program` wrote a `package.json` with the test's dependencies. Install them:
 
 ```sh
-cd app
-npm init -y
-npm pkg set type=module
-npm install @blueshift-gg/xark@^0.3.0 vitest
+npm install
 ```
 
-Create `app/shielded-pool.test.ts`:
+It also wrote a starter test, with placeholder inputs. Replace `tests/shielded-pool.test.ts` with:
 
-```ts title="app/shielded-pool.test.ts"
-import { readFileSync } from "node:fs";
+```ts title="tests/shielded-pool.test.ts"
+import { circuit } from "@blueshift-gg/xark/testing";
 import { beforeAll, expect, test } from "vitest";
-import { Append, Deposit, Path, type DepositProver } from "./deposit";
-import { Field, Note, Withdraw, Withdrawal, type WithdrawProver } from "./withdraw";
+import { Append, Path, ShieldedPoolDeposit, type ShieldedPoolDepositProver } from "../clients/shielded-pool-deposit/ts/shielded_pool_deposit";
+import { Field, Note, ShieldedPoolWithdraw, Withdrawal, type ShieldedPoolWithdrawProver } from "../clients/shielded-pool-withdraw/ts/shielded_pool_withdraw";
 
-/** What `xark build`, `xark setup` and `xark client` wrote for circuit `name`. */
-function files(name: string) {
-  const out = `../${name}/target/xark/${name}/`;
-  const read = (file: string) => new Uint8Array(readFileSync(out + file));
-  return {
-    circuit: read("circuit.xbc"),
-    provingKey: read("pk.bin"),
-    sources: readFileSync(out + "sources.json", "utf8"),
-    client: read("client.wasm"),
-  };
-}
-
-let deposits: DepositProver;
-let withdrawals: WithdrawProver;
+let deposits: ShieldedPoolDepositProver;
+let withdrawals: ShieldedPoolWithdrawProver;
 beforeAll(async () => {
-  deposits = await Deposit.prover(files("deposit"), { digest: Deposit.digest });
-  withdrawals = await Withdraw.prover(files("withdraw"), { digest: Withdraw.digest });
+  deposits = await ShieldedPoolDeposit.prover(circuit("shielded-pool-deposit"), { digest: ShieldedPoolDeposit.digest });
+  withdrawals = await ShieldedPoolWithdraw.prover(circuit("shielded-pool-withdraw"), { digest: ShieldedPoolWithdraw.digest });
 });
 
 /** A fresh note: two random field elements, kept secret by the depositor. */
@@ -592,13 +594,13 @@ test("a wallet keeps its path as others deposit", () => {
 }, 60_000);
 ```
 
-This is the wallet: `Path.first`, `next` and `update` are the Rust from `pool`, so the paths the
-wallet keeps can't disagree with the circuits. `deposits` is for the onchain test at the end.
-Run it:
+`circuit("shielded-pool-deposit")` reads that circuit's build output and its keys. This is the
+wallet: `Path.first`, `next` and `update` are the Rust from `pool`, so the paths the wallet keeps
+can't disagree with the circuits. `deposits` is for the onchain test at the end. Run it:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2280ms
+ ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2489ms
 
  Test Files  1 passed (1)
       Tests  1 passed (1)
@@ -621,7 +623,7 @@ The program is Pinocchio, as in 01 to 03, and has three instructions:
 It's longer than 03's, so you'll write it in pieces, in the usual Pinocchio layout:
 
 ```text
-program/src/
+programs/shielded-pool/src/
 ├── lib.rs                  the entrypoint
 ├── state.rs                the pool's account and the nullifier's
 ├── helpers.rs              the account checks the instructions share
@@ -633,46 +635,49 @@ program/src/
 └── errors.rs               the program's own errors
 ```
 
-From `xark-pool/`:
+`xark add program` wrote a starter with one instruction, which verifies a deposit proof against
+public inputs taken from the instruction. This program replaces it; delete that instruction:
 
 ```sh
-cd ..
-cargo new --lib program --name shielded-pool
-mkdir program/src/instructions
+rm programs/shielded-pool/src/instructions/verify.rs
 ```
 
-Replace `program/Cargo.toml` with:
+Replace `programs/shielded-pool/Cargo.toml` with:
 
-```toml title="program/Cargo.toml"
+```toml title="programs/shielded-pool/Cargo.toml"
 [package]
-name = "shielded-pool"
+name = "shielded-pool-program"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
-deposit-verifier = { path = "../deposit/deposit-verifier" }
-withdraw-verifier = { path = "../withdraw/withdraw-verifier" }
+shielded-pool-deposit-verifier = { path = "../../clients/shielded-pool-deposit/rust" }
+shielded-pool-withdraw-verifier = { path = "../../clients/shielded-pool-withdraw/rust" }
 pinocchio = "0.11"
 pinocchio-system = "0.6"
 
 # Onchain, PDAs come from the runtime's syscalls; a host build (your editor,
 # clippy) derives them in software.
-[target.'cfg(not(target_os = "solana"))'.dependencies]
+[target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
 solana-address = { version = "2", features = ["curve25519"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(target_arch, values("bpf"))',
+] }
 ```
 
 The first byte of the instruction data is a discriminator, which instruction it is: `0`, `1` or
 `2`. Each instruction's file declares its own, and the entrypoint hands the rest of the data and
-the accounts to that instruction. Replace `program/src/lib.rs` with:
+the accounts to that instruction. Replace `programs/shielded-pool/src/lib.rs` with:
 
-```rust title="program/src/lib.rs"
-#![no_std]
+```rust title="programs/shielded-pool/src/lib.rs"
+#![cfg_attr(not(test), no_std)]
 
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
 
@@ -691,7 +696,9 @@ pub const ID: Address = Address::new_from_array([
 ]);
 
 program_entrypoint!(process_instruction);
+#[cfg(not(test))]
 pinocchio::nostd_panic_handler!();
+#[cfg(not(test))]
 pinocchio::no_allocator!();
 
 fn process_instruction(
@@ -721,7 +728,8 @@ fn dispatch(accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramRes
 
 `ID` is the program's address. The program checks its accounts against it, so it must be the
 address the program is deployed at; the test at the end deploys it there. The errors it logs are
-the ones you'll write last.
+the ones you'll write last. The program is `no_std` except in its own tests, which `xark test`
+runs on the host.
 </Step>
 
 <Step>
@@ -735,9 +743,9 @@ The program owns two kinds of account, each at a PDA:
 | `nullifier` | `["nullifier", denomination as u64 LE, nullifier_hash]` | 1 |
 
 Each starts with a tag byte, so one kind can't be passed off as the other. Create
-`program/src/state.rs`:
+`programs/shielded-pool/src/state.rs`:
 
-```rust title="program/src/state.rs"
+```rust title="programs/shielded-pool/src/state.rs"
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 
 use crate::helpers::writable;
@@ -858,9 +866,10 @@ test checks it against the circuit's `Path.first().treeRoot()`.
 
 Nothing checks an account for a Pinocchio program: the runtime hands it the accounts the
 transaction names, and anyone can name any account. So each check is written out, once, and each
-instruction's accounts struct calls the ones it needs. Create `program/src/helpers.rs`:
+instruction's accounts struct calls the ones it needs. Create
+`programs/shielded-pool/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
+```rust title="programs/shielded-pool/src/helpers.rs"
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
 /// An account the program writes to.
@@ -895,9 +904,9 @@ pub fn is_uninitialized(account: &AccountView) -> bool {
 }
 ```
 
-The pool's own check reads the pool, so it goes with it. Append to `program/src/state.rs`:
+The pool's own check reads the pool, so it goes with it. Append to `programs/shielded-pool/src/state.rs`:
 
-```rust title="program/src/state.rs"
+```rust title="programs/shielded-pool/src/state.rs"
 impl Pool {
     /// A pool account: writable, owned by this program, a pool's size and tag, at
     /// the address its own denomination and stored bump derive.
@@ -945,9 +954,9 @@ What each one prevents:
 
 Each instruction is three structs, as in [02](/docs/tutorials/02-zkyc): its accounts, checked as
 they're taken; its instruction data, checked for length; and the instruction, which holds both and
-whose `process` does the work. Create `program/src/instructions/mod.rs`:
+whose `process` does the work. Replace `programs/shielded-pool/src/instructions/mod.rs` with:
 
-```rust title="program/src/instructions/mod.rs"
+```rust title="programs/shielded-pool/src/instructions/mod.rs"
 pub mod deposit;
 pub mod initialize;
 pub mod withdraw;
@@ -957,9 +966,9 @@ pub use initialize::*;
 pub use withdraw::*;
 ```
 
-Then `program/src/instructions/initialize.rs`:
+Then `programs/shielded-pool/src/instructions/initialize.rs`:
 
-```rust title="program/src/instructions/initialize.rs"
+```rust title="programs/shielded-pool/src/instructions/initialize.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
@@ -1080,39 +1089,32 @@ constant, so no one can seed one with another tree.
 <Step>
 ### Deposit
 
-A deposit's public inputs need a `u64` as a field element, and it logs an event. Both are
-helpers; append to `program/src/helpers.rs`:
+A deposit logs an event, for wallets to follow the tree by. The log is a helper; append to
+`programs/shielded-pool/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
-/// A u64 as a 32-byte little-endian field element.
-pub fn field_from_u64(x: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&x.to_le_bytes());
-    out
-}
-
+```rust title="programs/shielded-pool/src/helpers.rs"
 /// `Program data: <base64> <base64> ..`, one per slice.
 pub fn log_data(data: &[&[u8]]) {
-    #[cfg(target_os = "solana")]
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     // SAFETY: `data` is a valid slice of slices, the layout the syscall reads.
     unsafe {
         pinocchio::syscalls::sol_log_data(data.as_ptr().cast(), data.len() as u64)
     };
-    #[cfg(not(target_os = "solana"))]
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
     let _ = data;
 }
 ```
 
-Create `program/src/instructions/deposit.rs`:
+Create `programs/shielded-pool/src/instructions/deposit.rs`:
 
-```rust title="program/src/instructions/deposit.rs"
-use deposit_verifier::{Proof, verify};
+```rust title="programs/shielded-pool/src/instructions/deposit.rs"
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 use pinocchio_system::instructions::Transfer;
+use shielded_pool_deposit_verifier::{Append, Proof, PublicInputs, verify};
 
 use crate::{
     ShieldedPoolError,
-    helpers::{field_from_u64, log_data, system_program, writable_signer},
+    helpers::{log_data, system_program, writable_signer},
     state::{Pool, TREE_HEIGHT},
 };
 
@@ -1194,14 +1196,17 @@ impl<'a> Deposit<'a> {
                 return Err(ShieldedPoolError::TreeFull.into());
             }
 
-            // The deposit circuit's public `Append`, field by field.
-            let public_inputs = [
-                *pool.current_root(),
-                *self.data.new_root,
-                *self.data.commitment,
-                field_from_u64(u64::from(index)),
-            ];
-            if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+            // The deposit circuit's public `Append`: the tree as the program has
+            // it, and the leaf and root the depositor claims.
+            let inputs = PublicInputs {
+                append: Append {
+                    old_root: *pool.current_root(),
+                    new_root: *self.data.new_root,
+                    leaf: *self.data.commitment,
+                    index,
+                },
+            };
+            if !verify(&Proof::from_le_bytes(self.data.proof), inputs) {
                 return Err(ShieldedPoolError::InvalidProof.into());
             }
             pool.push_root(self.data.new_root);
@@ -1223,9 +1228,11 @@ impl<'a> Deposit<'a> {
 ```
 
 The program builds the deposit circuit's `Append` itself: `old_root` and `index` from its own state,
-and only the commitment and the new root from the instruction. A proof holds only for this pool's
-tree as it is now, so the depositor can't append to an older tree, or at another index. The
-other checks:
+and only the commitment and the new root from the instruction. `PublicInputs` and `Append` come from
+the generated verifier crate, with the circuit's own field names; the crate packs them into field
+elements in the circuit's order, so the program never lays out a public input by hand. A proof
+holds only for this pool's tree as it is now, so the depositor can't append to an older tree, or
+at another index. The other checks:
 
 - **The data is exactly 320 bytes**, so the proof the verifier reads is the 256 bytes sent.
 - **The tree isn't full.** A tree of height 20 has 2^20 leaves, and the circuit's index can't
@@ -1240,19 +1247,19 @@ is how a wallet learns of other deposits, to call `update` on its paths.
 <Step>
 ### Withdraw
 
-Create `program/src/instructions/withdraw.rs`:
+Create `programs/shielded-pool/src/instructions/withdraw.rs`:
 
-```rust title="program/src/instructions/withdraw.rs"
+```rust title="programs/shielded-pool/src/instructions/withdraw.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
 };
-use withdraw_verifier::{Proof, verify};
+use shielded_pool_withdraw_verifier::{Proof, PublicInputs, Withdrawal, verify};
 
 use crate::{
     ShieldedPoolError,
-    helpers::{field_from_u64, is_uninitialized, system_program, writable, writable_signer},
+    helpers::{is_uninitialized, system_program, writable, writable_signer},
     state::{NULLIFIER_SEED, Nullifier, Pool},
 };
 
@@ -1371,19 +1378,18 @@ impl<'a> Withdraw<'a> {
             return Err(ShieldedPoolError::UnknownRoot.into());
         }
 
-        // The withdraw circuit's public `Withdrawal`, field by field.
-        let [r_hi, r_lo] = address_halves(self.accounts.recipient.address().as_array());
-        let [l_hi, l_lo] = address_halves(self.accounts.relayer.address().as_array());
-        let public_inputs = [
-            *self.data.root,
-            *self.data.nullifier_hash,
-            r_hi,
-            r_lo,
-            l_hi,
-            l_lo,
-            field_from_u64(fee),
-        ];
-        if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+        // The withdraw circuit's public `Withdrawal`: the recipient and relayer are
+        // this transaction's accounts.
+        let inputs = PublicInputs {
+            withdrawal: Withdrawal {
+                root: *self.data.root,
+                nullifier_hash: *self.data.nullifier_hash,
+                recipient: self.accounts.recipient.address().to_bytes(),
+                relayer: self.accounts.relayer.address().to_bytes(),
+                fee,
+            },
+        };
+        if !verify(&Proof::from_le_bytes(self.data.proof), inputs) {
             return Err(ShieldedPoolError::InvalidProof.into());
         }
 
@@ -1429,18 +1435,6 @@ fn credit(account: &mut AccountView, lamports: u64) -> ProgramResult {
     account.set_lamports(balance);
     Ok(())
 }
-
-/// An address as the circuit's `Hash`: `[hi, lo]`, each 16-byte half read as a
-/// big-endian integer, as 32-byte little-endian field elements.
-fn address_halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
-    let half = |b: &[u8]| {
-        let mut out = [0u8; 32];
-        out[..16].copy_from_slice(b);
-        out[..16].reverse();
-        out
-    };
-    [half(&bytes[..16]), half(&bytes[16..])]
-}
 ```
 
 The cheap checks come first, before the proof's verification, which is most of the instruction's
@@ -1456,8 +1450,9 @@ compute:
 - **`root` is one of the pool's recent roots**, so a proof against a tree the pool never had, or
   had too long ago, is refused: `UnknownRoot`.
 
-Then the public inputs: `root` and `nullifier_hash` from the instruction, the two addresses from
-the transaction's accounts and `fee` as the relayer sent it. A relayer who swaps the recipient for
+Then the public inputs, the generated `Withdrawal`: `root` and `nullifier_hash` from the
+instruction, the two addresses from the transaction's accounts and `fee` as the relayer sent it.
+Each address goes in as its 32 bytes, and the crate splits it into the `Hash`'s two halves. A relayer who swaps the recipient for
 their own, or raises the fee, has a proof of another statement, which fails with `InvalidProof`.
 
 Two more checks guard the payout:
@@ -1480,10 +1475,10 @@ paid back by `fee`.
 Most failures have a built-in Solana error, as each check above returns: `NotEnoughAccountKeys`,
 `InvalidInstructionData`, `MissingRequiredSignature`, `Immutable`, `IncorrectProgramId`,
 `InvalidAccountOwner`, `InvalidAccountData`, `InvalidSeeds`, `AccountAlreadyInitialized`,
-`InvalidArgument`, `InsufficientFunds` and `ArithmeticOverflow`. Five are the pool's own. Create
-`program/src/errors.rs`:
+`InvalidArgument`, `InsufficientFunds` and `ArithmeticOverflow`. Five are the pool's own. Replace
+`programs/shielded-pool/src/errors.rs` with:
 
-```rust title="program/src/errors.rs"
+```rust title="programs/shielded-pool/src/errors.rs"
 use pinocchio::error::{ProgramError, ToStr};
 
 /// The program's own errors, as `ProgramError::Custom` codes.
@@ -1534,17 +1529,17 @@ impl ToStr for ShieldedPoolError {
 
 The codes are `0` to `4`, in the order they're declared. `TryFrom<u32>` and `ToStr` let the
 entrypoint turn a code back into its name with `ProgramError::to_str`. Last, the log itself;
-append to `program/src/helpers.rs`:
+append to `programs/shielded-pool/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
+```rust title="programs/shielded-pool/src/helpers.rs"
 /// `Program log: <message>`.
 pub fn log(message: &str) {
-    #[cfg(target_os = "solana")]
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     // SAFETY: the pointer and length are a valid `&str`'s.
     unsafe {
         pinocchio::syscalls::sol_log_(message.as_ptr(), message.len() as u64)
     };
-    #[cfg(not(target_os = "solana"))]
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
     let _ = message;
 }
 ```
@@ -1554,19 +1549,26 @@ pub fn log(message: &str) {
 ### Build the program
 
 ```console
-$ cd program
-$ cargo build-sbf --arch v3
+$ xark build
+xark building circuit `shielded-pool-deposit`
+xark unchanged since the last build: reusing its circuit (digest d43e8c0d55297486007612c4e210a6cc)
 ...
-   Compiling deposit-verifier v0.1.0 (.../deposit/deposit-verifier)
-   Compiling withdraw-verifier v0.1.0 (.../withdraw/withdraw-verifier)
-   Compiling solana-instruction-view v2.1.0
+xark building circuit `shielded-pool-withdraw`
+xark unchanged since the last build: reusing its circuit (digest 5bfbf4d76ed90e8aa38b9bd0ea431e5d)
+...
+xark building the programs (cargo build-sbf)
+...
+   Compiling shielded-pool-deposit-verifier v0.1.0 (.../clients/shielded-pool-deposit/rust)
+   Compiling shielded-pool-withdraw-verifier v0.1.0 (.../clients/shielded-pool-withdraw/rust)
+...
    Compiling pinocchio v0.11.2
    Compiling pinocchio-system v0.6.1
-   Compiling shielded-pool v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.61s
+   Compiling shielded-pool-program v0.1.0 (.../programs/shielded-pool)
+    Finished `release` profile [optimized] target(s) in 0.60s
 ```
 
-The program is at `program/target/deploy/shielded_pool.so`. There's no hash of the tree anywhere
+The circuits haven't changed, so their keys and clients stay as they are. The program is at
+`target/deploy/shielded_pool_program.so`. There's no hash of the tree anywhere
 in it: the only hashing is the runtime's, deriving the PDAs. The program reads every other public
 input from its own state (`current_root`, `next_index`) or from the transaction (the recipient's
 and relayer's addresses), so a proof only holds for this pool, now, paying these accounts.
@@ -1575,47 +1577,19 @@ and relayer's addresses), so a proof only holds for this pool, now, paying these
 <Step>
 ### Deposit and withdraw onchain
 
-Back in `app/`, add the Solana packages:
+The test runs the program in LiteSVM, with `@blueshift-gg/xark/testing`'s helpers: `vm` deploys
+the program, `funded` makes a keypair with SOL, and `send` signs and sends an instruction, and
+throws with the program's logs if it fails. Replace the `@blueshift-gg/xark/testing` import at the
+top of `tests/shielded-pool.test.ts` with these two:
 
-```sh
-cd ../app
-npm install @solana/kit litesvm
+```ts title="tests/shielded-pool.test.ts"
+import { AccountRole, address, generateKeyPairSigner, getAddressEncoder, getProgramDerivedAddress, type Address, type KeyPairSigner } from "@solana/kit";
+import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 ```
 
-Add these imports at the top of `shielded-pool.test.ts`:
+Then add the helpers at the end: the program's discriminators, and its instruction data.
 
-```ts title="app/shielded-pool.test.ts"
-import {
-  AccountRole, address, appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner,
-  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
-  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
-  type Address, type Instruction, type KeyPairSigner,
-} from "@solana/kit";
-import { FailedTransactionMetadata, LiteSVM } from "litesvm";
-```
-
-Then add the helpers at the end: 01's `send`, the program's discriminators, and its instruction
-data.
-
-```ts title="app/shielded-pool.test.ts"
-// Send `instruction` in one transaction, paid by `payer`. Returns the compute
-// units it used, or throws with the program's logs.
-async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction) {
-  const tx = await pipe(
-    createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayerSigner(payer, m),
-    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
-    (m) => appendTransactionMessageInstruction(instruction, m),
-    (m) => signTransactionMessageWithSigners(m),
-  );
-  const result = svm.sendTransaction(tx);
-  svm.expireBlockhash();
-  if (result instanceof FailedTransactionMetadata) {
-    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
-  }
-  return result.computeUnitsConsumed();
-}
-
+```ts title="tests/shielded-pool.test.ts"
 // The program's instruction discriminators.
 const INITIALIZE = 0;
 const DEPOSIT = 1;
@@ -1637,31 +1611,25 @@ Finally, the test. Two people deposit 1 SOL each. The first then withdraws throu
 signs and pays the transaction fee, to a fresh address that holds nothing. Each instruction's
 accounts are in the order the program destructures them:
 
-```ts title="app/shielded-pool.test.ts"
+```ts title="tests/shielded-pool.test.ts"
 test("deposit, someone else deposits, withdraw through a relayer, once", async () => {
-  const svm = new LiteSVM();
   const program = address("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"); // the program's `ID`
-  svm.addProgramFromFile(program, "../program/target/deploy/shielded_pool.so");
+  const svm = vm({ [program]: deployed("shielded-pool") });
   const system = { address: address("11111111111111111111111111111111"), role: AccountRole.READONLY };
   const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
   const signer = (s: KeyPairSigner) => ({ address: s.address, role: AccountRole.WRITABLE_SIGNER, signer: s });
-  const funded = async (sol: bigint) => {
-    const s = await generateKeyPairSigner();
-    svm.airdrop(s.address, lamports(sol * 1_000_000_000n));
-    return s;
-  };
   const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
 
   // A pool of 1 SOL notes. Its empty root is the circuit's.
   const DENOMINATION = 1_000_000_000n;
   const [pool] = await getProgramDerivedAddress({ programAddress: program, seeds: ["pool", u64le(DENOMINATION)] });
-  const authority = await funded(10n);
+  const authority = await funded(svm);
   const initialized = await send(svm, authority, {
     programAddress: program,
     accounts: [writable(pool), signer(authority), system],
     data: instructionData(INITIALIZE, u64le(DENOMINATION)),
   });
-  console.log(`initialize in ${initialized} CU`);
+  console.log(`initialize in ${initialized.computeUnitsConsumed()} CU`);
   let tip = Path.first();
   const account = svm.getAccount(pool);
   expect(account.exists && account.data.subarray(24, 56)).toEqual(tip.treeRoot().toBytes());
@@ -1671,13 +1639,13 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
     const leaf = Note.commitment(note);
     const append = Append.of(tip, leaf);
     const proof = deposits.prove({ path: tip, append });
-    const depositor = await funded(10n);
-    const units = await send(svm, depositor, {
+    const depositor = await funded(svm);
+    const sent = await send(svm, depositor, {
       programAddress: program,
       accounts: [writable(pool), signer(depositor), system],
       data: instructionData(DEPOSIT, leaf.toBytes(), append.newRoot.toBytes(), proof.toBytes()),
     });
-    console.log(`deposit ${append.index} verified onchain in ${units} CU`);
+    console.log(`deposit ${append.index} verified onchain in ${sent.computeUnitsConsumed()} CU`);
     const path = tip;
     tip = tip.next(leaf);
     return { path, leaf };
@@ -1691,7 +1659,7 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
   path = path.update(later, leaf);
 
   // A relayer submits my withdrawal to a fresh address, for a fee.
-  const relayer = await funded(10n);
+  const relayer = await funded(svm);
   const recipient = (await generateKeyPairSigner()).address;
   const fee = 10_000_000n;
   const statement = Withdrawal.of(mine, path, bytes(recipient), bytes(relayer.address), fee);
@@ -1711,8 +1679,8 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
   const thief = (await generateKeyPairSigner()).address;
   await expect(send(svm, relayer, withdraw(thief))).rejects.toThrow(/InvalidProof/);
 
-  const units = await send(svm, relayer, withdraw(recipient));
-  console.log(`withdrawal verified onchain in ${units} CU`);
+  const sent = await send(svm, relayer, withdraw(recipient));
+  console.log(`withdrawal verified onchain in ${sent.computeUnitsConsumed()} CU`);
   expect(svm.getBalance(recipient)).toBe(DENOMINATION - fee);
 
   // The nullifier is spent: the same note can't come out twice.
@@ -1724,28 +1692,49 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ shielded-pool.test.ts > a wallet keeps its path as others deposit 2328ms
-stdout | shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
-initialize in 2988 CU
+ ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2899ms
+stdout | tests/shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
+initialize in 3022 CU
 ...
-deposit 0 verified onchain in 91572 CU
+deposit 0 verified onchain in 91665 CU
 ...
-deposit 1 verified onchain in 92233 CU
+deposit 1 verified onchain in 92305 CU
 ...
-withdrawal verified onchain in 111251 CU
+withdrawal verified onchain in 113435 CU
 
- ✓ shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4690ms
+ ✓ tests/shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 5666ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
 ```
 
 Creating the pool took about 3,000 compute units, each deposit about 92,000 and the withdrawal
-about 111,000, proof verification included. `withdraw` varies by 1,500 for each extra try
+about 113,000, proof verification included. `withdraw` varies by 1,500 for each extra try
 `find_program_address` takes to find the nullifier's bump. Two deposits went in, and the first came
 out to an address that had never held SOL. The same proof was refused for another recipient with
 `InvalidProof`, and a second withdrawal of the note was refused with `NullifierSpent`, when the
 program found its nullifier account already there.
+
+`xark test` runs everything the project has: both circuits' tests, `pool`'s and the program's Rust
+tests, then these, after a build:
+
+```console
+$ xark test
+xark building circuit `shielded-pool-deposit`
+...
+test tests::appends_to_the_tree ... ok
+...
+test tests::withdraws_a_note_in_the_tree ... ok
+...
+xark building the programs (cargo build-sbf)
+...
+test tests::paths_agree_with_the_whole_tree ... ok
+...
+xark running the TypeScript tests (npm test)
+...
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
 </Step>
 
 </Steps>
@@ -1776,13 +1765,13 @@ can't both land: a real wallet reads the pool's state just before proving, and p
 another deposit wins.
 
 <Callout type="warn" title="Before you deploy">
-`xark setup` made single-party keys: sound unless whoever ran it kept its randomness. A pool that
-holds value needs keys from a ceremony, and an audit. See
+The keys `xark build` made are single-party: sound unless whoever made them kept their randomness.
+A pool that holds value needs keys from a ceremony, and an audit. See
 [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
-The finished example, with a `justfile` that runs every step, host tests of each account check,
-and a test of more refusals (another fee, an unknown root), is
+The finished example, with host tests of each account check and a test of more refusals (another
+fee, an unknown root), is
 [04-shielded-pool](https://github.com/blueshift-gg/xark-examples/tree/main/04-shielded-pool) in
 xark-examples.
 

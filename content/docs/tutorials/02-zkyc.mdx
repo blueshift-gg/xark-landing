@@ -28,43 +28,43 @@ the right wallet, under the program's policy, on the right day, and refused othe
 
 <Callout title="Prerequisites">
 Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
-`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new. You don't
+`xark-cli` 0.4, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new. You don't
 need 01's files, but this tutorial assumes you've done it and doesn't re-explain its commands.
 </Callout>
-
-This tutorial gets its own directory, laid out as in 01:
-
-```text
-xark-zkyc/
-├── zkyc/      the circuit crate
-├── program/   the Solana program
-└── app/       the TypeScript client and the end-to-end test
-```
 
 <Steps>
 
 <Step>
-### Create the circuit crate
+### Create the project
 
 ```sh
-mkdir xark-zkyc && cd xark-zkyc
-xark init zkyc
-cd zkyc
-cargo add xark-poseidon2@0.3 xark-hash@0.3
-cd ..
+xark init zkyc && cd zkyc
+cargo add -p zkyc xark-poseidon2@0.4 xark-hash@0.4
 ```
 
-Besides `xark`, this circuit uses two [gadget crates](/docs/gadgets): `xark-poseidon2`, a hash
-that's cheap inside a circuit, for the commitment, and `xark-hash`, for the wallet address.
+Every command from here runs at the project's root, `zkyc/`. Besides `xark`, this circuit uses two
+[gadget crates](/docs/gadgets): `xark-poseidon2`, a hash that's cheap inside a circuit, for the
+commitment, and `xark-hash`, for the wallet address.
+
+By the end, the project holds everything, as in 01:
+
+```text
+zkyc/
+├── circuits/zkyc/   the circuit crate
+├── programs/zkyc/   the Solana program
+├── clients/zkyc/    generated: the verifier crate (rust/) and the TypeScript client (ts/)
+├── keys/zkyc/       the proving and verifying keys
+└── tests/           the end-to-end test
+```
 </Step>
 
 <Step>
 ### Describe the identity
 
 An issuer (a KYC provider, a government portal) checks your documents once and gives you what it
-found as an `Identity`. Replace `zkyc/src/lib.rs` with:
+found as an `Identity`. Replace `circuits/zkyc/src/lib.rs` with:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
 use xark::prelude::*;
 
 /// A calendar day from 1900 through 2100.
@@ -122,9 +122,9 @@ See [Everyday types](/docs/reference/inputs#everyday-types) for the rest.
 <Step>
 ### Describe the policy
 
-Now the verifier's side: what it requires, on which day. Append to `zkyc/src/lib.rs`:
+Now the verifier's side: what it requires, on which day. Append to `circuits/zkyc/src/lib.rs`:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
 /// What a verifier requires, checked on `today`.
 #[input]
 pub struct Policy {
@@ -178,7 +178,7 @@ See [Packing](/docs/reference/inputs#packing).
 
 Append the circuit and three tests:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
 #[circuit]
 pub fn zkyc(id: Private<Identity>, commitment: Public<Field>, policy: Public<Policy>) {
     require_eq(id.commitment(), commitment);
@@ -264,7 +264,7 @@ the client will.
 ### Run the tests
 
 ```console
-$ xark test zkyc
+$ xark test
 xark building circuit `zkyc`
 xark 1356 vars, 1369 constraints, 1350 witness-gen ops
 xark circuit digest fdbbf1a8cc83d56cd35e46bca20d5eaf
@@ -279,7 +279,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 A compliant holder passes, each failed check fails it, and nobody passes with someone else's
 commitment. Most of the 1,369 constraints are the Poseidon2 hash and the membership check, one
-factor for each of the 249 countries; `xark profile zkyc` breaks them down by line.
+factor for each of the 249 countries; `xark profile circuits/zkyc` breaks them down by line.
 </Step>
 
 <Step>
@@ -289,15 +289,15 @@ So far a proof says that *someone* holding this credential passes. Anyone who sa
 submit it as their own. To stop that, make the holder's wallet a public input. A Solana address is
 32 bytes, which the circuit takes as `xark_hash::Hash`.
 
-Add the import at the top of `src/lib.rs`:
+Add the import at the top of `circuits/zkyc/src/lib.rs`:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
 use xark_hash::Hash;
 ```
 
 and give the circuit a fourth input:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
 #[circuit]
 pub fn zkyc(
     id: Private<Identity>,
@@ -309,24 +309,24 @@ pub fn zkyc(
 
 In the tests, add a wallet after `use Country::*;`:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
     const HOLDER: [u8; 32] = [7; 32];
 ```
 
 and pass `HOLDER` as the last argument to both calls of `zkyc`:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
         zkyc(id, id.commitment(), policy(), HOLDER)
 ```
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
         assert!(zkyc(id, other, policy(), HOLDER).is_err());
 ```
 
 Run the tests again:
 
 ```console
-$ xark test zkyc
+$ xark test
 xark building circuit `zkyc`
 warning: unused variable: `holder`
 ...
@@ -340,19 +340,19 @@ it, so an input no constraint touches would verify with any value. Nothing needs
 `holder`; it only has to be tied to the proof. That's what `bind` does. Add it as the circuit's
 last line:
 
-```rust title="zkyc/src/lib.rs"
+```rust title="circuits/zkyc/src/lib.rs"
     id.nationality.require_in(policy.allowed);
     bind(holder);
 }
 ```
 
 ```console
-$ xark test zkyc
+$ xark test
 xark building circuit `zkyc`
 xark 1360 vars, 1371 constraints, 1352 witness-gen ops
 xark circuit digest 40b78b407222fb9a6dc617d5168aaa53
 ...
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 ```
 
 `bind` adds one constraint per field element: two, for the address's two halves. See
@@ -360,29 +360,33 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 </Step>
 
 <Step>
-### Make the keys, the verifier crate and the client
+### Add the program
 
-The same three commands as in 01:
+As in 01, one command makes the circuit's keys, its verifier crate and its TypeScript client, then a
+Solana program and a test to start from:
 
 ```console
-$ xark setup zkyc
+$ xark add program zkyc
+xark building circuit `zkyc`
+...
+Wrote .../zkyc/keys/zkyc/pk.bin
+Wrote .../zkyc/keys/zkyc/vk.bin
+Wrote .../zkyc/keys/zkyc/metadata.json
 ...
 Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
-
-$ xark export zkyc
-Generated verifier crate `zkyc-verifier` at .../zkyc/zkyc-verifier (5 public input(s), VK = 832 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
 ...
-✅ On-chain verifier crate ready (verifying key embedded).
+Generated verifier crate `zkyc-verifier` at .../zkyc/clients/zkyc/rust (5 public input(s), VK = 832 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
+...
+✅ TypeScript client for `zkyc` at .../zkyc/clients/zkyc/ts/zkyc.ts
 
-$ xark client zkyc --out app/
-✅ TypeScript client for `zkyc` at app/zkyc.ts
+xark added program `zkyc-program` in .../zkyc/programs/zkyc, verifying `zkyc`
 ```
 
-The verifier takes five public inputs. Your program will have to supply them in the circuit's
-order, which `xark inspect` lists field by field:
+The verifier takes five public inputs. A proof is over field elements in the circuit's order, which
+`xark inspect` lists one by one:
 
 ```console
-$ xark inspect zkyc --json | tail -8
+$ xark inspect --json | tail -8
   "public_inputs": [
     "commitment",
     "policy.{today,born_by,min_net_worth}",
@@ -393,48 +397,54 @@ $ xark inspect zkyc --json | tail -8
 }
 ```
 
-That's the packing from before: `policy` is two field elements, the first holding three fields.
-The address is two 16-byte halves.
+That's the packing from before: `policy` is two field elements, the first holding three fields. The
+address is two 16-byte halves. Your program won't build those elements itself. The verifier crate
+in `clients/zkyc/rust/` has the circuit's public inputs by name, in plain `no_std` Rust:
 
-This time there's no proof from `xark prove` for the verifier crate to bundle as a self-test: the
-end-to-end test at the end checks it instead.
+```rust title="clients/zkyc/rust/src/lib.rs"
+/// `Policy`, as the circuit takes it.
+pub struct Policy {
+    pub today: Days<1900, 2100>,
+    pub born_by: Days<1900, 2100>,
+    pub min_net_worth: u64,
+    pub allowed: Bitfield<Country>,
+}
+
+/// This circuit's public inputs, by name: what a proof proves, and what your
+/// program requires (from its own state: a policy, a root, a signer).
+pub struct PublicInputs {
+    pub commitment: [u8; 32],
+    pub policy: Policy,
+    pub holder: [u8; 32],
+}
+```
+
+with `Days`, `Bitfield` and a `Country` enum to fill them, and `verify(&proof, inputs)`. It packs
+`PublicInputs` into those five field elements as `#[input]` does, from the circuit's own schema, so
+the order, the bit offsets and the address's halves are the circuit's by construction.
 </Step>
 
 <Step>
 ### Prove from TypeScript
 
-Set up `app/` as in 01:
+`xark add program` also wrote the project's `package.json`, with xark's TypeScript runtime and
+LiteSVM. Install them:
 
 ```sh
-cd app
-npm init -y
-npm pkg set type=module
-npm install @blueshift-gg/xark@^0.3.0 vitest
+npm install
 ```
 
-Create `app/zkyc.test.ts`:
+It wrote a test to start from, too. Replace `tests/zkyc.test.ts` with:
 
-```ts title="app/zkyc.test.ts"
-import { readFileSync } from "node:fs";
-import { beforeAll, expect, test } from "vitest";
-import { CheckFailed, Country, Field, Identity, Policy, Zkyc, type ZkycProver } from "./zkyc";
-
-// What `xark build` and `xark setup` wrote. A web app would serve this
-// directory and pass its URL instead.
-const out = "../zkyc/target/xark/zkyc/";
-const read = (file: string) => new Uint8Array(readFileSync(out + file));
+```ts title="tests/zkyc.test.ts"
+import { circuit } from "@blueshift-gg/xark/testing";
+import { CheckFailed, Country, Field, Identity, Policy, Zkyc, type ZkycProver } from "../clients/zkyc/ts/zkyc";
 
 let prover: ZkycProver;
 beforeAll(async () => {
-  prover = await Zkyc.prover(
-    {
-      circuit: read("circuit.xbc"),
-      provingKey: read("pk.bin"),
-      sources: readFileSync(out + "sources.json", "utf8"),
-      client: read("client.wasm"), // the crate's Rust: Identity.commitment, Policy.on
-    },
-    { digest: Zkyc.digest },
-  );
+  // The circuit's build output and keys, and `client.wasm`: the crate's Rust,
+  // `Identity.commitment` and `Policy.on`.
+  prover = await Zkyc.prover(circuit("zkyc"), { digest: Zkyc.digest });
 });
 
 /** The issuer's credential for a holder, with a random salt. */
@@ -461,7 +471,7 @@ test("a compliant holder has a proof", async () => {
   const proof = prover.prove({ id, commitment, policy, holder });
 
   // The verifier sees the public inputs, and nothing of `id`.
-  const verifier = await Zkyc.verifier(read("vk.bin"));
+  const verifier = await Zkyc.verifier(circuit("zkyc").verifyingKey);
   expect(verifier.verify(proof.toBytes(), { commitment, policy, holder })).toBe(true);
 });
 
@@ -477,14 +487,16 @@ test("an identity that fails the policy has no proof", () => {
 });
 ```
 
-`Identity.commitment` and `Policy.on` are the Rust you wrote, compiled into `client.wasm` by
-`xark client`, so there's no TypeScript copy of either to drift from the circuit. See
+`circuit("zkyc")` reads the circuit's build output, and its keys from `keys/zkyc/`; the project's
+Vitest config makes `test`, `expect` and `beforeAll` globals.
+`Identity.commitment` and `Policy.on` are the Rust you wrote, compiled into `client.wasm` with the
+client, so there's no TypeScript copy of either to drift from the circuit. See
 [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ zkyc.test.ts > a compliant holder has a proof 253ms
- ✓ zkyc.test.ts > an identity that fails the policy has no proof 657ms
+ ✓ tests/zkyc.test.ts > a compliant holder has a proof 281ms
+ ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 712ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -499,39 +511,15 @@ would: ``the inputs fail the check at src/lib.rs:68:5: `require(id.born <= polic
 
 The program checks the proof against public inputs it assembles itself: the commitment from the
 instruction data, the policy from its own rules and clock, and the holder from the transaction's
-signer. From `xark-zkyc/`:
+signer.
 
-```sh
-cd ..
-cargo new --lib program --name zkyc-program
-```
-
-Replace `program/Cargo.toml` with:
-
-```toml title="program/Cargo.toml"
-[package]
-name = "zkyc-program"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-zkyc-verifier = { path = "../zkyc/zkyc-verifier" }
-pinocchio = "0.11"
-
-# The host tests compare the program's policy with the circuit's.
-[dev-dependencies]
-zkyc = { path = "../zkyc" }
-xark = "0.3"
-```
-
-The program has the usual Pinocchio layout: `lib.rs` only dispatches, each instruction has its own
-file, and the program's own errors have theirs. This one has a single instruction, `VerifyKyc`:
+`xark add program` wrote it in `programs/zkyc/`, in the usual Pinocchio layout: `lib.rs` only
+dispatches, each instruction has its own file, and the program's own errors have theirs. Its one
+instruction, `Verify`, takes every public input from the instruction data, which would let the
+prover pick the policy and the wallet. Replace it with `VerifyKyc`:
 
 ```text
-program/src/
+programs/zkyc/src/
 ├── lib.rs                      the entrypoint
 ├── errors.rs                   the program's own errors
 ├── instructions/
@@ -541,36 +529,22 @@ program/src/
 ```
 
 ```sh
-mkdir program/src/instructions
+rm programs/zkyc/src/instructions/verify.rs
 ```
 
-Replace `program/src/lib.rs` with the entrypoint. The first byte of the instruction data is a
-discriminator that says which instruction it is; `VerifyKyc`'s is `0`, and anything else is
-refused:
+In `programs/zkyc/src/lib.rs`, declare the policy module after the other two:
 
-```rust title="program/src/lib.rs"
-#![cfg_attr(not(test), no_std)]
-
-use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
-
+```rust title="programs/zkyc/src/lib.rs"
 mod errors;
 mod instructions;
 mod policy;
+```
 
-pub use errors::*;
-pub use instructions::*;
+and dispatch to the new instruction. The first byte of the instruction data is a discriminator
+that says which instruction it is; `VerifyKyc`'s is `0`, and anything else is refused:
 
-program_entrypoint!(process_instruction);
-#[cfg(not(test))]
-pinocchio::nostd_panic_handler!();
-#[cfg(not(test))]
-pinocchio::no_allocator!();
-
-fn process_instruction(
-    _program_id: &Address,
-    accounts: &mut [AccountView],
-    instruction_data: &[u8],
-) -> ProgramResult {
+```rust title="programs/zkyc/src/lib.rs"
+fn dispatch(accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramResult {
     match instruction_data.split_first() {
         Some((VerifyKyc::DISCRIMINATOR, data)) => {
             VerifyKyc::try_from((data, &*accounts))?.process()
@@ -582,28 +556,12 @@ fn process_instruction(
 
 Most failures have a built-in Solana error: a missing account is `NotEnoughAccountKeys`, an
 unsigned holder `MissingRequiredSignature`, malformed data `InvalidInstructionData`. Only a proof
-that doesn't verify needs one of the program's own. Create `program/src/errors.rs`:
+that doesn't verify needs one of the program's own, and the generated `errors.rs` already has it:
+`ZkycError::InvalidProof`, custom error 0, which `lib.rs` logs by name.
 
-```rust title="program/src/errors.rs"
-use pinocchio::error::ProgramError;
+Point `programs/zkyc/src/instructions/mod.rs` at the new file:
 
-/// The program's own errors, as `ProgramError::Custom` codes.
-#[repr(u32)]
-pub enum ZkycError {
-    /// The proof doesn't verify against the public inputs the program assembles.
-    InvalidProof = 0,
-}
-
-impl From<ZkycError> for ProgramError {
-    fn from(e: ZkycError) -> Self {
-        ProgramError::Custom(e as u32)
-    }
-}
-```
-
-and `program/src/instructions/mod.rs`:
-
-```rust title="program/src/instructions/mod.rs"
+```rust title="programs/zkyc/src/instructions/mod.rs"
 pub mod verify_kyc;
 
 pub use verify_kyc::*;
@@ -611,15 +569,15 @@ pub use verify_kyc::*;
 
 The instruction itself is three structs. `VerifyKycAccounts` takes the accounts and checks them,
 `VerifyKycInstructionData` takes the data and checks its length, and `VerifyKyc` holds both and
-verifies the proof. Create `program/src/instructions/verify_kyc.rs`:
+verifies the proof. Create `programs/zkyc/src/instructions/verify_kyc.rs`:
 
-```rust title="program/src/instructions/verify_kyc.rs"
+```rust title="programs/zkyc/src/instructions/verify_kyc.rs"
 use pinocchio::{
     AccountView, ProgramResult,
     error::ProgramError,
     sysvars::{Sysvar, clock::Clock},
 };
-use zkyc_verifier::{Proof, verify};
+use zkyc_verifier::{Proof, PublicInputs, verify};
 
 use crate::{ZkycError, policy::policy};
 
@@ -681,30 +639,24 @@ impl<'a> VerifyKyc<'a> {
     pub const DISCRIMINATOR: &'a u8 = &0;
 
     pub fn process(&mut self) -> ProgramResult {
-        // The public inputs, in the circuit's order: commitment, the policy's two field
-        // elements, holder.hi, holder.lo.
-        let [packed, allowed] = policy(Clock::get()?.unix_timestamp);
-        let [holder_hi, holder_lo] = halves(self.accounts.holder.address().as_array());
-        let public_inputs = [*self.data.commitment, packed, allowed, holder_hi, holder_lo];
-        if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+        // Today comes from the cluster, not the prover. A day the circuit's dates
+        // can't hold has no policy, and so no proof either.
+        let policy = policy(Clock::get()?.unix_timestamp).ok_or(ZkycError::InvalidProof)?;
+        let inputs = PublicInputs {
+            commitment: *self.data.commitment,
+            policy,
+            holder: *self.accounts.holder.address().as_array(),
+        };
+        if !verify(&Proof::from_le_bytes(self.data.proof), inputs) {
             return Err(ZkycError::InvalidProof.into());
         }
         Ok(())
     }
 }
-
-/// An address as the circuit's `Hash`: `[hi, lo]`, each 16-byte half read as a
-/// big-endian integer, as 32-byte little-endian field elements.
-fn halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
-    let half = |b: &[u8]| {
-        let mut out = [0u8; 32];
-        out[..16].copy_from_slice(b);
-        out[..16].reverse();
-        out
-    };
-    [half(&bytes[..16]), half(&bytes[16..])]
-}
 ```
+
+`PublicInputs` takes the address as its 32 bytes; the crate splits it into the circuit's two
+halves.
 
 Each check closes a door:
 
@@ -733,55 +685,48 @@ valid proof against a policy with no net-worth check. So the program never takes
 transaction: it builds its own, and the proof verifies only if the holder proved against exactly
 that. The circuit stays the same for every verifier; each picks its rules by what it supplies.
 
-The program can't link xark, so it builds the policy as the circuit takes it: the two field
-elements from `xark inspect`, packed by hand. Create `program/src/policy.rs`:
+The program can't link xark, but it doesn't need to: the verifier crate's `Policy` is the circuit's,
+with its types. `Days::from_unix` turns the clock into the circuit's day, a `Bitfield<Country>` is
+built at compile time, and `PublicInputs` packs it all. The one thing left to the program is the
+calendar: `Policy::on` gets `born_by` from xark's `years_before`, which the program does in a few
+lines of `no_std` Rust. Create `programs/zkyc/src/policy.rs`:
 
-```rust title="program/src/policy.rs"
+```rust title="programs/zkyc/src/policy.rs"
+use zkyc_verifier::{Bitfield, Country, Days, Policy};
+
 // The program's policy: 18 or older, worth at least 500,000, a national of DE, FR,
 // GB or US, with a document valid today.
 const MIN_AGE: i64 = 18;
 const MIN_NET_WORTH: u64 = 500_000;
-/// The allowed countries' positions in xark's `Country`, a bit each.
-const ALLOWED: [u8; 32] = countries(&[56, 74, 76, 232]);
+const ALLOWED: Bitfield<Country> = Bitfield::EMPTY
+    .with(Country::DE)
+    .with(Country::FR)
+    .with(Country::GB)
+    .with(Country::US);
 
-/// The program's `Policy` on the day holding the Unix time `unix`, as the circuit
-/// takes it: `today | born_by << 17 | min_net_worth << 34` in one field element,
-/// then `allowed` in its own.
-pub fn policy(unix: i64) -> [[u8; 32]; 2] {
-    let day = unix.div_euclid(86_400);
-    let packed = u128::from(since_1900(day))
-        | u128::from(born_by(day)) << 17
-        | u128::from(MIN_NET_WORTH) << 34;
-    let mut out = [0u8; 32];
-    out[..16].copy_from_slice(&packed.to_le_bytes());
-    [out, ALLOWED]
+/// The circuit's `Day`: 1900-01-01 to 2100-12-31.
+type Day = Days<1900, 2100>;
+
+/// The program's `Policy` on the day holding the Unix time `unix`, or `None` on a
+/// day the circuit's dates can't hold.
+pub fn policy(unix: i64) -> Option<Policy> {
+    let today = Day::from_unix(unix)?;
+    Some(Policy {
+        today,
+        born_by: born_by(today)?,
+        min_net_worth: MIN_NET_WORTH,
+        allowed: ALLOWED,
+    })
 }
 
-/// A `Bitfield<Country>` with bit `i` set for each position `i`.
-const fn countries(positions: &[usize]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut i = 0;
-    while i < positions.len() {
-        out[positions[i] / 8] |= 1 << (positions[i] % 8);
-        i += 1;
-    }
-    out
-}
-
-/// A day counted from 1970-01-01 as the circuit's `Day` holds it: days since
-/// 1900-01-01.
-fn since_1900(day: i64) -> u32 {
-    (day - days_from_civil(1900, 1, 1)) as u32
-}
-
-/// The latest birth date of someone `MIN_AGE` on `day`: the same day `MIN_AGE`
+/// The latest birth date of someone `MIN_AGE` on `today`: the same day `MIN_AGE`
 /// years earlier, or the 28th for a 29 February that year doesn't have.
-fn born_by(day: i64) -> u32 {
-    let (y, m, d) = civil_from_days(day);
+fn born_by(today: Day) -> Option<Day> {
+    let (y, m, d) = civil_from_days(today.to_unix().div_euclid(86_400));
     let y = y - MIN_AGE;
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
     let d = if m == 2 && d == 29 && !leap { 28 } else { d };
-    since_1900(days_from_civil(y, m, d))
+    Day::from_unix(days_from_civil(y, m, d) * 86_400)
 }
 
 /// The civil date of a day count from 1970-01-01: Howard Hinnant's
@@ -814,9 +759,10 @@ mod tests {
     use xark::Field;
     use xark::prelude::Country::*;
     use zkyc::{Day, Policy};
+    use zkyc_verifier::PublicInputs;
 
     /// Every day from 1918 to 2100, the program's policy is the circuit's, field
-    /// element for field element: the dates, the packing and the countries.
+    /// element for field element: the dates, the countries and their packing.
     #[test]
     fn the_policy_is_the_circuits() {
         let start = days_from_civil(1918, 1, 1) * 86_400;
@@ -824,90 +770,97 @@ mod tests {
         for unix in (start..end).step_by(86_400) {
             let today = Day::from_unix(unix).unwrap();
             let want = Policy::on(today, MIN_AGE as u16, MIN_NET_WORTH, [DE, FR, GB, US]);
-            let got = policy(unix).map(|f| Field::from_le_bytes(&f));
+            let policy = policy(unix).unwrap();
+            let fields = PublicInputs {
+                commitment: [0; 32],
+                policy,
+                holder: [0; 32],
+            }
+            .to_fields();
+            let got = [
+                Field::from_le_bytes(&fields[1]),
+                Field::from_le_bytes(&fields[2]),
+            ];
             assert_eq!(got, want.to_fields(), "on {:?}", today.date());
         }
+    }
+
+    /// Before 1918, someone 18 was born before the circuit's first day.
+    #[test]
+    fn no_policy_outside_the_circuits_days() {
+        assert!(policy(days_from_civil(1917, 12, 31) * 86_400).is_none());
+        assert!(policy(days_from_civil(2101, 1, 1) * 86_400).is_none());
     }
 }
 ```
 
-The packing, the calendar and the country positions are a second implementation of the circuit's
-`Policy`, and could drift from it, so the test pins them. It runs on the host, where the circuit
-crate is plain Rust, and compares the program's two field elements with the circuit's own
+The calendar and the country list are a second implementation of the circuit's `Policy::on`, and
+could drift from it, so the first test pins them. It runs on the host, where the circuit crate is
+plain Rust, and compares the field elements the program's policy packs into with the circuit's own
 `Policy::on(..).to_fields()` for every day from 1918 (the first whose `born_by` is in range) to
 2100.
 
-```console
-$ cd program
-$ cargo test
-...
-running 1 test
-test policy::tests::the_policy_is_the_circuits ... ok
+The tests need the circuit crate and xark. Add them to `programs/zkyc/Cargo.toml`:
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
+```toml title="programs/zkyc/Cargo.toml"
+# The host tests compare the program's policy with the circuit's.
+[dev-dependencies]
+zkyc = { path = "../../circuits/zkyc" }
+xark = "0.4"
 ```
 
-Change a position in `ALLOWED` and the test fails on its first day, `(1918, 1, 1)`, with both
+At the root, a bare `cargo test` runs the programs' tests:
+
+```console
+$ cargo test
+...
+running 2 tests
+test policy::tests::no_policy_outside_the_circuits_days ... ok
+test policy::tests::the_policy_is_the_circuits ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+```
+
+Change a country in `ALLOWED` and the test fails on its first day, `(1918, 1, 1)`, with both
 values printed.
 </Step>
 
 <Step>
 ### Build the program
 
+`xark build` at the root builds everything that's out of date: the circuit, its clients, then the
+program with `cargo build-sbf`.
+
 ```console
-$ cargo build-sbf --arch v3
+$ xark build
+xark building circuit `zkyc`
 ...
-   Compiling zkyc-verifier v0.1.0 (.../zkyc/zkyc-verifier)
-   Compiling zkyc-program v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.41s
+xark building the programs (cargo build-sbf)
+...
+   Compiling zkyc-verifier v0.1.0 (.../zkyc/clients/zkyc/rust)
+   Compiling zkyc-program v0.1.0 (.../zkyc/programs/zkyc)
+    Finished `release` profile [optimized] target(s) in 0.46s
 ```
 
-The program is at `program/target/deploy/zkyc_program.so`.
+The program is at `target/deploy/zkyc_program.so`. Commit `keys/` and `clients/` with your code: the
+verifier crate embeds the verifying key, and `xark build --check` (CI's check) fails when they're not
+what the source generates.
 </Step>
 
 <Step>
 ### Verify the proof onchain
 
-Back in `app/`, add the Solana packages:
+In `tests/zkyc.test.ts`, replace the first import with these three:
 
-```sh
-cd ../app
-npm install @solana/kit litesvm
+```ts title="tests/zkyc.test.ts"
+import { AccountRole, generateKeyPairSigner, getAddressEncoder, type Address, type KeyPairSigner } from "@solana/kit";
+import type { LiteSVM } from "litesvm";
+import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 ```
 
-Add these imports at the top of `zkyc.test.ts`:
+Then add two helpers at the end, the program's instruction and a way to set the VM's clock:
 
-```ts title="app/zkyc.test.ts"
-import {
-  AccountRole, appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner, getAddressEncoder,
-  lamports, pipe, setTransactionMessageFeePayerSigner, setTransactionMessageLifetimeUsingBlockhash,
-  signTransactionMessageWithSigners, type Address, type Instruction, type KeyPairSigner,
-} from "@solana/kit";
-import { FailedTransactionMetadata, LiteSVM } from "litesvm";
-```
-
-Then add three helpers at the end: 01's `send`, the program's instruction, and a way to set the
-VM's clock.
-
-```ts title="app/zkyc.test.ts"
-// Send `instruction` in one transaction, paid by `payer`. Returns the compute
-// units it used, or throws with the program's logs.
-async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction) {
-  const tx = await pipe(
-    createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayerSigner(payer, m),
-    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
-    (m) => appendTransactionMessageInstruction(instruction, m),
-    (m) => signTransactionMessageWithSigners(m),
-  );
-  const result = svm.sendTransaction(tx);
-  svm.expireBlockhash();
-  if (result instanceof FailedTransactionMetadata) {
-    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
-  }
-  return result.computeUnitsConsumed();
-}
-
+```ts title="tests/zkyc.test.ts"
 // The program's instruction: signed by `holder`, with data 0 (`VerifyKyc`'s
 // discriminator) ‖ proof ‖ commitment.
 const verifyKyc = (program: Address, holder: KeyPairSigner, proof: Uint8Array, commitment: Field) => ({
@@ -924,17 +877,17 @@ function setDay(svm: LiteSVM, day: string) {
 }
 ```
 
-Finally, the test. The holder proves against the program's policy for today and their own
-address, and the program accepts the proof only from that wallet, for that commitment, on that
-day. A second holder, too poor for the program, proves against a laxer policy of their own:
+Finally, the test. `vm` makes a LiteSVM with the program at an address, `funded` a payer with SOL,
+and `send` signs and sends a transaction, throwing with the program's logs if it fails. The holder
+proves against the program's policy for today and their own address, and the program accepts the
+proof only from that wallet, for that commitment, on that day. A second holder, too poor for the
+program, proves against a laxer policy of their own:
 
-```ts title="app/zkyc.test.ts"
+```ts title="tests/zkyc.test.ts"
 test("the program accepts the proof for its holder, today, under its policy", async () => {
-  const svm = new LiteSVM();
   const program = (await generateKeyPairSigner()).address;
-  svm.addProgramFromFile(program, "../program/target/deploy/zkyc_program.so");
-  const payer = await generateKeyPairSigner();
-  svm.airdrop(payer.address, lamports(1_000_000_000n));
+  const svm = vm({ [program]: deployed("zkyc") });
+  const payer = await funded(svm);
   setDay(svm, "2026-10-22");
 
   // The issuer's credential and its public commitment, and the holder's wallet.
@@ -944,26 +897,26 @@ test("the program accepts the proof for its holder, today, under its policy", as
   const address = new Uint8Array(getAddressEncoder().encode(holder.address));
 
   const proof = prover.prove({ id, commitment, policy: programs("2026-10-22"), holder: address }).toBytes();
-  const units = await send(svm, payer, verifyKyc(program, holder, proof, commitment));
-  console.log(`verified onchain in ${units} CU`);
+  const ok = await send(svm, payer, verifyKyc(program, holder, proof, commitment));
+  console.log(`verified onchain in ${ok.computeUnitsConsumed()} CU`);
 
   // Someone who copies the proof can't submit it from their own wallet,
   const copycat = await generateKeyPairSigner();
-  await expect(send(svm, payer, verifyKyc(program, copycat, proof, commitment))).rejects.toThrow(/custom program error: 0x0/);
-  // or for someone else's commitment,
+  await expect(send(svm, payer, verifyKyc(program, copycat, proof, commitment))).rejects.toThrow(/InvalidProof/);
+  // or for someone else's commitment.
   const other = Identity.commitment(credential());
-  await expect(send(svm, payer, verifyKyc(program, holder, proof, other))).rejects.toThrow(/custom program error: 0x0/);
+  await expect(send(svm, payer, verifyKyc(program, holder, proof, other))).rejects.toThrow(/InvalidProof/);
 
   // A holder worth 100 proves against a policy with no net-worth check: a valid
   // proof, of a statement the program doesn't ask about.
   const poor = credential({ netWorth: 100 });
   const lax = { ...programs("2026-10-22"), minNetWorth: 0 };
   const laxProof = prover.prove({ id: poor, commitment: Identity.commitment(poor), policy: lax, holder: address }).toBytes();
-  await expect(send(svm, payer, verifyKyc(program, holder, laxProof, Identity.commitment(poor)))).rejects.toThrow(/custom program error: 0x0/);
+  await expect(send(svm, payer, verifyKyc(program, holder, laxProof, Identity.commitment(poor)))).rejects.toThrow(/InvalidProof/);
 
   // And tomorrow the program's policy has moved on.
   setDay(svm, "2026-10-23");
-  await expect(send(svm, payer, verifyKyc(program, holder, proof, commitment))).rejects.toThrow(/custom program error: 0x0/);
+  await expect(send(svm, payer, verifyKyc(program, holder, proof, commitment))).rejects.toThrow(/InvalidProof/);
 });
 ```
 
@@ -971,22 +924,23 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ zkyc.test.ts > a compliant holder has a proof 256ms
- ✓ zkyc.test.ts > an identity that fails the policy has no proof 694ms
-stdout | zkyc.test.ts > the program accepts the proof for its holder, today, under its policy
-verified onchain in 100887 CU
+ ✓ tests/zkyc.test.ts > a compliant holder has a proof 283ms
+ ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 729ms
+stdout | tests/zkyc.test.ts > the program accepts the proof for its holder, today, under its policy
+verified onchain in 102524 CU
 
- ✓ zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 514ms
+ ✓ tests/zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 535ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```
 
-The proof verified onchain, in about 101,000 compute units, and was refused from another wallet,
-for another commitment, and the next day, each time with `custom program error: 0x0`, the
-program's `InvalidProof`. The lax proof was refused too: the prover made it, but
-the program checked it against its own policy. A proof is for one UTC day: one that lands after
-midnight UTC has to be made again.
+The proof verified onchain, in about 103,000 compute units, and was refused from another wallet,
+for another commitment, and the next day, each time with the program's `InvalidProof`. The lax
+proof was refused too: the prover made it, but the program checked it against its own policy. A
+proof is for one UTC day: one that lands after midnight UTC has to be made again.
+
+From now on `xark test` runs all of it: the circuit's tests, the program's, then these.
 </Step>
 
 </Steps>
@@ -1016,21 +970,26 @@ policy; it says nothing about whether the commitment is true. This program accep
 so anyone could commit to a 1900 birth date and a billion in net worth. A real one checks the
 commitment against a registry its trusted issuers sign, or has the circuit verify the issuer's
 signature with a [signature gadget](/docs/gadgets/signatures). A program serving several verifiers
-would also keep each policy in an account rather than in constants, and pack it the same way.
+would also keep each policy in an account rather than in constants, and build its `Policy` the
+same way.
 
 Checking against a registry raises the next question: how does a circuit prove a value is in a list
 of thousands without the list being a public input? The next tutorial answers it with a **Merkle
 tree**: a token claim, where the list is one published root and your place in it a private path.
 
 <Callout type="warn" title="Before you deploy">
-`xark setup` made a single-party key: sound unless whoever ran it kept its randomness. A program
+`xark add program` made a single-party key: sound unless whoever ran it kept its randomness. A program
 that guards anything real needs a key from a ceremony. See
 [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
-The finished example, with npm scripts that run every step, a policy builder
-(`Policy::default().on(today).min_age(18)…`), a bundled self-test proof and more tests, is
-[02-zkyc](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc) in xark-examples.
+The finished example, with a policy builder (`Policy::default().on(today).min_age(18)…`), a bundled
+self-test proof and more tests, is [02-zkyc](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc)
+in xark-examples: the circuit in
+[`circuits/zkyc/`](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc/circuits/zkyc),
+the program in [`programs/zkyc/`](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc/programs/zkyc)
+and the end-to-end test in
+[`tests/zkyc.test.ts`](https://github.com/blueshift-gg/xark-examples/tree/main/02-zkyc/tests/zkyc.test.ts).
 
 <Cards>
   <Card title="03 · Token claim" href="/docs/tutorials/03-token-claim" description="Merkle trees in a circuit: claim an airdrop by proving your address and amount are on the list, with the path private." />

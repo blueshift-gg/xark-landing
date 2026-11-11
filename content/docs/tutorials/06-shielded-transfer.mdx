@@ -35,23 +35,27 @@ real legal weight, which depends on your jurisdiction.
 
 <Callout title="Prerequisites">
 Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
-`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf` (this tutorial was run
+`xark-cli` 0.4, Node 22 or newer, and the Anza CLI for `cargo-build-sbf` (this tutorial was run
 with 4.1.0). It builds on all five earlier tutorials: [01](/docs/tutorials/01-over-9000) and
 [02](/docs/tutorials/02-zkyc) for the commands and the public inputs a program assembles,
 [03](/docs/tutorials/03-token-claim) for the SPL vault and PDA signing,
 [04](/docs/tutorials/04-shielded-pool) for the tree, and
-[05](/docs/tutorials/05-anonymous-voting) for nullifier keys and relayers. You'll need your `xark-pool/` directory from
+[05](/docs/tutorials/05-anonymous-voting) for nullifier keys and relayers. You'll need your `shielded-pool/` project from
 04: this tutorial reuses its `pool` crate.
 </Callout>
 
-This tutorial gets its own directory, beside `xark-pool/`, laid out as in 04:
+This tutorial gets its own project, beside `shielded-pool/`, laid out as in 04:
 
 ```text
-xark-transfer/
-├── pool/       04's tree, copied in
-├── transact/   the JoinSplit circuit
-├── program/    the Pinocchio program, with an SPL token vault
-└── app/        the TypeScript client and the end-to-end test
+shielded-transfer/
+├── circuits/
+│   ├── pool/                 04's tree, copied in
+│   └── shielded_transact/    the JoinSplit circuit
+├── programs/
+│   └── shielded-transfer/    the Pinocchio program, with an SPL token vault
+├── clients/shielded_transact/  generated: the verifier crate and the TypeScript client
+├── keys/shielded_transact/     the proving and verifying keys
+└── tests/                    the end-to-end test
 ```
 
 ## One circuit for everything
@@ -76,38 +80,40 @@ every transaction has the same shape: one circuit, one instruction, the same pub
 <Step>
 ### Start the project
 
-From the directory that holds `xark-pool/`:
+`xark init` makes the project with its first circuit, named with `--circuit` as in 04. Then copy
+in 04's `pool` crate, and add the circuit's dependencies. From the directory that holds
+`shielded-pool/`:
 
 ```sh
-mkdir xark-transfer && cd xark-transfer
-cp -r ../xark-pool/pool .
-xark init transact
-cd transact
-cargo add xark-poseidon2@0.3
-cargo add --path ../pool
-cd ..
+xark init shielded-transfer --circuit shielded_transact && cd shielded-transfer
+cp -r ../shielded-pool/circuits/pool circuits/
+cargo add -p shielded_transact xark-poseidon2@0.4
+cargo add -p shielded_transact --path circuits/pool
 ```
 
+Every command from here on runs at the project's root, `shielded-transfer/`.
+
 The new circuit reuses the `pool` crate you wrote in 04: its `Path`, with the `first`, `next` and
-`update` a wallet keeps it current with, and its `Hash`, 32 bytes as two field elements. You'll
-see the copy is yours:
+`update` a wallet keeps it current with, and its `Hash`, 32 bytes as two field elements. It has no
+`#[circuit]`, so xark builds it only as part of the circuits that use it. You'll see the copy is
+yours:
 
 ```console
-$ grep -A3 '^\[dependencies\]' transact/Cargo.toml
+$ grep -A3 '^\[dependencies\]' circuits/shielded_transact/Cargo.toml
 [dependencies]
 pool = { version = "0.1.0", path = "../pool" }
-xark = { version = "0.3" }
-xark-poseidon2 = "0.3"
+xark = { version = "0.4" }
+xark-poseidon2 = "0.4"
 ```
 </Step>
 
 <Step>
 ### Write the circuit
 
-Replace `transact/src/lib.rs` with the circuit's types. Each `#[input]` type is an input
-the client takes as it is, and each `#[input] impl` is Rust the client can call:
+Replace `circuits/shielded_transact/src/lib.rs` with the circuit's types. Each `#[input]` type is
+an input the client takes as it is, and each `#[input] impl` is Rust the client can call:
 
-```rust title="transact/src/lib.rs"
+```rust title="circuits/shielded_transact/src/lib.rs"
 use pool::{Hash, Path};
 use xark::prelude::*;
 use xark_poseidon2::hash;
@@ -272,7 +278,7 @@ It's `#[cfg(not(xark))]`: host code only, never part of the circuit.
 
 Now append the circuit itself:
 
-```rust title="transact/src/lib.rs"
+```rust title="circuits/shielded_transact/src/lib.rs"
 #[circuit]
 pub fn shielded_transact(
     key: Private<Key>,
@@ -349,13 +355,13 @@ The recipient, the relayer and the memos' hashes are used in no other constraint
 Build it:
 
 ```console
-$ xark build transact
-xark building circuit `transact`
+$ xark build circuits/shielded_transact
+xark building circuit `shielded_transact`
 xark 26116 vars, 26129 constraints, 26013 witness-gen ops
 xark most constraints come from
-       37%  src/lib.rs:168  require_eq(spend.path.root(commitment), tx.root);
-       19%  src/lib.rs:192  require_eq(pair_root(tip, tx.commitments), tx.new_root);
-       18%  src/lib.rs:191  require_eq(tip.tree_root(), tx.old_root);
+       37%  circuits/shielded_transact/src/lib.rs:168  require_eq(spend.path.root(commitment), tx.root);
+       19%  circuits/shielded_transact/src/lib.rs:192  require_eq(pair_root(tip, tx.commitments), tx.new_root);
+       18%  circuits/shielded_transact/src/lib.rs:191  require_eq(tip.tree_root(), tx.old_root);
       `xark profile` breaks down every line
 xark circuit digest aa2e05477c68d7d50002397448d32796
 ...
@@ -368,9 +374,9 @@ tree's root before and after the append. If your file matches this page, your di
 <Step>
 ### Test the circuit
 
-Append the tests to `transact/src/lib.rs`:
+Append the tests to `circuits/shielded_transact/src/lib.rs`:
 
-```rust title="transact/src/lib.rs"
+```rust title="circuits/shielded_transact/src/lib.rs"
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,12 +468,12 @@ The test is a small wallet: it tracks Alice's note's path with `Path::next` and 
 from the `pool` crate, as 04's wallet did. Run it:
 
 ```console
-$ xark test transact
+$ xark test
 ...
 running 1 test
 test tests::deposit_then_pay_privately ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.76s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.36s
 ```
 
 Each call solves the whole 26,000-constraint circuit, so the test takes a few seconds. See
@@ -475,37 +481,7 @@ Each call solves the whole 26,000-constraint circuit, so the test takes a few se
 </Step>
 
 <Step>
-### Make the keys, the verifier crate and the client
-
-```console
-$ xark setup transact
-R1CS form: reduced (minimize saves 0.0% rows, 0.0% variables)
-...
-verifying key sha256: c624cc7d…61eb  # pin a client's verifier to it: { keyHash }
-
-$ xark export transact
-Generated verifier crate `transact-verifier` at .../transact/transact-verifier (19 public input(s), VK = 1728 B). ...
-✅ On-chain verifier crate ready (verifying key embedded).
-
-$ xark client transact --out app/
-✅ TypeScript client for `shielded_transact` at app/shielded_transact.ts
-```
-
-Your key hash will differ: the key comes from your machine's randomness.
-
-The 19 public inputs are the `Transaction`, flattened: each `Hash` is two field elements, and
-`Flow`'s three `u64`s are packed into one (`vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`), as
-[Packing](/docs/reference/inputs#packing) describes. You didn't make a proof before exporting, so
-the verifier crate has no bundled self-test this time. The end-to-end test is the check.
-
-`app/shielded_transact.ts` exports `Key`, `Note`, `Path` and `Transaction` with their Rust
-methods: `Key.address(key, d)`, `Note.commitment(note, mint)`,
-`Transaction.of(...)`, `Path.first()`, `path.update(...)`. The wallet runs the same code the proof
-checks. See [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
-</Step>
-
-<Step>
-### Start the program
+### Add the program
 
 The program is Pinocchio, as in 01 to 04, and has two instructions:
 
@@ -514,10 +490,47 @@ The program is Pinocchio, as in 01 to 04, and has two instructions:
   two nullifiers, moves the public amounts in or out of the vault, stores the new root and logs
   the two memos.
 
-It's longer than 04's, so you'll write it in the same pieces, in the same layout:
+`xark add program` makes the circuit's keys and clients, then a program that verifies its proofs
+and a LiteSVM test to start from:
+
+```console
+$ xark add program shielded-transfer --circuit shielded_transact
+...
+verifying key sha256: c2c4b2ec496702bbf6a11cf85fec544f0d0e3de897b87fbc5cf55df713e88d29  # pin a client's verifier to it: { keyHash }
+...
+Generated verifier crate `shielded-transact-verifier` at .../clients/shielded_transact/rust (19 public input(s), VK = 1728 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
+...
+✅ TypeScript client for `shielded_transact` at .../clients/shielded_transact/ts/shielded_transact.ts
+
+xark added program `shielded-transfer-program` in .../programs/shielded-transfer, verifying `shielded_transact`
+...
+```
+
+Your key hash will differ: the key comes from your machine's randomness. The keys are in
+`keys/shielded_transact/`, and the verifier crate embeds the verifying key, so commit both.
+
+The 19 public inputs are the `Transaction`, flattened: each `Hash` is two field elements, and
+`Flow`'s three `u64`s are packed into one (`vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`), as
+[Packing](/docs/reference/inputs#packing) describes. The verifier crate does that flattening for
+you: its `PublicInputs` is the circuit's `Transaction`, field by field, and `verify` packs it. You
+didn't make a proof first, so the crate has no bundled self-test this time. The end-to-end test is
+the check.
+
+`clients/shielded_transact/ts/shielded_transact.ts` exports `Key`, `Note`, `Path` and `Transaction`
+with their Rust methods: `Key.address(key, d)`, `Note.commitment(note, mint)`,
+`Transaction.of(...)`, `Path.first()`, `path.update(...)`. The wallet runs the same code the proof
+checks. See [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
+</Step>
+
+<Step>
+### Start the program
+
+The program `xark add program` wrote has one instruction, which verifies a proof against public
+inputs the caller sends. This one is longer, so you'll write it in the same pieces as 04, in the
+same layout:
 
 ```text
-program/src/
+programs/shielded-transfer/src/
 ├── lib.rs                  the entrypoint
 ├── state.rs                the pool's account, and its checks
 ├── helpers.rs              the account checks the instructions share
@@ -528,51 +541,58 @@ program/src/
 └── errors.rs               the program's own errors
 ```
 
-From `xark-transfer/`:
+Remove the starter's instruction:
 
 ```sh
-cargo new --lib program --name shielded-transfer
-mkdir program/src/instructions
+rm programs/shielded-transfer/src/instructions/verify.rs
 ```
 
-Replace `program/Cargo.toml` with:
+Replace `programs/shielded-transfer/Cargo.toml` with:
 
-```toml title="program/Cargo.toml"
+```toml title="programs/shielded-transfer/Cargo.toml"
 [package]
-name = "shielded-transfer"
+name = "shielded-transfer-program"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
-transact-verifier = { path = "../transact/transact-verifier" }
+shielded-transact-verifier = { path = "../../clients/shielded_transact/rust" }
 pinocchio = "0.11"
 pinocchio-system = "0.6"
 pinocchio-token = "0.7"
 solana-sha256-hasher = { version = "3.1", features = ["sha2"] }
 
 # Onchain, PDAs come from the runtime's syscalls; a host build (your editor,
-# clippy) derives them in software.
+# clippy, `xark test`) derives them in software.
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-address = { version = "2", features = ["curve25519"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(target_arch, values("bpf"))',
+] }
+```
 
-# Token amounts are u64s: arithmetic the program doesn't check aborts, not wraps.
-[profile.release]
+The programs' release profile is the project's, in the root `Cargo.toml`. Token amounts are
+`u64`s, so turn its overflow checks on: arithmetic the program doesn't check then aborts rather
+than wraps. In `Cargo.toml`, change the last line of `[profile.release]`:
+
+```toml title="Cargo.toml"
 overflow-checks = true
 ```
 
 Besides 04's dependencies, it takes 03's `pinocchio-token` for the vault and `solana-sha256-hasher`
 for the memos' hashes. The entrypoint is 04's: the first byte of the instruction data is a
 discriminator, `0` for `Initialize` and `1` for `Transact`, and the rest of the data and the
-accounts go to that instruction. Replace `program/src/lib.rs` with:
+accounts go to that instruction. Replace `programs/shielded-transfer/src/lib.rs` with:
 
-```rust title="program/src/lib.rs"
-#![no_std]
+```rust title="programs/shielded-transfer/src/lib.rs"
+#![cfg_attr(not(test), no_std)]
 
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
 
@@ -591,7 +611,9 @@ pub const ID: Address = Address::new_from_array([
 ]);
 
 program_entrypoint!(process_instruction);
+#[cfg(not(test))]
 pinocchio::nostd_panic_handler!();
+#[cfg(not(test))]
 pinocchio::no_allocator!();
 
 fn process_instruction(
@@ -619,7 +641,9 @@ fn dispatch(accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramRes
 ```
 
 `ID` is the program's address. The program derives its PDAs from it and checks its accounts against
-it, so it must be the address the program is deployed at; the test deploys it there.
+it, so it must be the address the program is deployed at; the test deploys it there. The program is
+`no_std` except in a test build: `xark test` also runs the programs' Rust tests on your machine,
+where the standard library's panic handler takes the place of Pinocchio's.
 </Step>
 
 <Step>
@@ -633,9 +657,10 @@ The program owns two kinds of account, each at a PDA, and creates a third:
 | `vault` | `["vault", mint]` | the token program: a token account owned by `pool` | 165 |
 | `nullifier` | `["nullifier", mint, nf]` | this program | 0 |
 
-A nullifier holds no data: that its account exists is what counts. Create `program/src/state.rs`:
+A nullifier holds no data: that its account exists is what counts. Create
+`programs/shielded-transfer/src/state.rs`:
 
-```rust title="program/src/state.rs"
+```rust title="programs/shielded-transfer/src/state.rs"
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 use pinocchio_token::state::Account as TokenAccount;
 
@@ -736,9 +761,9 @@ nullifier are told apart by size, 554 bytes or none.
 ### Check every account
 
 `helpers.rs` is 04's, with three more kinds of account: the token program, a mint, and a token
-account. Create `program/src/helpers.rs`:
+account. Create `programs/shielded-transfer/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
+```rust title="programs/shielded-transfer/src/helpers.rs"
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 use pinocchio_token::state::{Account as TokenAccount, Mint};
 
@@ -807,9 +832,9 @@ pub fn token_account(account: &AccountView, mint: &[u8; 32]) -> ProgramResult {
 ```
 
 The pool's checks read the pool, so they go with it: the pool itself, and the vault built from the
-new helpers. Append to `program/src/state.rs`:
+new helpers. Append to `programs/shielded-transfer/src/state.rs`:
 
-```rust title="program/src/state.rs"
+```rust title="programs/shielded-transfer/src/state.rs"
 impl Pool {
     /// A pool account: writable, owned by this program, a pool's size, at the
     /// address its own mint and stored bump derive.
@@ -865,9 +890,9 @@ they did in 04. The new ones:
 
 Each instruction is three structs, as in 04: its accounts, checked as they're taken; its
 instruction data, checked for length; and the instruction, which holds both and whose `process`
-does the work. Create `program/src/instructions/mod.rs`:
+does the work. Replace `programs/shielded-transfer/src/instructions/mod.rs` with:
 
-```rust title="program/src/instructions/mod.rs"
+```rust title="programs/shielded-transfer/src/instructions/mod.rs"
 pub mod initialize;
 pub mod transact;
 
@@ -875,9 +900,9 @@ pub use initialize::*;
 pub use transact::*;
 ```
 
-Then `program/src/instructions/initialize.rs`:
+Then `programs/shielded-transfer/src/instructions/initialize.rs`:
 
-```rust title="program/src/instructions/initialize.rs"
+```rust title="programs/shielded-transfer/src/instructions/initialize.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
@@ -1021,9 +1046,9 @@ pool's seeds, can move its tokens. The checks, and what they prevent:
 ### Transact
 
 `transact.rs` is the longest file, so you'll write it in four pieces. First its accounts. Create
-`program/src/instructions/transact.rs`:
+`programs/shielded-transfer/src/instructions/transact.rs`:
 
-```rust title="program/src/instructions/transact.rs"
+```rust title="programs/shielded-transfer/src/instructions/transact.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
@@ -1031,7 +1056,7 @@ use pinocchio::{
 };
 use pinocchio_token::instructions::Transfer;
 use solana_sha256_hasher::hash;
-use transact_verifier::{NUM_PUBLIC_INPUTS, Proof, verify};
+use shielded_transact_verifier::{Flow, Proof, PublicInputs, Transaction, verify};
 
 use crate::{
     ShieldedTransferError,
@@ -1118,7 +1143,7 @@ they're checked once it's read.
 Then its instruction data. A transact's arguments are their bytes in order, then the two memos,
 each its length then its bytes, since a memo's size is up to the wallet. Append:
 
-```rust title="program/src/instructions/transact.rs"
+```rust title="programs/shielded-transfer/src/instructions/transact.rs"
 /// Data: proof (256) ‖ root (32) ‖ nf[0] ‖ nf[1] ‖ cm_out[0] ‖ cm_out[1] ‖
 /// new_root (32 each) ‖ vpub_in ‖ vpub_out ‖ fee (u64 LE each) ‖ memo0 ‖ memo1
 /// (each its length as a u32 LE, then its bytes).
@@ -1189,7 +1214,7 @@ Short data, a memo longer than what's left, and trailing bytes all fail with
 
 Then the instruction. Append:
 
-```rust title="program/src/instructions/transact.rs"
+```rust title="programs/shielded-transfer/src/instructions/transact.rs"
 /// One JoinSplit: spend 2 notes, create 2, with `vpub_in` entering the pool,
 /// `vpub_out` leaving it and `fee` paid to the relayer.
 pub struct Transact<'a> {
@@ -1330,9 +1355,10 @@ each new note's leaf index, commitment and encrypted memo as `Program data:`, fo
 <Step>
 ### Assemble the public inputs
 
-Append `proves`, which builds the 19 public inputs and makes the one typed `verify` call:
+Append `proves`, which fills in the circuit's public `Transaction` and makes the one typed
+`verify` call:
 
-```rust title="program/src/instructions/transact.rs"
+```rust title="programs/shielded-transfer/src/instructions/transact.rs"
 /// Does the proof verify against the circuit's public `Transaction`, assembled
 /// here? It checks `root` against the pool's ring first. In its own stack frame:
 /// the inputs and the pairing check's locals don't fit beside `process`'s.
@@ -1348,71 +1374,37 @@ fn proves(
     }
     // A left-out recipient or relayer is the program's address.
     let address = |a: Option<&AccountView>| *a.map_or(&crate::ID, |a| a.address()).as_array();
-    let [asset_hi, asset_lo] = halves(&pool.mint);
-    let [recipient_hi, recipient_lo] = halves(&address(recipient));
-    let [relayer_hi, relayer_lo] = halves(&address(relayer));
-    let [memo0_hi, memo0_lo] = halves(&hash(data.memos[0]).to_bytes());
-    let [memo1_hi, memo1_lo] = halves(&hash(data.memos[1]).to_bytes());
-    let public_inputs: [[u8; 32]; NUM_PUBLIC_INPUTS] = [
-        *data.root,
-        asset_hi,
-        asset_lo,
-        *data.nf[0],
-        *data.nf[1],
-        *data.cm_out[0],
-        *data.cm_out[1],
-        *pool.current_root(),
-        *data.new_root,
-        field_from_u64(u64::from(pool.next_index())),
-        flow(data),
-        recipient_hi,
-        recipient_lo,
-        relayer_hi,
-        relayer_lo,
-        memo0_hi,
-        memo0_lo,
-        memo1_hi,
-        memo1_lo,
-    ];
-    Ok(verify(&Proof::from_le_bytes(data.proof), &public_inputs))
-}
-
-/// A u64 as a 32-byte little-endian field element.
-fn field_from_u64(x: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&x.to_le_bytes());
-    out
-}
-
-/// `Flow`'s three amounts packed into one field element, as xark packs them:
-/// `vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`.
-fn flow(data: &TransactInstructionData) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&data.vpub_in.to_le_bytes());
-    out[8..16].copy_from_slice(&data.vpub_out.to_le_bytes());
-    out[16..24].copy_from_slice(&data.fee.to_le_bytes());
-    out
-}
-
-/// 32 bytes (an address, a hash) as the circuit's `Hash`: `[hi, lo]`, each
-/// 16-byte half read as a big-endian integer, as 32-byte little-endian field
-/// elements.
-fn halves(bytes: &[u8; 32]) -> [[u8; 32]; 2] {
-    let half = |b: &[u8]| {
-        let mut out = [0u8; 32];
-        out[..16].copy_from_slice(b);
-        out[..16].reverse();
-        out
+    let inputs = PublicInputs {
+        tx: Transaction {
+            root: *data.root,
+            asset: pool.mint,
+            nullifiers: data.nf.map(|nf| *nf),
+            commitments: data.cm_out.map(|cm| *cm),
+            old_root: *pool.current_root(),
+            new_root: *data.new_root,
+            index: pool.next_index(),
+            flow: Flow {
+                vpub_in: data.vpub_in,
+                vpub_out: data.vpub_out,
+                fee: data.fee,
+                recipient: address(recipient),
+                relayer: address(relayer),
+            },
+            memos: data.memos.map(|memo| hash(memo).to_bytes()),
+        },
     };
-    [half(&bytes[..16]), half(&bytes[16..])]
+    Ok(verify(&Proof::from_le_bytes(data.proof), inputs))
 }
 ```
 
-The pattern is 04's: the program never parses the proof's claims. It assembles the 19 public
-inputs itself, in the circuit's order, from its own state (the mint, the current root, the next
-index) and from the transaction (the nullifiers, the commitments, the amounts, the token accounts
-and the memos' SHA-256). `NUM_PUBLIC_INPUTS` comes from the verifier crate, so a wrong count
-doesn't compile. A proof made for other accounts or other memos doesn't verify. See
+The pattern is 04's: the program never parses the proof's claims. It fills in the public inputs
+itself, from its own state (the mint, the current root, the next index) and from the transaction
+(the nullifiers, the commitments, the amounts, the token accounts and the memos' SHA-256). The
+verifier crate's `Transaction` and `Flow` are the circuit's, with the same fields, so a missing or
+misnamed one doesn't compile. `verify` turns them into the 19 field elements in the circuit's
+order: it splits the mint, the token accounts and the memo hashes into their two halves, and packs
+`Flow`'s three amounts into one element, as the circuit's `#[input]` does. A proof made for other
+accounts or other memos doesn't verify. See
 [Where the public inputs come from](/docs/guides/how-verification-works#where-the-public-inputs-come-from).
 
 The memos stay off-circuit: the program hashes each one and the circuit only binds the hash, so
@@ -1426,10 +1418,10 @@ locals get a stack frame of their own rather than crowding `process`'s: SBF give
 Most failures have a built-in Solana error, as each check above returns: `NotEnoughAccountKeys`,
 `InvalidInstructionData`, `MissingRequiredSignature`, `Immutable`, `IncorrectProgramId`,
 `InvalidAccountOwner`, `InvalidAccountData`, `InvalidSeeds`, `AccountAlreadyInitialized`,
-`UninitializedAccount` and `IncorrectAuthority`. Eight are the program's own. Create
-`program/src/errors.rs`:
+`UninitializedAccount` and `IncorrectAuthority`. Eight are the program's own. Replace
+`programs/shielded-transfer/src/errors.rs` with:
 
-```rust title="program/src/errors.rs"
+```rust title="programs/shielded-transfer/src/errors.rs"
 use pinocchio::error::{ProgramError, ToStr};
 
 /// The program's own errors, as `ProgramError::Custom` codes.
@@ -1489,9 +1481,9 @@ impl ToStr for ShieldedTransferError {
 
 The codes are `0` to `7`, in the order they're declared, and the entrypoint logs each one's name,
 so the test can match `InvalidProof` and `NullifierSpent`. Last, the two logs; append to
-`program/src/helpers.rs`:
+`programs/shielded-transfer/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
+```rust title="programs/shielded-transfer/src/helpers.rs"
 /// `Program log: <message>`.
 pub fn log(message: &str) {
     #[cfg(target_os = "solana")]
@@ -1519,97 +1511,77 @@ pub fn log_data(data: &[&[u8]]) {
 <Step>
 ### Build the program
 
+`xark build` at the root builds the circuit, writes its clients, then runs `cargo build-sbf` on
+the programs:
+
 ```console
-$ cd program
-$ cargo build-sbf --arch v3
+$ xark build
+xark building circuit `shielded_transact`
+xark unchanged since the last build: reusing its circuit (digest aa2e05477c68d7d50002397448d32796)
 ...
-   Compiling transact-verifier v0.1.0 (.../transact/transact-verifier)
+xark building the programs (cargo build-sbf)
+...
+   Compiling shielded-transact-verifier v0.1.0 (.../clients/shielded_transact/rust)
    Compiling solana-instruction-view v2.1.0
    Compiling pinocchio v0.11.2
    Compiling pinocchio-token v0.7.0
    Compiling pinocchio-system v0.6.1
-   Compiling shielded-transfer v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.73s
+   Compiling shielded-transfer-program v0.1.0 (.../programs/shielded-transfer)
+    Finished `release` profile [optimized] target(s) in 0.64s
 ```
 
-The program is at `program/target/deploy/shielded_transfer.so`.
+The program is at `target/deploy/shielded_transfer_program.so`.
 </Step>
 
 <Step>
 ### Set up the app
 
-`xark client` already made `app/`. Set it up as in 01, with two more packages: the SPL Token
-program's client, as in 03, to make a mint and token accounts, and the Compute Budget program's, to
-raise a transaction's compute limit.
+`xark add program` already wrote the TypeScript side: `package.json`, `tsconfig.json`,
+`vitest.config.ts` and a starter test in `tests/`. Install it, with two more packages: the SPL
+Token program's client, as in 03, to make a mint and token accounts, and the Compute Budget
+program's, to raise a transaction's compute limit.
 
 ```sh
-cd ../app
-npm init -y
-npm pkg set type=module
-npm install @blueshift-gg/xark@^0.3.0 vitest @solana/kit litesvm @solana-program/token @solana-program/compute-budget
+npm install
+npm install -D @solana-program/token @solana-program/compute-budget
 ```
 </Step>
 
 <Step>
 ### Write the wallet
 
-Create `app/shielded-transfer.test.ts`. Start with the prover and 04's helpers, with one change:
-`send` takes several instructions, so a transaction can carry a compute budget.
+Replace `tests/shielded-transfer.test.ts`. Start with the prover and 04's helpers. `circuit`,
+`vm`, `funded` and `send` come from `@blueshift-gg/xark/testing`; `send` takes several
+instructions, so a transaction can carry a compute budget, and returns the transaction's
+metadata, with the compute units it used.
 
-```ts title="app/shielded-transfer.test.ts"
+```ts title="tests/shielded-transfer.test.ts"
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import {
-  AccountRole, address, appendTransactionMessageInstructions, createTransactionMessage, generateKeyPairSigner,
-  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
-  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
+  AccountRole, address, generateKeyPairSigner, getAddressEncoder, getProgramDerivedAddress, lamports,
   type Address, type Instruction, type KeyPairSigner,
 } from "@solana/kit";
 import { getSetComputeUnitLimitInstruction } from "@solana-program/compute-budget";
 import {
   AccountState, TOKEN_PROGRAM_ADDRESS, getMintEncoder, getMintSize, getTokenDecoder, getTokenEncoder, getTokenSize,
 } from "@solana-program/token";
+import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 import { createPool, type WorkerPool } from "@blueshift-gg/xark/pool";
-import { FailedTransactionMetadata, LiteSVM } from "litesvm";
-import { afterAll, beforeAll, expect, test } from "vitest";
+import type { LiteSVM } from "litesvm";
 import {
   Field, Key, Path, ShieldedTransact, Transaction,
   type Note, type PathValue, type ShieldedTransactProver, type Spend,
-} from "./shielded_transact";
+} from "../clients/shielded_transact/ts/shielded_transact";
 
-// What `xark build`, `xark setup` and `xark client` wrote.
-const out = "../transact/target/xark/transact/";
-const read = (file: string) => new Uint8Array(readFileSync(out + file));
-
-// The prover runs on a pool of worker threads, one per core.
+// The prover runs on a pool of worker threads, one per core. `circuit` reads
+// what `xark build` wrote and the keys in `keys/`.
 let prover: ShieldedTransactProver;
 let workers: WorkerPool;
 beforeAll(async () => {
   workers = await createPool();
-  prover = await ShieldedTransact.prover(
-    { circuit: read("circuit.xbc"), provingKey: read("pk.bin"), sources: readFileSync(out + "sources.json", "utf8"), client: read("client.wasm") },
-    { digest: ShieldedTransact.digest, pool: workers },
-  );
-}, 60_000);
+  prover = await ShieldedTransact.prover(circuit("shielded_transact"), { digest: ShieldedTransact.digest, pool: workers });
+});
 afterAll(() => workers.terminate());
-
-// Send `instructions` in one transaction, paid by `payer`. Returns the compute
-// units used, or throws with the program's logs.
-async function send(svm: LiteSVM, payer: KeyPairSigner, ...instructions: Instruction[]) {
-  const tx = await pipe(
-    createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayerSigner(payer, m),
-    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
-    (m) => appendTransactionMessageInstructions(instructions, m),
-    (m) => signTransactionMessageWithSigners(m),
-  );
-  const result = svm.sendTransaction(tx);
-  svm.expireBlockhash();
-  if (result instanceof FailedTransactionMetadata) {
-    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
-  }
-  return result.computeUnitsConsumed();
-}
 
 // The program's instruction discriminators.
 const INITIALIZE = 0;
@@ -1636,30 +1608,23 @@ const readonly = (a: Address) => ({ address: a, role: AccountRole.READONLY });
 // A memo as the program reads it: its length as a `u32`, then its bytes.
 const vec = (b: Uint8Array) => new Uint8Array([...new Uint8Array(new Uint32Array([b.length]).buffer), ...b]);
 const sha256 = (b: Uint8Array) => new Uint8Array(createHash("sha256").update(b).digest());
-// A transact uses 168k to 182k compute units, close to the default limit of 200k.
+// A transact uses 171k to 183k compute units, close to the default limit of 200k.
 const budget = getSetComputeUnitLimitInstruction({ units: 250_000 });
 ```
 
 `program` is the program's `ID`: the test loads the program there, at the address it derives its
-PDAs from.
+PDAs from. `test`, `expect`, `beforeAll` and `afterAll` need no import: the project's
+`vitest.config.ts` makes them globals.
 
 Then the wallet itself. Append:
 
-```ts title="app/shielded-transfer.test.ts"
-/** A new keypair holding `sol` SOL. */
-async function funded(svm: LiteSVM, sol = 10n) {
-  const s = await generateKeyPairSigner();
-  svm.airdrop(s.address, lamports(sol * 1_000_000_000n));
-  return s;
-}
-
+```ts title="tests/shielded-transfer.test.ts"
 /** A note a wallet holds: enough to spend it. */
 interface Owned { note: Note; diversifier: Field; path: PathValue }
 
 /** A fresh mint and its pool, and what the wallets know of its tree. */
 async function pool() {
-  const svm = new LiteSVM();
-  svm.addProgramFromFile(program, "../program/target/deploy/shielded_transfer.so");
+  const svm = vm({ [program]: deployed("shielded-transfer") });
   const payer = await funded(svm);
   const mint = (await generateKeyPairSigner()).address;
   const mintData = getMintEncoder().encode({ mintAuthority: payer.address, supply: 1_000n, decimals: 0, isInitialized: true, freezeAuthority: null });
@@ -1752,8 +1717,8 @@ async function prepare(p: Pool, key: Key, spends: [Spend, Spend], outputs: [Outp
 /** Prove and send one transaction, signed by `user`; returns the new notes. */
 async function transact(p: Pool, user: KeyPairSigner, key: Key, spends: [Spend, Spend], outputs: [Output, Output], moves: Moves = {}) {
   const t = await prepare(p, key, spends, outputs, moves);
-  const units = await send(p.svm, user, budget, t.instruction(user));
-  console.log(`transact verified onchain in ${units} CU`);
+  const result = await send(p.svm, user, budget, t.instruction(user));
+  console.log(`transact verified onchain in ${result.computeUnitsConsumed()} CU`);
   return t.landed();
 }
 ```
@@ -1781,9 +1746,9 @@ A few things to notice:
 <Step>
 ### Write the end-to-end test
 
-Append the tests to `app/shielded-transfer.test.ts`:
+Append the tests to `tests/shielded-transfer.test.ts`:
 
-```ts title="app/shielded-transfer.test.ts"
+```ts title="tests/shielded-transfer.test.ts"
 test("deposit, pay privately, withdraw, through a relayer", async () => {
   const p = await pool();
   const [alice, bob] = [{ secret: random() }, { secret: random() }];
@@ -1809,15 +1774,15 @@ test("deposit, pay privately, withdraw, through a relayer", async () => {
   const elsewhere = await tokenAccount(p.svm, p.mint, thief.address, 0n);
   await expect(send(p.svm, thief, budget, withdrawal.instruction(thief, { recipient: elsewhere, relayerToken }))).rejects.toThrow(/InvalidProof/);
   await expect(send(p.svm, thief, budget, withdrawal.instruction(thief, { recipient: bobToken, relayerToken: elsewhere }))).rejects.toThrow(/InvalidProof/);
-  const units = await send(p.svm, relayer, budget, withdrawal.instruction(relayer));
-  console.log(`withdrawal verified onchain in ${units} CU`);
+  const result = await send(p.svm, relayer, budget, withdrawal.instruction(relayer));
+  console.log(`withdrawal verified onchain in ${result.computeUnitsConsumed()} CU`);
   withdrawal.landed();
   expect(balance(p.svm, bobToken)).toBe(95n);
   expect(balance(p.svm, p.vault)).toBe(45n); // Alice's change, still shielded
 
   // Bob's note is spent: its nullifier account exists.
   await expect(send(p.svm, relayer, budget, withdrawal.instruction(relayer))).rejects.toThrow(/NullifierSpent/);
-}, 60_000);
+});
 
 test("only a note's owner can spend it", async () => {
   const p = await pool();
@@ -1826,7 +1791,7 @@ test("only a note's owner can spend it", async () => {
   const token = await tokenAccount(p.svm, p.mint, user.address, 150n);
   const [note] = await transact(p, user, alice, [dummy(alice), dummy(alice)], [pay(alice, 150n), pay(alice, 0n)], { vpubIn: 150n, userToken: token });
   await expect(transact(p, user, mallory, [spend(note), dummy(mallory)], [pay(mallory, 150n), pay(mallory, 0n)])).rejects.toThrow(/key\.address\(spend\.diversifier\)/);
-}, 60_000);
+});
 ```
 
 Look at who signs what. Alice's SOL wallet signs her deposit, because tokens leave her account.
@@ -1840,32 +1805,56 @@ spend Alice's note, the client refuses to prove, naming the circuit line that fa
 <Step>
 ### Run it
 
-From `app/`:
+`xark test` at the root runs everything: the circuit's tests, `xark build`, the Rust tests of the
+programs and the crates beside them (04's `pool` among them), then `npm test`, which type-checks the
+test and runs it:
+
+```console
+$ xark test
+...
+test tests::deposit_then_pay_privately ... ok
+...
+xark building the programs (cargo build-sbf)
+...
+xark running the programs' and verifier crates' Rust tests
+...
+test tests::paths_agree_with_the_whole_tree ... ok
+...
+xark running the TypeScript tests (npm test)
+
+> test
+> tsc --noEmit && vitest run
+...
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+To see what each transaction cost, run the end-to-end test alone, with its logs:
 
 ```console
 $ npx vitest run --reporter=verbose
-stdout | shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
-transact verified onchain in 168440 CU
+stdout | tests/shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
+transact verified onchain in 171217 CU
 ...
-transact verified onchain in 172575 CU
+transact verified onchain in 176848 CU
 ...
-withdrawal verified onchain in 172743 CU
+withdrawal verified onchain in 183016 CU
 
- ✓ shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 3650ms
-stdout | shielded-transfer.test.ts > only a note's owner can spend it
-transact verified onchain in 174440 CU
+ ✓ tests/shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 3548ms
+stdout | tests/shielded-transfer.test.ts > only a note's owner can spend it
+transact verified onchain in 177217 CU
 
- ✓ shielded-transfer.test.ts > only a note's owner can spend it 2017ms
+ ✓ tests/shielded-transfer.test.ts > only a note's owner can spend it 2056ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
 ```
 
 Four transactions were proved, each in about a second on the worker pool, and verified by your
-program in 168,000 to 175,000 compute units, almost all of it the proof's verification. The number
+program in 171,000 to 183,000 compute units, almost all of it the proof's verification. The number
 varies with the public inputs, and by 1,500 for each extra try `find_program_address` takes to find
-a nullifier's bump: across nine runs, from 168,000 to 182,000, close to the default limit of 200,000, so
-each transaction carries `budget`, a limit of 250,000. The vault ends at 45: Alice's change, still
+a nullifier's bump. Nine runs stayed in that range, close to the default limit of 200,000, so each
+transaction carries `budget`, a limit of 250,000. The vault ends at 45: Alice's change, still
 shielded, with nothing onchain saying it's hers. Mallory's spend was refused before any proof was
 made.
 </Step>
@@ -1898,16 +1887,15 @@ This is a teaching version of a deployed system. Before any real use, it would s
 - an audit, legal review, and keys from a ceremony.
 
 <Callout type="warn" title="Before you deploy">
-`xark setup` made a single-party key: anyone who kept its randomness could forge proofs and drain
-the vault. A pool that holds value needs a key from a multi-party ceremony. See
+The key `xark add program` made is single-party: anyone who kept its randomness could forge proofs
+and drain the vault. A pool that holds value needs a key from a multi-party ceremony. See
 [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
 The finished example is
 [06-shielded-transfer](https://github.com/blueshift-gg/xark-examples/tree/main/06-shielded-transfer)
-in xark-examples. It adds npm scripts that run every step, a demo proof bundled as the verifier
-crate's self-test, host tests that feed each account check the accounts it exists to refuse, and
-more refusals in its end-to-end test.
+in xark-examples. It adds a demo proof bundled as the verifier crate's self-test, host tests that
+feed each account check the accounts it exists to refuse, and more refusals in its end-to-end test.
 
 <Cards>
   <Card title="The trusted setup" href="/docs/trust/trusted-setup" description="Run a multi-party ceremony for keys that hold value." />
