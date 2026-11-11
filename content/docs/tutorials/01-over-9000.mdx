@@ -70,8 +70,7 @@ pub fn over_9000(power_level: Private<u64>) {
 That's the whole circuit. `Private` means the prover supplies `power_level` but the proof never
 reveals it. `require` states what must hold: if it doesn't, there is no proof to make.
 
-The `u64` is the range proof. In the field, `0 − 1` is the largest value there is, so `>` on raw
-field elements could be fooled. Declaring `power_level` a `u64` makes xark split it into 64 bits and
+The `u64` is the range proof. Declaring `power_level` a `u64` makes xark split it into 64 bits and
 constrain each to 0 or 1, which proves it lies in `[0, 2^64)`. With both sides that small, the
 comparison can't wrap, and `>` means what it says. [Range proofs](/docs/learn-zk/range-proofs)
 explains why, step by step. Pick a type and a value to see the bits a value is checked against:
@@ -212,7 +211,7 @@ test("a proof of 9001 verifies", async () => {
   expect(proof.toBytes().length).toBe(256);
 
   const verifier = await Over9000.verifier(read("vk.bin"));
-  expect(verifier.verify(proof.toBytes(), {})).toBe(true);
+  expect(verifier.verify(proof).toBe(true);
 });
 
 test("9000 has no proof", () => {
@@ -222,7 +221,7 @@ test("9000 has no proof", () => {
 ```
 
 `{ digest: Over9000.digest }` pins the prover to the circuit this client was generated from, so a
-different circuit file is refused. The verifier's `{}` is the public inputs: this circuit has none.
+different circuit file is refused.
 
 Run it from `app/`:
 
