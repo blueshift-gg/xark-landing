@@ -188,10 +188,13 @@ randomness. Either way it prints how the key was made and the verifying key's SH
     <File name="pk.bin" />
     <File name="vk.bin" />
     <File name="metadata.json" />
+    <File name="circuit.xbc" />
   </Folder>
 </Files>
 
-It also writes `inputs.example.json` to `target/xark/<name>/`: every input in its natural form, to
+In a project, the `circuit.xbc` the key was made from is kept beside it: a key proves only with that
+build, so `xark prove` and the clients prove with it. It also writes `inputs.example.json` to
+`target/xark/<name>/`: every input in its natural form, to
 fill in for `xark prove`. A
 `minimized` key also gets `r1cs.stream`, which `xark prove` streams. See
 [The trusted setup](/docs/trust/trusted-setup) for which setup to use when.

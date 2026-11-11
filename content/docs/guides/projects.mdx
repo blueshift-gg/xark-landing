@@ -27,7 +27,7 @@ claim/
   programs/claim/           a Pinocchio program: lib.rs, errors.rs, instructions/verify.rs
   clients/claim/rust/       generated: the verifier crate `claim-verifier`
   clients/claim/ts/         generated: the TypeScript client
-  keys/claim/               the proving and verifying keys
+  keys/claim/               the proving and verifying keys, and the build they were made from
   tests/claim.test.ts       prove with the client, verify onchain in LiteSVM
   .github/workflows/ci.yml  `xark build --check`, then `xark test`
 ```
@@ -48,7 +48,13 @@ Everything `xark build` writes outside `target/`: `clients/` and `keys/`. The ve
 the verifying key, so the keys go with it: a key that lived only in `target/` would be replaced on
 a fresh clone, and the program would stop accepting proofs made with the deployed key. For the same
 reason, `xark build` never makes a key while a committed verifier embeds one; a new key is an
-explicit `xark setup`. A proving key over 50 MB belongs in Git LFS.
+explicit `xark setup`.
+
+A key proves only with the build of the circuit it was made from, so that build, `circuit.xbc`, is
+kept beside it in `keys/`, and every prover uses it: a clone that compiles the circuit differently
+(another Rust, another xark) still proves with the committed keys. `xark build` tells the two cases
+apart by the constraints: the same as the key's build, the key fits; different, the circuit
+changed and needs new keys. A proving key over 50 MB belongs in Git LFS.
 
 A rebuild leaves `clients/` exactly as it was, so `xark build --check` (CI) can fail whenever the
 committed clients aren't what the source builds. `cargo fmt` and clippy leave the generated crate

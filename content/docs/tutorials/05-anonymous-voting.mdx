@@ -407,7 +407,7 @@ lib.rs:150     require_eq(identity.nullifier(ballot.poll), bal…     251
     ├─ nullifier → hash2 → hash2_in → perm → external_round → sbox → pow   72   (Mul 72)
     └─ require_eq                               11   (RangeCheck 8, Comparison 2, Equality 1)
 lib.rs:147     #[circuit]                                            48
-    ├─ inputs_done                              32   (RangeCheck 32)
+    ├─ (top-level)                              32   (RangeCheck 32)
     └─ bind                                     16   (RangeCheck 16)
 lib.rs:151     require(ballot.choice < ballot.options);               1
     └─ require                                   1   (Equality 1)
