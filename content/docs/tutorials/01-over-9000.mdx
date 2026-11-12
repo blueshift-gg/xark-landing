@@ -377,15 +377,17 @@ had a built-in error, so it uses that.
 
 ```console
 $ xark build
-xark building circuit `over-9000`
-...
+xark circuit `circuits/over-9000` is unchanged since the last build
+xark verifier crate `over-9000-verifier` at .../clients/over-9000/rust is unchanged
+xark TypeScript client for `over_9000` at .../clients/over-9000/ts/over_9000.ts is unchanged
 xark building the programs (cargo build-sbf)
    Compiling over-9000-verifier v0.1.0 (.../clients/over-9000/rust)
    Compiling over-9000-program v0.1.0 (.../programs/over-9000)
     Finished `release` profile [optimized] target(s) in 0.37s
 ```
 
-`xark build` builds the circuit, regenerates its clients, then runs `cargo build-sbf` for the
+`xark build` builds the circuit and regenerates its clients when they're out of date (here they
+aren't: the circuit hasn't changed since `xark add program`), then runs `cargo build-sbf` for the
 program. The program is at `target/deploy/over_9000_program.so`. If a stack frame in it goes past
 the SBF limit of 4 KiB, which `cargo build-sbf` only warns about, `xark build` fails instead.
 </Step>

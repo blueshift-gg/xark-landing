@@ -1552,15 +1552,14 @@ pub fn log_data(data: &[&[u8]]) {
 <Step>
 ### Build the program
 
-`xark build` at the root builds the circuit if it changed, writes its clients, then runs
-`cargo build-sbf` on the programs:
+`xark build` at the root builds the circuit and writes its clients if they changed (here they
+haven't since `xark add program`), then runs `cargo build-sbf` on the programs:
 
 ```console
 $ xark build
-Generated verifier crate `shielded-transact-verifier` at .../clients/shielded_transact/rust (19 public input(s), VK = 1728 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
-...
-✅ TypeScript client for `shielded_transact` at .../clients/shielded_transact/ts/shielded_transact.ts
-
+xark circuit `circuits/shielded_transact` is unchanged since the last build
+xark verifier crate `shielded-transact-verifier` at .../clients/shielded_transact/rust is unchanged
+xark TypeScript client for `shielded_transact` at .../clients/shielded_transact/ts/shielded_transact.ts is unchanged
 xark building the programs (cargo build-sbf)
 ...
    Compiling shielded-transact-verifier v0.1.0 (.../clients/shielded_transact/rust)

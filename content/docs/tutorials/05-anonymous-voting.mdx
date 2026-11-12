@@ -1314,12 +1314,14 @@ impl ToStr for VotingError {
 <Step>
 ### Build the program
 
-At the project's root, `xark build` builds the circuit, refreshes its clients and then the program:
+At the project's root, `xark build` builds the circuit and refreshes its clients when they're out
+of date (here they aren't), then builds the program:
 
 ```console
 $ xark build
-xark building circuit `vote`
-...
+xark circuit `circuits/vote` is unchanged since the last build
+xark verifier crate `vote-verifier` at .../vote/clients/vote/rust is unchanged
+xark TypeScript client for `vote` at .../vote/clients/vote/ts/vote.ts is unchanged
 xark building the programs (cargo build-sbf)
 ...
    Compiling vote-verifier v0.1.0 (.../vote/clients/vote/rust)

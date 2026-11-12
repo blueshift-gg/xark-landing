@@ -367,7 +367,7 @@ Solana program and a test to start from:
 
 ```console
 $ xark add program zkyc
-xark building circuit `zkyc`
+xark circuit `circuits/zkyc` is unchanged since the last build
 ...
 Wrote .../zkyc/keys/zkyc/pk.bin
 Wrote .../zkyc/keys/zkyc/vk.bin
@@ -833,13 +833,14 @@ values printed.
 <Step>
 ### Build the program
 
-`xark build` at the root builds everything that's out of date: the circuit, its clients, then the
-program with `cargo build-sbf`.
+`xark build` at the root builds everything that's out of date: the circuit and its clients, here
+unchanged since `xark add program` made them, then the program with `cargo build-sbf`.
 
 ```console
 $ xark build
-xark building circuit `zkyc`
-...
+xark circuit `circuits/zkyc` is unchanged since the last build
+xark verifier crate `zkyc-verifier` at .../zkyc/clients/zkyc/rust is unchanged
+xark TypeScript client for `zkyc` at .../zkyc/clients/zkyc/ts/zkyc.ts is unchanged
 xark building the programs (cargo build-sbf)
 ...
    Compiling zkyc-verifier v0.1.0 (.../zkyc/clients/zkyc/rust)

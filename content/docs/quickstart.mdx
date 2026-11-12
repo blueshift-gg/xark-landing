@@ -110,16 +110,19 @@ error: witness does not satisfy the circuit
 <Step>
 ### Verify it on Solana
 
-`xark add program` writes a Pinocchio program that verifies the circuit's proofs, and a LiteSVM
-test that proves with the generated TypeScript client and sends the proof to it. `xark build`
-builds the circuit, its clients and the program; `xark test` runs every test:
+`xark add program` generates the circuit's verifier crate and TypeScript client, then writes a
+Pinocchio program that verifies the circuit's proofs, and a LiteSVM test that proves with the
+client and sends the proof to it. `xark build` builds whatever is out of date, here only the
+program; `xark test` runs every test:
 
 ```console
 $ xark add program my-circuit
-$ xark build
 ...
-✅ Onchain verifier crate ready (verifying key embedded).
-✅ TypeScript client for `my_circuit` at clients/my-circuit/ts/my_circuit.ts
+xark added program `my-circuit-program` in .../programs/my-circuit, verifying `my-circuit`
+$ xark build
+xark circuit `circuits/my-circuit` is unchanged since the last build
+xark verifier crate `my-circuit-verifier` at .../clients/my-circuit/rust is unchanged
+xark TypeScript client for `my_circuit` at .../clients/my-circuit/ts/my_circuit.ts is unchanged
 xark building the programs (cargo build-sbf)
 $ npm install && xark test
 ...

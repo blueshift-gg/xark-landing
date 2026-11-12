@@ -941,7 +941,9 @@ tops such an account up, allocates it and assigns it to its owner instead.
 
 ```console
 $ xark build
-...
+xark circuit `circuits/token-claim` is unchanged since the last build
+xark verifier crate `token-claim-verifier` at .../clients/token-claim/rust is unchanged
+xark TypeScript client for `token_claim` at .../clients/token-claim/ts/token_claim.ts is unchanged
 xark building the programs (cargo build-sbf)
 ...
    Compiling token-claim-verifier v0.1.0 (.../clients/token-claim/rust)
@@ -950,7 +952,8 @@ xark building the programs (cargo build-sbf)
     Finished `release` profile [optimized] target(s) in 0.76s
 ```
 
-`xark build` builds the circuit, regenerates its clients, then runs `cargo build-sbf` for the
+`xark build` builds the circuit and regenerates its clients when they're out of date (they
+aren't: the circuit hasn't changed since `xark add program`), then runs `cargo build-sbf` for the
 program, which is at `target/deploy/token_claim_program.so`. A stack frame past the 4 KiB limit
 fails the build rather than only warning.
 </Step>
