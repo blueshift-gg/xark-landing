@@ -24,7 +24,8 @@ preludes (`xark-sha256` also `Digest`).
 
 `require_eq` between a raw gadget output and a `Hash` works for SHA-256's output and Keccak's;
 BLAKE outputs use the `Blake256` wrapper from their own crates. A `Public<Digest>` would be 256
-public inputs: use `Hash` for a digest that changes per proof.
+public inputs: use `Hash` for a digest that changes per proof. A Solana address is xark's own
+[`Address`](/docs/reference/inputs#addresses): the same two halves, but base58 in clients.
 
 ## SHA-256 (`xark-sha256`)
 
@@ -151,7 +152,10 @@ pub fn poseidon(a: Private<Field>, b: Private<Field>, out: Public<Field>) {
 | 2-to-1 compression | `hash2(a, b)` = `permute([0, a, b])[0]` | `hash2(a, b)` = `poseidon2_perm([a, b, 0])[0]` |
 | sponge | `hash::<N>(inputs)` | `hash::<N>(inputs)` |
 | permutation | `permute(state)` | `poseidon2_perm(state)` |
-| on the host | — | `xark_poseidon2::native`: every function over `ark_bn254::Fr`, plus `hash_slice` |
+| commitment, nullifier | — | `commit::<N>(inputs)`, `nullifier::<N>(inputs)` |
+| encryption | — | `encrypt::<N>(key, nonce, message)`, `decrypt::<N>(key, nonce, ciphertext, tag)` |
+| Fiat–Shamir challenge | — | `challenge::<N, BITS>(transcript)` |
+| on the host | — | `xark_poseidon2::native`: every function over `ark_bn254::Fr`, plus `hash_slice`, `commit_slice`, `nullifier_slice`, `encrypt_slice`, `decrypt_slice` |
 | `hash::<5>` cost | 717 constraints | 721 constraints |
 
 Both are width 3 with an `x^5` S-box, 8 full and 56 partial rounds, and the Horizen Labs
@@ -165,16 +169,90 @@ the same implementation on the host, so a wallet or test computes the digest a c
 without a second copy.
 
 ```rust
-use xark_poseidon2::native::{hash, Fr};
+use xark_poseidon2::native::{commit, Fr};
 
-let commitment: Fr = hash([Fr::from(7u64), Fr::from(11u64)]);
+let commitment: Fr = commit([Fr::from(7u64), Fr::from(11u64)]);
 ```
+
+### Commitments, nullifiers and domains
+
+`xark-poseidon2` has a function for each job a circuit hashes for. Each is the sponge with its
+capacity lane started at its own value, its **domain**, so their outputs are independent functions
+of their inputs:
+
+| Function | What it's for | Capacity starts at |
+| --- | --- | --- |
+| `hash2(a, b)` | a Merkle node | `0` |
+| `hash::<N>(inputs)` | a digest of `N` elements | `N` |
+| `commit::<N>(inputs)` | a commitment: include a random element to make it hiding | `2^64 · 1 + N` |
+| `nullifier::<N>(inputs)` | a nullifier, say of a secret key and a note's commitment | `2^64 · 2 + N` |
+| `encrypt::<N>`, `decrypt::<N>` | authenticated encryption of `N` elements | `2^64 · 3 + N` |
+
+No two domains are equal for any lengths, so a commitment can't be passed off as a nullifier or a
+Merkle node, and a nullifier reveals nothing about a commitment to the same values, short of a
+Poseidon2 collision. The length is in the domain too: `commit([a])` and `commit([a, 0])` are
+unrelated. Use `commit` and `nullifier` rather than `hash` with a hand-placed tag element.
+
+```rust
+use xark_poseidon2::prelude::*;
+
+#[circuit]
+pub fn spend(secret: Private<Field>, amount: Private<u64>, salt: Private<Field>,
+             commitment: Public<Field>, nullifier: Public<Field>) {
+    let note = commit([secret, Field::from(amount), salt]);
+    require_eq(note, commitment);
+    require_eq(xark_poseidon2::nullifier([secret, note]), nullifier);
+}
+```
+
+`commit`, `nullifier` and `hash` cost `⌈N/2⌉` permutations, 240 constraints each.
+
+### Encryption
+
+`encrypt::<N>(key, nonce, message)` returns the ciphertext (`N` elements) and a tag;
+`decrypt::<N>(key, nonce, ciphertext, tag)` returns the message, and the circuit is unsatisfiable
+unless the tag matches. It's the Poseidon sponge encryption of Khovratovich's "Encryption with
+Poseidon" on the width-3 permutation: the key is one field element (for a Diffie–Hellman shared
+Grumpkin point, its `x`), and any field element is a nonce. Never encrypt twice under one key and
+nonce.
+
+```rust
+use xark_poseidon2::prelude::*;
+
+#[circuit]
+pub fn memo(key: Private<Field>, note: Private<[Field; 3]>, nonce: Public<Field>,
+            ciphertext: Public<[Field; 3]>, tag: Public<Field>) {
+    // The published memo is this note, encrypted to the key's holder.
+    let (c, t) = encrypt(key, nonce, note);
+    require_eq(c, ciphertext);
+    require_eq(t, tag);
+}
+```
+
+Each costs `⌈N/2⌉ + 1` permutations, and `decrypt` one more constraint for the tag
+(`decrypt::<3>` against a public message: 724 constraints).
+
+### Fiat–Shamir challenges
+
+`challenge::<N, BITS>(transcript)` is the low `BITS` canonical bits of `hash(transcript)`: a
+challenge a circuit derives from the values it has committed to, as a verifier's random choice.
+It costs `hash::<N>` and 353 constraints for the canonical decomposition; xark's Grumpkin folding
+examples (`examples/grumpkin_*`) draw their challenges with it.
+
+### In TypeScript
+
+A circuit's `#[input] impl` methods run in its [generated client](/docs/guides/typescript-clients),
+so a method that calls `commit` or `nullifier` (`Note::commitment`, say) computes the same value in
+TypeScript. `@blueshift-gg/xark` also has them directly: `poseidon2Commit`, `poseidon2Nullifier`,
+`poseidon2Encrypt` and `poseidon2Decrypt`, and a proving session's `commit`, `nullifier`, `encrypt`
+and `decrypt`.
 
 ## Which hash should I use?
 
 | Need | Pick |
 | --- | --- |
-| Merkle trees, commitments, anything in-circuit and field-native | **Poseidon2** (or Poseidon) |
+| Merkle trees, commitments, nullifiers, anything in-circuit and field-native | **Poseidon2** (or Poseidon) |
+| Encrypt a note or memo to its owner | `xark_poseidon2::encrypt` |
 | Verify an existing SHA-256 digest (Bitcoin, TLS, `sha2`) | `xark-sha256` |
 | Verify an existing Keccak-256 / Ethereum digest | `xark-keccak` |
 | Verify `blake2`/`blake3` data | `xark-blake2s` / `xark-blake3` |

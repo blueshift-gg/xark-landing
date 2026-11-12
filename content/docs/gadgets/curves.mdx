@@ -39,6 +39,7 @@ This checks `r = s0·p0 + s1·p1` for 128-bit scalars, in 1,569 constraints (`ex
 | `enforce_on_curve(p)` | Assert `p` is on Grumpkin (`y² = x³ − 17`) |
 | `Affine`, `WideScalar`, `Instance` | Circuit inputs: a point; a scalar as two 127-bit limbs; a committed relaxed-R1CS (Nova) instance |
 | `N_BITS`, `K` | The scalar bit length (128) and the number of pairs in `multi_scalar_mul` (2) |
+| `schnorr::verify(pubkey, sig, msg)` | Require a Schnorr signature with a Poseidon2 challenge: 5,051 constraints for a two-element message; see [Signatures](/docs/gadgets/signatures#schnorr-over-grumpkin-xark-grumpkin) |
 
 Four full-width `wide_scalar_mul`s summed with three `ec_add`s are 8,188 constraints
 (`examples/grumpkin_ipa`).

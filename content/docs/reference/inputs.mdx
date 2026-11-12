@@ -64,6 +64,32 @@ client.
 `Choice` and `Bitfield` work together: `choice == Country::US`, `require_in`, `require_one_of`,
 `contains`. A `bool` input is one field element, checked to be 0 or 1.
 
+## Addresses
+
+`Address` is a Solana address (a `Pubkey`, @solana/kit's `Address`): a recipient, a holder, a mint.
+It's two field elements, the first and last 16 bytes, each big-endian, as a
+[`Hash`](/docs/gadgets/hashes) splits a digest: one field element would reduce most addresses
+modulo the field's prime, and a program would have to reduce its own the same way.
+
+```rust
+#[circuit]
+fn withdraw(note: Private<Note>, root: Public<Field>, recipient: Public<Address>) {
+    require_eq(note.root(), root);
+    bind(recipient); // the proof verifies only with the recipient it was made for
+}
+```
+
+`require_eq` compares two addresses (two constraints), `bind` ties one to the proof (two), and
+`to_fields()` gives `[hi, lo]`, to hash one. Its forms outside the circuit:
+
+| Where | An `Address` is |
+| --- | --- |
+| Rust and tests | a `[u8; 32]` or its base58: `Address::new(key.to_bytes())`, `"Tokenkeg…".into()` |
+| `--inputs` and decoded public inputs | its base58 (`0x`-hex is taken too) |
+| TypeScript | @solana/kit's `Address` (a signer's `address`, a PDA, `address("…")`) or its 32 bytes; it decodes to an `Address` |
+| The verifier crate's `PublicInputs` | a `[u8; 32]`, which the crate splits into the two halves |
+| `schema.json` | the type `Address` |
+
 ## Passing inputs
 
 | Where | How |
@@ -96,5 +122,5 @@ impl Input for Hash {
 ```
 
 A `TYPE` is built from the standard types — field, `uN`, bytes, number, date, text, choice, set,
-arrays, tuples, structs — and those are what client generators map, so a client never needs to know
+address, arrays, tuples, structs — and those are what client generators map, so a client never needs to know
 a circuit's own types.

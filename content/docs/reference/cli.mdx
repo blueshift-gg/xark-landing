@@ -175,7 +175,7 @@ randomness. Either way it prints how the key was made and the verifying key's SH
   with Git LFS.
 - `--r1cs-form <auto|reduced|minimized>` — which form of the constraints to key. `auto` (the
   default) picks `reduced` at or above 2²⁰ constraints, and `minimized` below that only where it
-  saves enough to matter. `--streamable` is shorthand for `--r1cs-form reduced`.
+  saves enough to matter.
 - `--domain <auto|smooth|radix2>` — the QAP evaluation domain. `smooth` (the default without a
   `.ptau`) picks the smallest of `2^k`, `3·2^k` or `9·2^k` points, up to 44% smaller for a circuit
   just past a power of two; only xark's provers can prove against such a key. `radix2` is what
@@ -248,7 +248,13 @@ xark prove examples/cube --inputs inputs.json
 - `--deterministic-rng <SEED>` — reproducible proof randomness for test fixtures **only**. Proof
   randomness blinds the witness, so a reproducible proof leaks witness information across proofs.
 
-Writes `proof.bin` and `public_inputs.bin`.
+Writes `proof.bin` and `public_inputs.bin`, and prints how long the witness solve and the prove
+took, under the proof's summary:
+
+```text
+✅ Proof produced and self-checked (1 public input(s)).
+   solved in 0.00s, proved in 0.00s
+```
 
 ## `xark verify [path]`
 

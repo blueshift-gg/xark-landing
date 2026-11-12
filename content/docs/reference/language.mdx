@@ -24,9 +24,10 @@ use xark::prelude::*;
 | `Field` | An element of the BN254 scalar field: `+ - * /`, `.pow(n)`, comparisons, `.to_bits::<N>()` |
 | `Private<T>`, `Public<T>` | An input the prover keeps secret, or one the verifier sees |
 | `require`, `require_eq`, `require_ne`, `require_lt`, `require_le`, `require_gt`, `require_ge` | Constraints: the proof exists only if they hold |
+| `select` | `select(bit, t, f)` is `bit ? t : f` for a bit: a field element or an array of them, one constraint each |
 | `bind` | Binds a public input that no constraint uses, such as a recipient a proof is for |
 | `#[input]`, `Input` | Inputs as structs and enums, packed into as few field elements as they fit |
-| `Days`, `Time`, `Timestamp`, `Text`, `Choice`, `Bitfield`, `Country` | Everyday input types for credential-style circuits |
+| `Days`, `Time`, `Timestamp`, `Text`, `Choice`, `Bitfield`, `Country`, `Address` | Everyday input types for credential-style circuits, and a Solana address |
 
 A crate builds one circuit: its single `#[circuit]` function is the entry. Plain functions it calls
 — in the same crate or in gadget crates — are ordinary Rust.
@@ -41,7 +42,8 @@ Each parameter of the `#[circuit]` function is an input, `Private<T>` or `Public
   complement, a `bool` to 0 or 1);
 - fixed-size arrays of these (`[u8; 32]` is range-checked byte-wise), tuples, and `#[input]`
   structs and enums;
-- the everyday types above, and gadget types such as a signature or a public key.
+- the everyday types above, a Solana `Address`, and gadget types such as a signature or a public
+  key.
 
 Public inputs reach the verifier in the order the circuit declares them; `xark inspect` prints it.
 See [Inputs](/docs/reference/inputs) for `#[input]` and the everyday types.
@@ -107,6 +109,19 @@ between two values:
 // max(a, b): if a < b take b, else a
 let max = a + Field::from(a.lt::<32>(b)) * (b - a);
 ```
+
+`select(bit, t, f)` writes that as `bit ? t : f`: `f + bit·(t − f)`, one constraint per field
+element of `t`, none when `bit` or `t − f` is a constant. `t` and `f` are a `Field`, an array of
+them or nested arrays; a gadget implements the `Select` trait for its own types (a point, limbs).
+
+```rust
+let max = select(a.lt::<32>(b), b, a);
+let point = select(is_first, [x0, y0], [x1, y1]); // two constraints
+```
+
+`select` doesn't check `bit`: any other value gives that affine combination of `t` and `f`, which a
+prover who picks `bit` would pick. A `bool` from a comparison and a bit of `to_bits` are already 0
+or 1; pin any other bit first with `bit.require_bool()`.
 
 `Field::to_bits::<N>()` and `Field::from_bits::<N>()` convert to and from `N` little-endian bits.
 `Field::from` takes `u8` to `u128`; a wider constant is `Field::from("<decimal>")`.

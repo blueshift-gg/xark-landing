@@ -50,14 +50,14 @@ constants are BN254 field elements, so they aren't valid in a circuit built with
 
 | Crate | What it gives you | Page |
 | --- | --- | --- |
-| `xark-poseidon`, `xark-poseidon2` | Poseidon and Poseidon2 hashes over BN254, the cheapest in a circuit | [Hashes](/docs/gadgets/hashes) |
+| `xark-poseidon`, `xark-poseidon2` | Poseidon and Poseidon2 hashes over BN254, the cheapest in a circuit; Poseidon2's commitments, nullifiers, encryption and Fiat–Shamir challenges | [Hashes](/docs/gadgets/hashes) |
 | `xark-sha256`, `xark-keccak`, `xark-blake2s`, `xark-blake3` | standard hashes, matching their native implementations | [Hashes](/docs/gadgets/hashes) |
 | `xark-mimc` | MiMC over BN254, circomlib- and Noir-compatible | [Hashes](/docs/gadgets/hashes) |
 | `xark-secp256k1`, `xark-secp256r1` | ECDSA verification on secp256k1 and P-256 | [Signatures](/docs/gadgets/signatures) |
 | `xark-ed25519` | Ed25519 (EdDSA) verification | [Signatures](/docs/gadgets/signatures) |
-| `xark-merkle` | Merkle-tree membership | [Commitments](/docs/gadgets/commitments) |
+| `xark-merkle` | Merkle trees on Poseidon2: membership, appends, indexed trees for non-membership, and the trees built on the host | [Commitments](/docs/gadgets/commitments) |
 | `xark-pedersen` | Pedersen hash on Grumpkin | [Commitments](/docs/gadgets/commitments) |
-| `xark-grumpkin` | the Grumpkin curve, for recursion and folding | [Curves & recursion](/docs/gadgets/curves) |
+| `xark-grumpkin` | the Grumpkin curve, for recursion and folding, and Schnorr signatures over it | [Curves & recursion](/docs/gadgets/curves), [Signatures](/docs/gadgets/signatures) |
 | `xark-aes` | AES-128/256 block cipher, CTR and GCM | [Arithmetic](/docs/gadgets/arithmetic) |
 | `xark-bits`, `xark-bignum`, `xark-curve`, `xark-hash` | building blocks for writing your own gadgets | [Arithmetic](/docs/gadgets/arithmetic), [Curves](/docs/gadgets/curves), [Hashes](/docs/gadgets/hashes) |
 
@@ -88,7 +88,8 @@ tests, `--inputs`, and the TypeScript client — and a field-element form in the
 - A **signature gadget's** `Point`, `Signature` and `Scalar` are bytes on the host — a secp256k1
   `Point` is the 64-byte `x ‖ y` (SEC1 without the `0x04` tag) — and limbs in the circuit.
 - A **`Hash`** is a plain `[u8; 32]` on the host and two field elements in the circuit, so a
-  `Public<Hash>` costs two public inputs instead of 256.
+  `Public<Hash>` costs two public inputs instead of 256. A Solana address is xark's
+  [`Address`](/docs/reference/inputs#addresses), the same two halves, given in base58.
 
 `xark setup` writes `inputs.example.json` with every input in its natural form, to fill in:
 
@@ -101,7 +102,8 @@ xark prove my-circuit --inputs my-circuit/target/xark/my-circuit/inputs.example.
 <Callout type="info" title="Start from a worked example">
 Each gadget has one or more runnable circuits under
 [`examples/`](https://github.com/blueshift-gg/xark/tree/master/examples) — `sha256`, `poseidon`,
-`secp256k1_ecdsa`, `ed25519`, `merkle`, `aes_gcm`, `grumpkin_ivc`, and the rest — with tests that
+`secp256k1_ecdsa`, `ed25519`, `grumpkin_schnorr`, `merkle`, `nullifier_tree`, `aes_gcm`,
+`grumpkin_ivc`, and the rest — with tests that
 show each gadget's host input form in practice. `xark test examples/<name>` runs any of them.
 </Callout>
 

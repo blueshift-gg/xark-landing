@@ -36,6 +36,18 @@ export interface Identity {
 }
 ```
 
+An [`Address`](/docs/reference/inputs#addresses) input, a Solana address, is @solana/kit's
+`Address` or its 32 bytes, and decodes to an `Address`, so a signer's `address`, a PDA or
+`address("…")` passes as it is and a decoded one goes straight back into kit. A client whose
+circuit takes one imports the type from `@solana/kit`, which the app then needs installed. For
+`bound_recipient(x: Private<Field>, y: Public<Field>, recipient: Public<Address>)`:
+
+```ts
+const proof = prover.prove({ x: 3, y: 9, recipient: signer.address });
+proof.publicInputs.recipient;                                          // an Address
+verifier.verify(proof.toBytes(), { y: 9, recipient: signer.address }); // true
+```
+
 ## Prove and verify
 
 A prover and a verifier are separate, each made from a URL serving a copy of
@@ -97,7 +109,9 @@ impl Policy {
 }
 ```
 
-A trait's `impl` works the same way: `impl Default` gives `Policy.default()`. `xark client` builds
+A method that hashes with [`xark_poseidon2`](/docs/gadgets/hashes#commitments-nullifiers-and-domains)'s
+`commit` or `nullifier` (`Identity::commitment`, a note's nullifier) computes the same value in
+TypeScript. A trait's `impl` works the same way: `impl Default` gives `Policy.default()`. `xark client` builds
 the crate's host code once more as `client.wasm`, beside `circuit.xbc`; a Rust panic arrives as an
 exception with its message. If your crate's host code doesn't build for wasm, pass
 `--no-functions`.

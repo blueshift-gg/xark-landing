@@ -93,7 +93,7 @@ The crate `xark build` generates (`xark export` alone also writes it) embeds the
 
 | Item | Use |
 | --- | --- |
-| `PublicInputs` | the circuit's public inputs by name, in Rust types (integers, `[u8; 32]`, `Days<FROM, TO>`, an enum per `Choice`, a `Bitfield` per set); `to_fields()` packs them, as a `const fn` |
+| `PublicInputs` | the circuit's public inputs by name, in Rust types (integers, `[u8; 32]` for a hash or an `Address`, `Days<FROM, TO>`, an enum per `Choice`, a `Bitfield` per set); `to_fields()` packs them, as a `const fn` |
 | `verify(&Proof, impl Into<Fields>) -> bool` | a `PublicInputs`, the field elements themselves, or your own struct with a `From` impl |
 | `verify_strict` | also rejects non-canonical point encodings |
 | `Fields` | `[[u8; 32]; N]`: the public inputs as field elements, in proof order, little-endian |

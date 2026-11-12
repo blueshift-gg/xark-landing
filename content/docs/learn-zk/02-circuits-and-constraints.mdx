@@ -43,8 +43,8 @@ Two consequences you'll feel:
   `power_level` into 64 constrained bits, so `> 9000` compares integers. [Range
   proofs](/docs/learn-zk/range-proofs) explains why a field has no order, and how this works.
 - **Hashes are chosen for the field.** Poseidon is popular in ZK precisely because it's cheap in
-  field arithmetic — far cheaper than SHA-256 inside a circuit. That's why our commitments and
-  Merkle trees use Poseidon2.
+  field arithmetic — far cheaper than SHA-256 inside a circuit. That's why the examples'
+  commitments, nullifiers and Merkle trees use Poseidon2.
 
 ## Witness = a satisfying assignment
 
