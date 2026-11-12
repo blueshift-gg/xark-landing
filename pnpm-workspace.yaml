@@ -1,0 +1,12 @@
+# Supply-chain cooldown: only install versions published at least 14 days ago.
+minimumReleaseAge: 20160
+
+minimumReleaseAgeExclude:
+  - "@blueshift-gg/xark@0.3.0"
+
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+overrides:
+  glob: 14.0.2
