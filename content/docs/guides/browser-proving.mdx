@@ -96,10 +96,8 @@ with the circuit's `schema.json`, exactly as `xark prove --inputs` reads them:
 | `circuitDigest(circuitXbc)` / `sha256Hex(bytes)` | The circuit digest `xark build` prints / a key's hash, for pinning |
 | `poseidon2(inputs)` | `xark_poseidon2::hash` of field elements (decimal or `0x`-hex strings), as a decimal string |
 | `poseidon2Commit(inputs)` / `poseidon2Nullifier(inputs)` | `xark_poseidon2::commit` / `nullifier`: a note's commitment and its nullifier, as decimal strings |
-| `poseidon2Encrypt(key, nonce, message)` / `poseidon2Decrypt(key, nonce, ciphertext, tag)` | `xark_poseidon2::encrypt`: the ciphertext, then the tag / the message, throwing when the tag doesn't match |
 
-- A `ProvingSession` has the Poseidon2 functions too, as `commit`, `nullifier`, `encrypt` (returning
-  `{ ciphertext, tag }`) and `decrypt`.
+- A `ProvingSession` has the Poseidon2 functions too, as `commit` and `nullifier`.
 - `prove` checks the proof against the key's verifying key before returning it: an unsatisfiable
   witness is an error, never a proof.
 - Pass `sources` (the `sources.json` `xark build` writes beside `circuit.xbc`) and a failing input
