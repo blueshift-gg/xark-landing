@@ -42,8 +42,8 @@ with the Merkle path as a private input. The claimant was public, though: the pr
 signer. A shielded pool hides who is paid, with two new pieces.
 
 A deposit is a secret **note**: two random field elements, `nullifier` and `secret`. The depositor
-keeps it, and the pool appends its **commitment**, a Poseidon2 hash of both, as the next leaf of a
-Merkle tree. It's 02's salted commitment with nothing left to hide but randomness: both fields are
+keeps it, and the pool appends its **commitment**, Poseidon2's `commit` of both, as the next leaf
+of a Merkle tree. It's 02's salted commitment with nothing left to hide but randomness: both fields are
 random, so no one can guess a note from its commitment. To withdraw, the owner proves two things without saying which leaf is theirs:
 
 1. their commitment is a leaf of a tree whose root the program knows (03's Merkle path);
@@ -55,7 +55,7 @@ the nullifier hash instead. Since the proof hides the leaf, the withdrawal could
 deposit in the tree.
 
 **The chain never hashes.** In 03 the distributor published a fixed root. Here the tree grows with
-every deposit, and if the program hashed the new leaf in itself, its Poseidon and the circuit's
+every deposit, and if the program hashed the new leaf in itself, its hash and the circuit's
 would have to agree to the byte, or the roots would never match. So the program doesn't hash the
 tree at all. A deposit comes with a proof that the new root is the program's tree with one more
 leaf, and the program stores that root. Every tree hash lives in the circuits, and they agree with
@@ -110,25 +110,30 @@ edition = "2024"
 
 [dependencies]
 xark = "0.4"
-xark-hash = "0.4"
 xark-merkle = "0.4"
-xark-poseidon = "0.4"
+xark-poseidon2 = "0.4"
 
 # `xark` is set only when xark compiles a circuit.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(xark)'] }
 ```
 
-The tree is [03's](/docs/tutorials/03-token-claim): a `Path` with the same `first`, `next` and
-`update`, kept by the wallet as the **path of the next free leaf**. Two things differ. Its root is
-`xark-merkle`'s `merkle_root`, whose nodes are Poseidon, a different permutation from the notes'
-Poseidon2, so a node can't pass for a note. And 03's `list_root` is `tree_root` here: that path's
-root over the still-empty slot. Replace `circuits/pool/src/lib.rs` with:
+The tree is [03's](/docs/tutorials/03-token-claim), `xark-merkle`'s Poseidon2 tree: a `Path` with
+the same `first`, `next` and `update`, kept by the wallet as the **path of the next free leaf**.
+03's `list_root` is `tree_root` here: that path's root over the still-empty slot. What's new is
+`append`, for the deposit circuit: `xark-merkle`'s `merkle_append`, which proves the slot is empty
+under one root and returns the root with a leaf written there. The empty subtrees `next` needs come
+from `xark_merkle::tree`, which builds the whole tree on the host. Replace
+`circuits/pool/src/lib.rs` with:
 
 ```rust title="circuits/pool/src/lib.rs"
-//! What both circuits share: a path into the Merkle tree of notes, and
-//! Solana addresses as circuit inputs.
+//! What both circuits share: a path into the Merkle tree of notes.
 use xark::prelude::*;
+use xark_merkle::poseidon2::{merkle_append, merkle_root};
+#[cfg(not(xark))]
+use xark_merkle::tree::{self, Tree};
+#[cfg(not(xark))]
+use xark_poseidon2::hash2;
 
 /// Tree height: 2^20 notes.
 pub const H: usize = 20;
@@ -136,6 +141,12 @@ pub const H: usize = 20;
 /// The empty leaf, ASCII `xarkzero`: no note commitment is this value, so an
 /// empty slot can't be spent.
 pub const ZERO_LEAF: u64 = 0x7861_726b_7a65_726f;
+
+/// The empty tree, as `xark_merkle::tree` builds it on the host.
+#[cfg(not(xark))]
+pub fn tree() -> Tree<H> {
+    Tree::poseidon2(Field::from(ZERO_LEAF))
+}
 
 /// A leaf's authentication path: its index, and its sibling at each height.
 #[input]
@@ -149,13 +160,12 @@ impl Path {
     /// The first leaf's path, in the empty tree.
     #[cfg(not(xark))]
     pub fn first() -> Path {
-        Path { index: 0, siblings: zeros() }
+        tree().path(0).into()
     }
 
     /// The root of the tree with `leaf` at this path.
     pub fn root(&self, leaf: Field) -> Field {
-        let bits = Field::from(self.index).to_bits::<H>();
-        xark_merkle::merkle_root(leaf, self.siblings, bits)
+        merkle_root(leaf, self.siblings, bits(self.index))
     }
 
     /// For the next free leaf's path, the tree's root: the slot is still empty.
@@ -168,7 +178,7 @@ impl Path {
     pub fn next(self, leaf: Field) -> Path {
         assert!((self.index as usize) < (1 << H) - 1, "the tree is full");
         let index = self.index + 1;
-        let z = zeros();
+        let empty = tree();
         let mut siblings = self.siblings;
         let mut node = leaf;
         for (i, sibling) in siblings.iter_mut().enumerate() {
@@ -176,7 +186,7 @@ impl Path {
             let old = *sibling;
             if next != mine {
                 // A new subtree: its left sibling is this leaf's, its right is empty.
-                *sibling = if next & 1 == 1 { node } else { z[i] };
+                *sibling = if next & 1 == 1 { node } else { empty.empty_subtrees()[i] };
             }
             node = node_of(mine, node, old);
         }
@@ -200,77 +210,76 @@ impl Path {
     }
 }
 
+impl Path {
+    /// In a circuit: this path's slot holds the empty leaf in the tree rooted at
+    /// `old_root`, and the result is that root with `leaf` written there.
+    pub fn append(&self, old_root: Field, leaf: Field) -> Field {
+        merkle_append(old_root, Field::from(ZERO_LEAF), leaf, self.siblings, bits(self.index))
+    }
+}
+
+/// A path out of `tree()`, as the circuits take it.
+#[cfg(not(xark))]
+impl From<tree::Path<H>> for Path {
+    fn from(path: tree::Path<H>) -> Path {
+        Path { index: path.index as u32, siblings: path.siblings }
+    }
+}
+
+/// `index` as the tree's `H` bits, least significant first. In a circuit this
+/// binds `index` below 2^20.
+fn bits(index: u32) -> [Field; H] {
+    Field::from(index).to_bits::<H>()
+}
+
 /// The parent of `node`, at position `at` in its level, and its `sibling`.
 #[cfg(not(xark))]
 fn node_of(at: u32, node: Field, sibling: Field) -> Field {
-    if at & 1 == 0 {
-        xark_poseidon::hash2(node, sibling)
-    } else {
-        xark_poseidon::hash2(sibling, node)
-    }
+    if at & 1 == 0 { hash2(node, sibling) } else { hash2(sibling, node) }
 }
-
-/// `zeros()[i]` is the root of an empty subtree of height `i`.
-#[cfg(not(xark))]
-fn zeros() -> [Field; H] {
-    let mut z = [Field::from(ZERO_LEAF); H];
-    for i in 1..H {
-        z[i] = xark_poseidon::hash2(z[i - 1], z[i - 1]);
-    }
-    z
-}
-
-/// A Solana address enters a circuit as xark's `Hash`: two field elements.
-pub use xark_hash::Hash;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xark_poseidon::hash2;
-
-    /// The root of `leaves`, hashed from scratch level by level.
-    fn root_of(leaves: &[Field]) -> Field {
-        let mut level = leaves.to_vec();
-        let mut empty = Field::from(ZERO_LEAF);
-        for _ in 0..H {
-            level = level.chunks(2).map(|p| hash2(p[0], *p.get(1).unwrap_or(&empty))).collect();
-            empty = hash2(empty, empty);
-        }
-        level.first().copied().unwrap_or(empty)
-    }
 
     #[test]
-    fn paths_agree_with_the_whole_tree() {
+    fn paths_agree_with_the_tree() {
         let leaves: Vec<Field> = (1..=11u64).map(Field::from).collect();
+        let mut tree = tree();
         let mut tip = Path::first();
         let mut paths: Vec<Path> = Vec::new();
-        for (i, &leaf) in leaves.iter().enumerate() {
-            assert_eq!(tip.tree_root(), root_of(&leaves[..i]));
+        for &leaf in &leaves {
+            assert_eq!(tip.tree_root(), tree.root());
             paths = paths.into_iter().map(|p| p.update(tip, leaf)).collect();
             paths.push(tip);
             tip = tip.next(leaf);
-            // Every leaf so far is in the current root, at its kept path.
-            for (j, path) in paths.iter().enumerate() {
-                assert_eq!(path.root(leaves[j]), root_of(&leaves[..=i]));
+            tree.push(leaf);
+            // Every path the wallet keeps is the tree's, and so is the tip.
+            for (i, path) in paths.iter().chain([&tip]).enumerate() {
+                let want = tree.path(i);
+                assert_eq!((path.index as usize, path.siblings), (want.index, want.siblings));
             }
         }
     }
 }
 ```
 
-As in 03, `root` is the one function a circuit calls; `first`, `next` and `update` are host-only
-(`#[cfg(not(xark))]`), and `#[input] impl` puts all of them in the TypeScript clients. What's new
-is that the crate is its own: both circuits depend on it, and so does
-[06](/docs/tutorials/06-shielded-transfer). The test checks every path against a tree hashed from
-scratch. Run it:
+As in 03, `root` is what a circuit calls to prove membership, and `append` what it calls to grow
+the tree; `first`, `next` and `update` are host-only (`#[cfg(not(xark))]`). `#[input] impl` puts
+them in the TypeScript clients; `append`, in a plain `impl`, stays out, since only a circuit calls
+it. The nodes are Poseidon2's 2-to-1 `hash2`, and the notes will be Poseidon2's `commit` and
+`nullifier`, each its sponge in a domain of its own, so a node can't pass for a note. The crate is
+its own: both circuits depend on it, and so does [06](/docs/tutorials/06-shielded-transfer). The
+test checks every path the wallet keeps against `xark_merkle::tree`'s, which a host holding every
+note would use instead. Run it:
 
 ```console
 $ cargo test --release -p pool
 ...
 running 1 test
-test tests::paths_agree_with_the_whole_tree ... ok
+test tests::paths_agree_with_the_tree ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
 ```
 </Step>
 
@@ -304,7 +313,9 @@ pub struct Append {
 
 #[input]
 impl Append {
-    /// `leaf` appended at `path`, the next free leaf's path.
+    /// `leaf` appended at `path`, the next free leaf's path: what the circuit
+    /// proves, computed on the host.
+    #[cfg(not(xark))]
     pub fn of(path: Path, leaf: Field) -> Append {
         Append {
             old_root: path.tree_root(),
@@ -317,7 +328,8 @@ impl Append {
 
 #[circuit]
 pub fn shielded_pool_deposit(path: Private<Path>, append: Public<Append>) {
-    require_eq(Append::of(path, append.leaf), append);
+    require(path.index == append.index);
+    require_eq(path.append(append.old_root, append.leaf), append.new_root);
 }
 
 #[cfg(test)]
@@ -329,36 +341,41 @@ mod tests {
         let tip = Path::first().next(Field::from(7u64));
         let append = Append::of(tip, Field::from(8u64));
         shielded_pool_deposit(tip, append).unwrap();
-        // Another index, or the empty tree's root: each is refused.
+        // Another index, the empty tree's root, or the first slot again, over the
+        // leaf already there: each is refused.
         assert!(shielded_pool_deposit(tip, Append { index: 2, ..append }).is_err());
         let empty = Path::first().tree_root();
         assert!(shielded_pool_deposit(tip, Append { old_root: empty, ..append }).is_err());
+        assert!(shielded_pool_deposit(Path::first(), Append { index: 0, ..append }).is_err());
     }
 }
 ```
 
-The circuit is one line: the public statement must be what `Append::of` computes from the private
-path. Only the tree's true siblings hash up to the program's `old_root`, so the same siblings give
-the true `new_root`. The depositor can't slip a different tree in.
+The circuit is two lines: the private path is at the program's index, and `append` from the
+program's `old_root` gives the claimed `new_root`. `merkle_append` hashes the one path twice: with
+the empty leaf it must reach `old_root`, and with the new leaf it gives the root to return. Only the
+tree's true siblings hash up to the program's root, so the same siblings give the true `new_root`.
+The depositor can't slip a different tree in, or write over a leaf that's already there.
+`Append::of` is the same statement computed on the host, for the wallet and the tests.
 
 ```console
 $ xark test circuits/shielded-pool-deposit
 xark building circuit `shielded-pool-deposit`
-xark 9626 vars, 9647 constraints, 9601 witness-gen ops
-xark circuit digest d43e8c0d55297486007612c4e210a6cc
+xark 9748 vars, 9750 constraints, 9723 witness-gen ops
+xark circuit digest 2962ed49a86703e83e8573330d6fc0e8
 ...
 running 1 test
 test tests::appends_to_the_tree ... ok
 ```
 
-About 9,600 constraints: two 20-level Poseidon paths, one for each root. The digests match
+About 9,700 constraints: the 20-level path hashed twice, once for each root. The digests match
 these if your circuits do.
 </Step>
 
 <Step>
 ### Write the withdraw circuit
 
-The withdraw crate also hashes notes, with Poseidon2:
+The withdraw crate also hashes notes, with Poseidon2's `commit` and `nullifier`:
 
 ```sh
 cargo add -p shielded-pool-withdraw xark-poseidon2@0.4
@@ -368,9 +385,9 @@ cargo add -p shielded-pool-withdraw --path circuits/pool
 Replace `circuits/shielded-pool-withdraw/src/lib.rs` with:
 
 ```rust title="circuits/shielded-pool-withdraw/src/lib.rs"
-use pool::{Hash, Path};
+use pool::Path;
 use xark::prelude::*;
-use xark_poseidon2::hash;
+use xark_poseidon2::{commit, nullifier};
 
 /// A deposit's secret: whoever knows it can withdraw the deposit, once.
 #[input]
@@ -383,13 +400,13 @@ pub struct Note {
 impl Note {
     /// The leaf a deposit appends: it hides both secrets.
     pub fn commitment(&self) -> Field {
-        hash(self.to_fields())
+        commit(self.to_fields())
     }
 
     /// What a withdrawal reveals: the same every time for this note, and
     /// unlinkable to its commitment without the secret.
     pub fn nullifier_hash(&self) -> Field {
-        hash([self.nullifier])
+        nullifier([self.nullifier])
     }
 }
 
@@ -398,15 +415,15 @@ impl Note {
 pub struct Withdrawal {
     pub root: Field,
     pub nullifier_hash: Field,
-    pub recipient: Hash,
-    pub relayer: Hash,
+    pub recipient: Address,
+    pub relayer: Address,
     pub fee: u64,
 }
 
 #[input]
 impl Withdrawal {
     /// Withdrawing `note`, at `path`, to `recipient`, paying `fee` to `relayer`.
-    pub fn of(note: Note, path: Path, recipient: Hash, relayer: Hash, fee: u64) -> Withdrawal {
+    pub fn of(note: Note, path: Path, recipient: Address, relayer: Address, fee: u64) -> Withdrawal {
         Withdrawal {
             root: path.root(note.commitment()),
             nullifier_hash: note.nullifier_hash(),
@@ -456,9 +473,11 @@ mod tests {
 }
 ```
 
-`recipient`, `relayer` and `fee` are public inputs the program fills in from the transaction, so
-whoever submits the proof can't redirect the payout. The two addresses are only bound, as the
-holder was in [02](/docs/tutorials/02-zkyc). `fee` is a `u64`, and its range check
+`commit` and `nullifier` are the Poseidon2 sponge, each in a domain of its own, so a commitment is
+never a nullifier hash or a tree node. `recipient`, `relayer` and `fee` are public inputs the
+program fills in from the transaction, so whoever submits the proof can't redirect the payout. The
+two addresses are `Address`es, xark's Solana address, as the holder was in
+[02](/docs/tutorials/02-zkyc), and are only bound. `fee` is a `u64`, and its range check
 already uses it.
 
 That range check is one of the pool's two [range proofs](/docs/learn-zk/range-proofs), and both
@@ -470,8 +489,8 @@ path. Amounts need no range proof at all: every note in a pool is the same denom
 ```console
 $ xark test circuits/shielded-pool-withdraw
 xark building circuit `shielded-pool-withdraw`
-xark 5387 vars, 5382 constraints, 5357 witness-gen ops
-xark circuit digest 5bfbf4d76ed90e8aa38b9bd0ea431e5d
+xark 5447 vars, 5442 constraints, 5417 witness-gen ops
+xark circuit digest b1d2b197968f4fd0b53b2ca032655d70
 ...
 running 1 test
 test tests::withdraws_a_note_in_the_tree ... ok
@@ -494,7 +513,7 @@ $ xark inspect circuits/shielded-pool-withdraw --json | tail -10
 }
 ```
 
-Each address is two field elements, its `Hash`'s halves. The program won't split them, or lay out
+Each address is two field elements, its 16-byte halves. The program won't split them, or lay out
 any of these itself: the verifier crate xark generates next takes them by name.
 </Step>
 
@@ -522,8 +541,6 @@ xark added program `shielded-pool-program` in .../programs/shielded-pool, verify
 
 $ xark build
 ...
-xark building circuit `shielded-pool-withdraw`
-...
 Wrote .../keys/shielded-pool-withdraw/pk.bin
 ...
 Generated verifier crate `shielded-pool-withdraw-verifier` at .../clients/shielded-pool-withdraw/rust (7 public input(s), VK = 960 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
@@ -532,7 +549,7 @@ Generated verifier crate `shielded-pool-withdraw-verifier` at .../clients/shield
 
 xark building the programs (cargo build-sbf)
 ...
-    Finished `release` profile [optimized] target(s) in 0.40s
+    Finished `release` profile [optimized] target(s) in 0.44s
 ```
 
 Each circuit now has its keys in `keys/<circuit>/`, and in `clients/<circuit>/` a Rust verifier
@@ -596,11 +613,13 @@ test("a wallet keeps its path as others deposit", () => {
 
 `circuit("shielded-pool-deposit")` reads that circuit's build output and its keys. This is the
 wallet: `Path.first`, `next` and `update` are the Rust from `pool`, so the paths the wallet keeps
-can't disagree with the circuits. `deposits` is for the onchain test at the end. Run it:
+can't disagree with the circuits. `Withdrawal.of` takes each address as @solana/kit's `Address`
+or its 32 bytes; zeros will do until the test has wallets. `deposits` is for the onchain test at
+the end. Run it:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2489ms
+ ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2246ms
 
  Test Files  1 passed (1)
       Tests  1 passed (1)
@@ -758,8 +777,8 @@ pub const NULLIFIER_SEED: &[u8] = b"nullifier";
 // The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
 // a pool can't be seeded with another tree.
 pub const EMPTY_ROOT: [u8; 32] = [
-    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
-    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+    251, 142, 67, 247, 199, 111, 241, 124, 245, 96, 180, 214, 179, 51, 248, 149, 20, 177, 173, 83,
+    193, 126, 124, 38, 168, 0, 139, 11, 55, 225, 46, 3,
 ];
 
 /// A pool's account, 536 bytes: tag, bump, 6 reserved bytes, then
@@ -1452,7 +1471,7 @@ compute:
 
 Then the public inputs, the generated `Withdrawal`: `root` and `nullifier_hash` from the
 instruction, the two addresses from the transaction's accounts and `fee` as the relayer sent it.
-Each address goes in as its 32 bytes, and the crate splits it into the `Hash`'s two halves. A relayer who swaps the recipient for
+Each address goes in as its 32 bytes, and the crate splits it into the `Address`'s two halves. A relayer who swaps the recipient for
 their own, or raises the fee, has a proof of another statement, which fails with `InvalidProof`.
 
 Two more checks guard the payout:
@@ -1550,21 +1569,15 @@ pub fn log(message: &str) {
 
 ```console
 $ xark build
-xark building circuit `shielded-pool-deposit`
-xark unchanged since the last build: reusing its circuit (digest d43e8c0d55297486007612c4e210a6cc)
-...
-xark building circuit `shielded-pool-withdraw`
-xark unchanged since the last build: reusing its circuit (digest 5bfbf4d76ed90e8aa38b9bd0ea431e5d)
 ...
 xark building the programs (cargo build-sbf)
 ...
-   Compiling shielded-pool-deposit-verifier v0.1.0 (.../clients/shielded-pool-deposit/rust)
    Compiling shielded-pool-withdraw-verifier v0.1.0 (.../clients/shielded-pool-withdraw/rust)
 ...
    Compiling pinocchio v0.11.2
    Compiling pinocchio-system v0.6.1
    Compiling shielded-pool-program v0.1.0 (.../programs/shielded-pool)
-    Finished `release` profile [optimized] target(s) in 0.60s
+    Finished `release` profile [optimized] target(s) in 0.49s
 ```
 
 The circuits haven't changed, so their keys and clients stay as they are. The program is at
@@ -1583,7 +1596,7 @@ throws with the program's logs if it fails. Replace the `@blueshift-gg/xark/test
 top of `tests/shielded-pool.test.ts` with these two:
 
 ```ts title="tests/shielded-pool.test.ts"
-import { AccountRole, address, generateKeyPairSigner, getAddressEncoder, getProgramDerivedAddress, type Address, type KeyPairSigner } from "@solana/kit";
+import { AccountRole, address, generateKeyPairSigner, getProgramDerivedAddress, type Address, type KeyPairSigner } from "@solana/kit";
 import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 ```
 
@@ -1608,7 +1621,8 @@ function u64le(x: bigint) {
 ```
 
 Finally, the test. Two people deposit 1 SOL each. The first then withdraws through a relayer, who
-signs and pays the transaction fee, to a fresh address that holds nothing. Each instruction's
+signs and pays the transaction fee, to a fresh address that holds nothing. The withdrawal names
+both by their `Address`, as @solana/kit has them. Each instruction's
 accounts are in the order the program destructures them:
 
 ```ts title="tests/shielded-pool.test.ts"
@@ -1618,7 +1632,6 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
   const system = { address: address("11111111111111111111111111111111"), role: AccountRole.READONLY };
   const writable = (a: Address) => ({ address: a, role: AccountRole.WRITABLE });
   const signer = (s: KeyPairSigner) => ({ address: s.address, role: AccountRole.WRITABLE_SIGNER, signer: s });
-  const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
 
   // A pool of 1 SOL notes. Its empty root is the circuit's.
   const DENOMINATION = 1_000_000_000n;
@@ -1662,7 +1675,7 @@ test("deposit, someone else deposits, withdraw through a relayer, once", async (
   const relayer = await funded(svm);
   const recipient = (await generateKeyPairSigner()).address;
   const fee = 10_000_000n;
-  const statement = Withdrawal.of(mine, path, bytes(recipient), bytes(relayer.address), fee);
+  const statement = Withdrawal.of(mine, path, recipient, relayer.address, fee);
   const proof = withdrawals.prove({ note: mine, path, withdrawal: statement });
   const { root, nullifierHash } = statement;
   const [nullifier] = await getProgramDerivedAddress({
@@ -1692,7 +1705,7 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2899ms
+ ✓ tests/shielded-pool.test.ts > a wallet keeps its path as others deposit 2223ms
 stdout | tests/shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once
 initialize in 3022 CU
 ...
@@ -1702,7 +1715,7 @@ deposit 1 verified onchain in 92305 CU
 ...
 withdrawal verified onchain in 113435 CU
 
- ✓ tests/shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 5666ms
+ ✓ tests/shielded-pool.test.ts > deposit, someone else deposits, withdraw through a relayer, once 4452ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -1720,7 +1733,7 @@ tests, then these, after a build:
 
 ```console
 $ xark test
-xark building circuit `shielded-pool-deposit`
+xark: running `cargo test --release` in .../circuits/shielded-pool-deposit
 ...
 test tests::appends_to_the_tree ... ok
 ...

@@ -49,7 +49,7 @@ This tutorial gets its own project, beside `shielded-pool/`, laid out as in 04:
 ```text
 shielded-transfer/
 ├── circuits/
-│   ├── pool/                 04's tree, copied in
+│   ├── pool/                 04's tree, copied in, with a pair append
 │   └── shielded_transact/    the JoinSplit circuit
 ├── programs/
 │   └── shielded-transfer/    the Pinocchio program, with an SPL token vault
@@ -87,24 +87,71 @@ in 04's `pool` crate, and add the circuit's dependencies. From the directory tha
 ```sh
 xark init shielded-transfer --circuit shielded_transact && cd shielded-transfer
 cp -r ../shielded-pool/circuits/pool circuits/
-cargo add -p shielded_transact xark-poseidon2@0.4
+cargo add -p shielded_transact xark-poseidon2@0.4 xark-hash@0.4
 cargo add -p shielded_transact --path circuits/pool
 ```
 
 Every command from here on runs at the project's root, `shielded-transfer/`.
 
-The new circuit reuses the `pool` crate you wrote in 04: its `Path`, with the `first`, `next` and
-`update` a wallet keeps it current with, and its `Hash`, 32 bytes as two field elements. It has no
-`#[circuit]`, so xark builds it only as part of the circuits that use it. You'll see the copy is
-yours:
+The new circuit reuses the `pool` crate you wrote in 04: its `Path` into `xark-merkle`'s Poseidon2
+tree, with the `first`, `next` and `update` a wallet keeps it current with. It has no `#[circuit]`,
+so xark builds it only as part of the circuits that use it. `xark-hash` is for the memos' hashes,
+32 bytes as two field elements. You'll see the copy is yours:
 
 ```console
-$ grep -A3 '^\[dependencies\]' circuits/shielded_transact/Cargo.toml
+$ grep -A4 '^\[dependencies\]' circuits/shielded_transact/Cargo.toml
 [dependencies]
 pool = { version = "0.1.0", path = "../pool" }
 xark = { version = "0.4" }
+xark-hash = "0.4"
 xark-poseidon2 = "0.4"
 ```
+</Step>
+
+<Step>
+### Append two leaves at once
+
+04's deposit appends one leaf with `Path::append`. A transaction here creates two notes, and the
+program always appends them as a pair, at an even slot. A pair at an even slot is one leaf of the
+tree one level up, the tree of pairs, whose empty leaf is `hash2(ZERO_LEAF, ZERO_LEAF)`. So
+appending a pair is `xark-merkle`'s `merkle_append` again, on the path's upper 19 levels. Append to
+`circuits/pool/src/lib.rs`:
+
+```rust title="circuits/pool/src/lib.rs"
+impl Path {
+    /// In a circuit: this path's slot is even and it and the slot after it are empty
+    /// in the tree rooted at `old_root`, and the result is that root with `pair`
+    /// written in them. The pair is one leaf of the tree of pairs, the subtrees of
+    /// height 1, whose empty leaf is `hash2(ZERO_LEAF, ZERO_LEAF)`: `merkle_append`
+    /// on the path's upper 19 levels.
+    pub fn append_pair(&self, old_root: Field, pair: [Field; 2]) -> Field {
+        let bits = bits(self.index);
+        require_eq(bits[0], Field::from(0u64));
+        let mut siblings = [Field::from(0u64); H - 1];
+        let mut up = [Field::from(0u64); H - 1];
+        let mut i = 0;
+        while i < H - 1 {
+            siblings[i] = self.siblings[i + 1];
+            up[i] = bits[i + 1];
+            i += 1;
+        }
+        let empty = Field::from(ZERO_LEAF);
+        merkle_append(
+            old_root,
+            xark_poseidon2::hash2(empty, empty),
+            xark_poseidon2::hash2(pair[0], pair[1]),
+            siblings,
+            up,
+        )
+    }
+}
+```
+
+The index's lowest bit must be 0, so the pair starts at an even slot. The other 19 bits and the
+path's siblings above the pair are a path in the tree of pairs, and `merkle_append` proves, with
+that one path, that the pair's slot was empty under `old_root` and what the root is with the
+pair's node in it. That replaces a separate check of the old root: hashing the empty pair up the
+path must give `old_root`, which pins the path to the tree's true nodes, as in 04's deposit.
 </Step>
 
 <Step>
@@ -114,23 +161,16 @@ Replace `circuits/shielded_transact/src/lib.rs` with the circuit's types. Each `
 an input the client takes as it is, and each `#[input] impl` is Rust the client can call:
 
 ```rust title="circuits/shielded_transact/src/lib.rs"
-use pool::{Hash, Path};
+use pool::Path;
 use xark::prelude::*;
-use xark_poseidon2::hash;
+use xark_hash::Hash;
+use xark_poseidon2::{commit, hash};
 
-// Domain tags: no two kinds of value hash to the same thing.
+// The keys' tags, on top of `hash`'s length tag: no two kinds of key collide, and
+// `hash` is a domain apart from `commit`'s and `nullifier`'s.
 const NULLIFIER_KEY: u64 = 1;
 const VIEWING_KEY: u64 = 2;
 const ADDRESS: u64 = 3;
-const COMMITMENT: u64 = 4;
-const NULLIFIER: u64 = 5;
-
-/// 32 bytes (a mint, a memo's hash) as the two field elements a `Hash` is, to hash.
-fn halves(x: Hash) -> [Field; 2] {
-    let mut halves = [Field::from(0u64); 2];
-    xark::input::write_fields(&x, &mut halves);
-    halves
-}
 
 /// A holder's spending key: their other keys and every address derive from it.
 #[input]
@@ -170,21 +210,21 @@ pub struct Note {
 #[input]
 impl Note {
     /// The leaf the note is in the tree as, in the pool of `asset` (its mint).
-    pub fn commitment(&self, asset: Hash) -> Field {
-        let [hi, lo] = halves(asset);
+    pub fn commitment(&self, asset: Address) -> Field {
+        let [hi, lo] = asset.to_fields();
         let [value, owner, rho, rseed] = self.to_fields();
-        hash([value, owner, rho, rseed, hi, lo, Field::from(COMMITMENT)])
+        commit([value, owner, rho, rseed, hi, lo])
     }
 
     /// What spending the note at `position` reveals: only `key`'s holder can make
     /// it, and it's the same every time, so the program refuses a second spend.
-    pub fn nullifier(&self, key: Key, asset: Hash, position: u32) -> Field {
+    pub fn nullifier(&self, key: Key, asset: Address, position: u32) -> Field {
         nullifier(key.nullifier_key(), self.commitment(asset), position)
     }
 }
 
 fn nullifier(nullifier_key: Field, commitment: Field, position: u32) -> Field {
-    hash([nullifier_key, commitment, Field::from(position), Field::from(NULLIFIER)])
+    xark_poseidon2::nullifier([nullifier_key, commitment, Field::from(position)])
 }
 
 /// A note to spend, at `path`, owned by the spender's address `diversifier`.
@@ -205,15 +245,15 @@ pub struct Flow {
     pub vpub_in: u64,
     pub vpub_out: u64,
     pub fee: u64,
-    pub recipient: Hash,
-    pub relayer: Hash,
+    pub recipient: Address,
+    pub relayer: Address,
 }
 
 /// The public inputs, in the order the program assembles them.
 #[input]
 pub struct Transaction {
     pub root: Field,
-    pub asset: Hash,
+    pub asset: Address,
     pub nullifiers: [Field; 2],
     pub commitments: [Field; 2],
     pub old_root: Field,
@@ -233,7 +273,7 @@ impl Transaction {
         spends: [Spend; 2],
         outputs: [Note; 2],
         tip: Path,
-        asset: Hash,
+        asset: Address,
         flow: Flow,
         memos: [Hash; 2],
     ) -> Transaction {
@@ -244,37 +284,32 @@ impl Transaction {
             nullifiers: spends.map(|s| s.note.nullifier(key, asset, s.path.index)),
             commitments,
             old_root: tip.tree_root(),
-            new_root: pair_root(tip, commitments),
+            new_root: tip.next(commitments[0]).next(commitments[1]).tree_root(),
             index: tip.index,
             flow,
             memos,
         }
     }
 }
-
-/// The root once `pair` is appended at `tip`, an even index: the second leaf's
-/// path is `tip` with the first leaf beside it.
-fn pair_root(tip: Path, pair: [Field; 2]) -> Field {
-    let mut siblings = tip.siblings;
-    siblings[0] = pair[0];
-    let second = Path {
-        index: tip.index + 1,
-        siblings,
-    };
-    second.root(pair[1])
-}
 ```
 
-The key hierarchy is three hashes. Spending needs `secret`. `viewing_key` is enough to recognize
+The key hierarchy is three hashes, each with a tag of its own. Spending needs `secret`. `viewing_key` is enough to recognize
 your addresses, so you could hand it to an auditor without giving them your funds. `address` makes
 as many addresses as you like from one key, and nobody can tell two of them belong together.
 
-A note commits to its value, its owner, two random fields and the token's mint, so notes in
-different pools never collide. To hash the mint, `halves` splits its `Hash` into the two field
-elements it is. Its nullifier mixes in the owner's nullifier key, as a voter's did in
-[05](/docs/tutorials/05-anonymous-voting), and the note's position in the tree: only the owner can compute it, and it doesn't reveal which commitment it
-came from. `Transaction::of` builds the whole public statement from these helpers, for the client.
-It's `#[cfg(not(xark))]`: host code only, never part of the circuit.
+The mint, the recipient and the relayer are Solana addresses, so they're xark's `Address`: two
+field elements, its 16-byte halves, which `to_fields` hands the hash. A note is a `commit` to its
+value, its owner, two random fields and the token's mint, so notes in different pools never
+collide. Its nullifier is a `nullifier` of the owner's nullifier key, as a voter's was in
+[05](/docs/tutorials/05-anonymous-voting), the note's commitment and its position in the tree: only
+the owner can compute it, and it doesn't reveal which commitment it came from. `commit` and
+`nullifier` are `xark-poseidon2`'s sponge, each in a domain of its own, so a commitment, a
+nullifier, a key and a tree node can never stand in for one another. See
+[Hashes](/docs/gadgets/hashes).
+
+`Transaction::of` builds the whole public statement from these helpers, for the client: the new
+root is the wallet's own `next`, twice. It's `#[cfg(not(xark))]`: host code only, never part of the
+circuit.
 
 Now append the circuit itself:
 
@@ -316,11 +351,10 @@ pub fn shielded_transact(
     // Every value is a range-checked `u64`, so these sums can't wrap the field.
     require_eq(value_in, value_out);
 
-    // Append the pair at `index`, an even slot, as 04's deposit appends one.
+    // Append the pair at `index`, an even slot whose pair was empty. As in 04's
+    // deposit, the old root pins `tip` to the tree's true nodes.
     require(tip.index == tx.index);
-    require(tx.index.is_multiple_of(2));
-    require_eq(tip.tree_root(), tx.old_root);
-    require_eq(pair_root(tip, tx.commitments), tx.new_root);
+    require_eq(tip.append_pair(tx.old_root, tx.commitments), tx.new_root);
 
     // Where the value, the fee and the memos go are the ones the proof was made for.
     bind(tx.flow.recipient);
@@ -333,7 +367,7 @@ pub fn shielded_transact(
 
 In one proof, this checks that each spent note belongs to the spender, is in the tree (unless it's
 a dummy), and burns the nullifier revealed; that the outputs are the commitments revealed; and that
-value balances. As in 04, the chain never hashes: the circuit proves the two new notes take the
+value balances. As in 04, the chain never hashes: `append_pair` proves the two new notes take the
 tree from `old_root` to `new_root`, so the program only stores roots.
 
 <Callout title="Why every amount is range-checked">
@@ -357,18 +391,18 @@ Build it:
 ```console
 $ xark build circuits/shielded_transact
 xark building circuit `shielded_transact`
-xark 26116 vars, 26129 constraints, 26013 witness-gen ops
+xark 25101 vars, 25089 constraints, 24998 witness-gen ops
 xark most constraints come from
-       37%  circuits/shielded_transact/src/lib.rs:168  require_eq(spend.path.root(commitment), tx.root);
-       19%  circuits/shielded_transact/src/lib.rs:192  require_eq(pair_root(tip, tx.commitments), tx.new_root);
-       18%  circuits/shielded_transact/src/lib.rs:191  require_eq(tip.tree_root(), tx.old_root);
+       39%  circuits/shielded_transact/src/lib.rs:149  require_eq(spend.path.root(commitment), tx.root);
+       38%  circuits/shielded_transact/src/lib.rs:172  require_eq(tip.append_pair(tx.old_root, tx.commitments), tx.new_root);
+        6%  circuits/shielded_transact/src/lib.rs:163  require_eq(output.commitment(tx.asset), revealed);
       `xark profile` breaks down every line
-xark circuit digest aa2e05477c68d7d50002397448d32796
+xark circuit digest 2ce642c480be4eed43d645284cb52fdb
 ...
 ```
 
-About 26,000 constraints, three quarters of them Merkle hashing: two membership paths, and the
-tree's root before and after the append. If your file matches this page, your digest matches too.
+About 25,000 constraints, three quarters of them Merkle hashing: two membership paths, and the
+append, which hashes up the path twice, once for the root before and once for the root after. If your file matches this page, your digest matches too.
 </Step>
 
 <Step>
@@ -382,7 +416,7 @@ mod tests {
     use super::*;
     use xark::prover::ProveError;
 
-    fn asset() -> Hash {
+    fn asset() -> Address {
         [7; 32].into()
     }
 
@@ -428,6 +462,8 @@ mod tests {
             relayer: [8; 32].into(),
         };
         let memos = [[1; 32].into(), [2; 32].into()];
+        // `Transaction::of` appends the pair as the wallet does (`next`, twice), so
+        // a proof that holds is the circuit's `append_pair` agreeing with it.
         let tx = Transaction::of(key, spends, outputs, tip, asset(), flow, memos);
         shielded_transact(key, spends, outputs, tip, tx)
     }
@@ -460,12 +496,16 @@ mod tests {
         // Bob can't spend Alice's note, and nobody can pay out more than they spend.
         assert!(transact(bob, [spend(mine, path), dummy(bob, 102)], pay, tip, (0, 0, 5)).is_err());
         assert!(transact(alice, spends, [note(bob, 101, 3), pay[1]], tip, (0, 0, 5)).is_err());
+        // Outputs land in pairs, at an even index.
+        assert!(transact(alice, spends, pay, tip.next(Field::from(5u64)), (0, 0, 5)).is_err());
     }
 }
 ```
 
 The test is a small wallet: it tracks Alice's note's path with `Path::next` and `Path::update`
-from the `pool` crate, as 04's wallet did. Run it:
+from the `pool` crate, as 04's wallet did. Every proof that holds is the circuit's `append_pair`
+agreeing with the wallet's `next`, twice; the last line moves the tip to an odd slot, where
+`append_pair` refuses. Run it:
 
 ```console
 $ xark test
@@ -473,10 +513,10 @@ $ xark test
 running 1 test
 test tests::deposit_then_pay_privately ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.36s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.22s
 ```
 
-Each call solves the whole 26,000-constraint circuit, so the test takes a few seconds. See
+Each call solves the whole 25,000-constraint circuit, so the test takes a few seconds. See
 [Test a circuit](/docs/guides/testing) for more on circuit tests.
 </Step>
 
@@ -496,7 +536,7 @@ and a LiteSVM test to start from:
 ```console
 $ xark add program shielded-transfer --circuit shielded_transact
 ...
-verifying key sha256: c2c4b2ec496702bbf6a11cf85fec544f0d0e3de897b87fbc5cf55df713e88d29  # pin a client's verifier to it: { keyHash }
+verifying key sha256: 9358f314d22793c5be1deb07f12a2bcbda7e2771ae7817fc46aa8fd78d58a9d9  # pin a client's verifier to it: { keyHash }
 ...
 Generated verifier crate `shielded-transact-verifier` at .../clients/shielded_transact/rust (19 public input(s), VK = 1728 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
 ...
@@ -509,7 +549,8 @@ xark added program `shielded-transfer-program` in .../programs/shielded-transfer
 Your key hash will differ: the key comes from your machine's randomness. The keys are in
 `keys/shielded_transact/`, and the verifier crate embeds the verifying key, so commit both.
 
-The 19 public inputs are the `Transaction`, flattened: each `Hash` is two field elements, and
+The 19 public inputs are the `Transaction`, flattened: each `Address` and `Hash` is two field
+elements, and
 `Flow`'s three `u64`s are packed into one (`vpub_in + vpub_out·2⁶⁴ + fee·2¹²⁸`), as
 [Packing](/docs/reference/inputs#packing) describes. The verifier crate does that flattening for
 you: its `PublicInputs` is the circuit's `Transaction`, field by field, and `verify` packs it. You
@@ -675,8 +716,8 @@ pub const NULLIFIER_SEED: &[u8] = b"nullifier";
 // The empty tree's root, little-endian: `Path.first().treeRoot()`. Fixed here so
 // a pool can't be seeded with another tree.
 pub const EMPTY_ROOT: [u8; 32] = [
-    26, 122, 47, 146, 164, 115, 191, 166, 88, 234, 28, 252, 38, 169, 221, 171, 246, 159, 204, 103,
-    2, 229, 199, 103, 212, 104, 254, 41, 151, 59, 127, 46,
+    251, 142, 67, 247, 199, 111, 241, 124, 245, 96, 180, 214, 179, 51, 248, 149, 20, 177, 173, 83,
+    193, 126, 124, 38, 168, 0, 139, 11, 55, 225, 46, 3,
 ];
 
 /// A pool's account, 554 bytes: `mint`, `next_index` and `current_root_index`
@@ -1511,14 +1552,15 @@ pub fn log_data(data: &[&[u8]]) {
 <Step>
 ### Build the program
 
-`xark build` at the root builds the circuit, writes its clients, then runs `cargo build-sbf` on
-the programs:
+`xark build` at the root builds the circuit if it changed, writes its clients, then runs
+`cargo build-sbf` on the programs:
 
 ```console
 $ xark build
-xark building circuit `shielded_transact`
-xark unchanged since the last build: reusing its circuit (digest aa2e05477c68d7d50002397448d32796)
+Generated verifier crate `shielded-transact-verifier` at .../clients/shielded_transact/rust (19 public input(s), VK = 1728 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
 ...
+✅ TypeScript client for `shielded_transact` at .../clients/shielded_transact/ts/shielded_transact.ts
+
 xark building the programs (cargo build-sbf)
 ...
    Compiling shielded-transact-verifier v0.1.0 (.../clients/shielded_transact/rust)
@@ -1527,7 +1569,7 @@ xark building the programs (cargo build-sbf)
    Compiling pinocchio-token v0.7.0
    Compiling pinocchio-system v0.6.1
    Compiling shielded-transfer-program v0.1.0 (.../programs/shielded-transfer)
-    Finished `release` profile [optimized] target(s) in 0.64s
+    Finished `release` profile [optimized] target(s) in 0.82s
 ```
 
 The program is at `target/deploy/shielded_transfer_program.so`.
@@ -1680,10 +1722,10 @@ interface Moves { vpubIn?: bigint; vpubOut?: bigint; fee?: bigint; userToken?: A
 async function prepare(p: Pool, key: Key, spends: [Spend, Spend], outputs: [Output, Output], moves: Moves = {}) {
   const { vpubIn = 0n, vpubOut = 0n, fee = 0n } = moves;
   const memos = outputs.map(() => crypto.getRandomValues(new Uint8Array(48))); // each note, encrypted to its owner
-  const flow = { vpubIn, vpubOut, fee, recipient: bytes(moves.recipient ?? program), relayer: bytes(moves.relayerToken ?? program) };
+  const flow = { vpubIn, vpubOut, fee, recipient: moves.recipient ?? program, relayer: moves.relayerToken ?? program };
   const notes = [outputs[0].note, outputs[1].note] as const;
   // The public statement, computed by the circuit's own Rust.
-  const tx = Transaction.of(key, spends, notes, p.tip, bytes(p.mint), flow, [sha256(memos[0]), sha256(memos[1])]);
+  const tx = Transaction.of(key, spends, notes, p.tip, p.mint, flow, [sha256(memos[0]), sha256(memos[1])]);
   const proof = prover.prove({ key, spends, outputs: notes, tip: p.tip, tx });
   const [n0, n1] = await Promise.all(tx.nullifiers.map((n) => getProgramDerivedAddress({ programAddress: program, seeds: ["nullifier", bytes(p.mint), n.toBytes()] })));
   const optional = (a?: Address) => (a ? writable(a) : readonly(program)); // the program's "none"
@@ -1730,6 +1772,8 @@ A few things to notice:
 - **The account lists are the program's.** `initialize` takes six accounts and `transact` ten, in
   the order the program destructures them, and the data is the discriminator, then the arguments in
   the order `TransactInstructionData` reads them.
+- **Solana addresses are @solana/kit's.** `Transaction.of` takes the mint, and `flow` the token
+  accounts, as the `Address`es they are; the client splits each into the circuit's two halves.
 - **Every note gets a fresh address.** `pay` picks a random diversifier each time, so Bob's notes
   don't share an owner field anyone could link.
 - **The memos are stand-ins.** A real wallet encrypts each note's value, `rho` and `rseed` to its
@@ -1818,7 +1862,7 @@ xark building the programs (cargo build-sbf)
 ...
 xark running the programs' and verifier crates' Rust tests
 ...
-test tests::paths_agree_with_the_whole_tree ... ok
+test tests::paths_agree_with_the_tree ... ok
 ...
 xark running the TypeScript tests (npm test)
 
@@ -1834,17 +1878,17 @@ To see what each transaction cost, run the end-to-end test alone, with its logs:
 ```console
 $ npx vitest run --reporter=verbose
 stdout | tests/shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer
-transact verified onchain in 171217 CU
+transact verified onchain in 172717 CU
 ...
 transact verified onchain in 176848 CU
 ...
-withdrawal verified onchain in 183016 CU
+withdrawal verified onchain in 181516 CU
 
- ✓ tests/shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 3548ms
+ ✓ tests/shielded-transfer.test.ts > deposit, pay privately, withdraw, through a relayer 2839ms
 stdout | tests/shielded-transfer.test.ts > only a note's owner can spend it
-transact verified onchain in 177217 CU
+transact verified onchain in 172717 CU
 
- ✓ tests/shielded-transfer.test.ts > only a note's owner can spend it 2056ms
+ ✓ tests/shielded-transfer.test.ts > only a note's owner can spend it 1717ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -1853,7 +1897,7 @@ transact verified onchain in 177217 CU
 Four transactions were proved, each in about a second on the worker pool, and verified by your
 program in 171,000 to 183,000 compute units, almost all of it the proof's verification. The number
 varies with the public inputs, and by 1,500 for each extra try `find_program_address` takes to find
-a nullifier's bump. Nine runs stayed in that range, close to the default limit of 200,000, so each
+a nullifier's bump. Every run stayed in that range, close to the default limit of 200,000, so each
 transaction carries `budget`, a limit of 250,000. The vault ends at 45: Alice's change, still
 shielded, with nothing onchain saying it's hers. Mallory's spend was refused before any proof was
 made.
