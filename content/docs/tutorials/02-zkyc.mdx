@@ -39,12 +39,12 @@ need 01's files, but this tutorial assumes you've done it and doesn't re-explain
 
 ```sh
 xark init zkyc && cd zkyc
-cargo add -p zkyc xark-poseidon2@0.4 xark-hash@0.4
+cargo add -p zkyc xark-poseidon2@0.4
 ```
 
-Every command from here runs at the project's root, `zkyc/`. Besides `xark`, this circuit uses two
-[gadget crates](/docs/gadgets): `xark-poseidon2`, a hash that's cheap inside a circuit, for the
-commitment, and `xark-hash`, for the wallet address.
+Every command from here runs at the project's root, `zkyc/`. Besides `xark`, this circuit uses one
+[gadget crate](/docs/gadgets): `xark-poseidon2`, a hash that's cheap inside a circuit, for the
+commitment.
 
 By the end, the project holds everything, as in 01:
 
@@ -88,14 +88,15 @@ pub struct Identity {
 impl Identity {
     /// The issuer's commitment: all a verifier sees of the holder.
     pub fn commitment(&self) -> Field {
-        xark_poseidon2::hash(self.to_fields())
+        xark_poseidon2::commit(self.to_fields())
     }
 }
 ```
 
-The commitment is the Poseidon2 hash of all six fields, and it's the only part of the identity that
-ever goes onchain. You can prove things about the identity behind it as often as you like,
-to any verifier.
+The commitment is Poseidon2's `commit` of all six fields, and it's the only part of the identity
+that ever goes onchain. `commit` is the Poseidon2 sponge in a domain of its own, so no other
+Poseidon2 hash of the same fields (a nullifier, a Merkle node) equals it. You can prove things about
+the identity behind it as often as you like, to any verifier.
 
 <Callout title="Why the commitment is salted">
 A hash hides its input only if the input can't be guessed. An identity mostly can: there are about
@@ -113,6 +114,8 @@ Each field has a type that says what it is, and xark checks it on the way in:
 - `u64`: range-checked to 64 bits, as in 01.
 - `Day`, a `Days<1900, 2100>`: in the circuit, a count of days since 1900-01-01, so dates compare
   as numbers; in tests it's a string like `"1990-01-01"`, and in TypeScript a `Date`.
+
+Later you'll meet one more, `Address`: a Solana address, for the holder's wallet.
 
 <DaysRange />
 
@@ -267,7 +270,7 @@ the client will.
 $ xark test
 xark building circuit `zkyc`
 xark 1356 vars, 1369 constraints, 1350 witness-gen ops
-xark circuit digest fdbbf1a8cc83d56cd35e46bca20d5eaf
+xark circuit digest e3c31178b5940517c0f4b39666536a48
 ...
 running 3 tests
 test tests::another_identity_fails ... ok
@@ -278,7 +281,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 A compliant holder passes, each failed check fails it, and nobody passes with someone else's
-commitment. Most of the 1,369 constraints are the Poseidon2 hash and the membership check, one
+commitment. Most of the 1,369 constraints are the Poseidon2 commitment and the membership check, one
 factor for each of the 249 countries; `xark profile circuits/zkyc` breaks them down by line.
 </Step>
 
@@ -286,16 +289,11 @@ factor for each of the 249 countries; `xark profile circuits/zkyc` breaks them d
 ### Bind the proof to the holder's wallet
 
 So far a proof says that *someone* holding this credential passes. Anyone who saw it onchain could
-submit it as their own. To stop that, make the holder's wallet a public input. A Solana address is
-32 bytes, which the circuit takes as `xark_hash::Hash`.
+submit it as their own. To stop that, make the holder's wallet a public input, an `Address`: xark's
+Solana address, in the prelude. A field element holds less than 32 bytes, so an `Address` is two,
+the address's 16-byte halves.
 
-Add the import at the top of `circuits/zkyc/src/lib.rs`:
-
-```rust title="circuits/zkyc/src/lib.rs"
-use xark_hash::Hash;
-```
-
-and give the circuit a fourth input:
+Give the circuit a fourth input:
 
 ```rust title="circuits/zkyc/src/lib.rs"
 #[circuit]
@@ -303,11 +301,12 @@ pub fn zkyc(
     id: Private<Identity>,
     commitment: Public<Field>,
     policy: Public<Policy>,
-    holder: Public<Hash>,
+    holder: Public<Address>,
 ) {
 ```
 
-In the tests, add a wallet after `use Country::*;`:
+In the tests, add a wallet after `use Country::*;`. In Rust an `Address` is its 32 bytes (or its
+base58, as a string):
 
 ```rust title="circuits/zkyc/src/lib.rs"
     const HOLDER: [u8; 32] = [7; 32];
@@ -329,6 +328,7 @@ Run the tests again:
 $ xark test
 xark building circuit `zkyc`
 warning: unused variable: `holder`
+  --> circuits/zkyc/src/lib.rs:64:5
 ...
 error: public input `holder.hi` is declared but no constraint uses it
   = note: if only the verifier supplies it (a recipient, a nonce), say so with `bind(it)`: the proof then verifies only with the value it was made for. Otherwise use it in a constraint, or remove it from the signature
@@ -350,7 +350,7 @@ last line:
 $ xark test
 xark building circuit `zkyc`
 xark 1360 vars, 1371 constraints, 1352 witness-gen ops
-xark circuit digest 40b78b407222fb9a6dc617d5168aaa53
+xark circuit digest a32dc0a64cdeb10acbd6a37a22981604
 ...
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 ```
@@ -372,6 +372,7 @@ xark building circuit `zkyc`
 Wrote .../zkyc/keys/zkyc/pk.bin
 Wrote .../zkyc/keys/zkyc/vk.bin
 Wrote .../zkyc/keys/zkyc/metadata.json
+Wrote .../zkyc/keys/zkyc/circuit.xbc
 ...
 Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
 ...
@@ -398,7 +399,7 @@ $ xark inspect --json | tail -8
 ```
 
 That's the packing from before: `policy` is two field elements, the first holding three fields. The
-address is two 16-byte halves. Your program won't build those elements itself. The verifier crate
+address is its two 16-byte halves. Your program won't build those elements itself. The verifier crate
 in `clients/zkyc/rust/` has the circuit's public inputs by name, in plain `no_std` Rust:
 
 ```rust title="clients/zkyc/rust/src/lib.rs"
@@ -437,6 +438,7 @@ npm install
 It wrote a test to start from, too. Replace `tests/zkyc.test.ts` with:
 
 ```ts title="tests/zkyc.test.ts"
+import { address, generateKeyPairSigner } from "@solana/kit";
 import { circuit } from "@blueshift-gg/xark/testing";
 import { CheckFailed, Country, Field, Identity, Policy, Zkyc, type ZkycProver } from "../clients/zkyc/ts/zkyc";
 
@@ -467,7 +469,8 @@ test("a compliant holder has a proof", async () => {
   const policy = programs("2026-10-22");
   expect(policy.bornBy).toEqual(new Date("2008-10-22"));
 
-  const holder = new Uint8Array(32).fill(7);
+  // The holder's wallet: an @solana/kit `Address`.
+  const holder = (await generateKeyPairSigner()).address;
   const proof = prover.prove({ id, commitment, policy, holder });
 
   // The verifier sees the public inputs, and nothing of `id`.
@@ -477,9 +480,10 @@ test("a compliant holder has a proof", async () => {
 
 test("an identity that fails the policy has no proof", () => {
   const policy = programs("2026-10-22");
+  const holder = address("11111111111111111111111111111111");
   const prove = (changes: Partial<Identity>) => () => {
     const id = credential(changes);
-    prover.prove({ id, commitment: Identity.commitment(id), policy, holder: new Uint8Array(32) });
+    prover.prove({ id, commitment: Identity.commitment(id), policy, holder });
   };
   expect(prove({ born: new Date("2008-10-23") })).toThrow(CheckFailed); // 18 tomorrow
   expect(prove({ netWorth: 499_999 })).toThrow(/id\.net_worth >= policy\.min_net_worth/);
@@ -488,7 +492,8 @@ test("an identity that fails the policy has no proof", () => {
 ```
 
 `circuit("zkyc")` reads the circuit's build output, and its keys from `keys/zkyc/`; the project's
-Vitest config makes `test`, `expect` and `beforeAll` globals.
+Vitest config makes `test`, `expect` and `beforeAll` globals. The client takes the holder as
+@solana/kit's `Address`, the type a wallet already has, and splits it into the circuit's halves.
 `Identity.commitment` and `Policy.on` are the Rust you wrote, compiled into `client.wasm` with the
 client, so there's no TypeScript copy of either to drift from the circuit. See
 [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
@@ -496,14 +501,14 @@ client, so there's no TypeScript copy of either to drift from the circuit. See
 ```console
 $ npx vitest run --reporter=verbose
  ✓ tests/zkyc.test.ts > a compliant holder has a proof 281ms
- ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 712ms
+ ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 719ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
 ```
 
 For an identity that fails, the client throws a `CheckFailed` naming the line, as `xark prove`
-would: ``the inputs fail the check at src/lib.rs:68:5: `require(id.born <= policy.born_by);` ``.
+would: ``the inputs fail the check at src/lib.rs:67:5: `require(id.born <= policy.born_by);` ``.
 </Step>
 
 <Step>
@@ -850,10 +855,10 @@ what the source generates.
 <Step>
 ### Verify the proof onchain
 
-In `tests/zkyc.test.ts`, replace the first import with these three:
+In `tests/zkyc.test.ts`, replace the first two imports with these three:
 
 ```ts title="tests/zkyc.test.ts"
-import { AccountRole, generateKeyPairSigner, getAddressEncoder, type Address, type KeyPairSigner } from "@solana/kit";
+import { AccountRole, address, generateKeyPairSigner, type Address, type KeyPairSigner } from "@solana/kit";
 import type { LiteSVM } from "litesvm";
 import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 ```
@@ -894,9 +899,8 @@ test("the program accepts the proof for its holder, today, under its policy", as
   const id = credential();
   const commitment = Identity.commitment(id);
   const holder = await generateKeyPairSigner();
-  const address = new Uint8Array(getAddressEncoder().encode(holder.address));
 
-  const proof = prover.prove({ id, commitment, policy: programs("2026-10-22"), holder: address }).toBytes();
+  const proof = prover.prove({ id, commitment, policy: programs("2026-10-22"), holder: holder.address }).toBytes();
   const ok = await send(svm, payer, verifyKyc(program, holder, proof, commitment));
   console.log(`verified onchain in ${ok.computeUnitsConsumed()} CU`);
 
@@ -911,7 +915,7 @@ test("the program accepts the proof for its holder, today, under its policy", as
   // proof, of a statement the program doesn't ask about.
   const poor = credential({ netWorth: 100 });
   const lax = { ...programs("2026-10-22"), minNetWorth: 0 };
-  const laxProof = prover.prove({ id: poor, commitment: Identity.commitment(poor), policy: lax, holder: address }).toBytes();
+  const laxProof = prover.prove({ id: poor, commitment: Identity.commitment(poor), policy: lax, holder: holder.address }).toBytes();
   await expect(send(svm, payer, verifyKyc(program, holder, laxProof, Identity.commitment(poor)))).rejects.toThrow(/InvalidProof/);
 
   // And tomorrow the program's policy has moved on.
@@ -924,12 +928,12 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/zkyc.test.ts > a compliant holder has a proof 283ms
- ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 729ms
+ ✓ tests/zkyc.test.ts > a compliant holder has a proof 282ms
+ ✓ tests/zkyc.test.ts > an identity that fails the policy has no proof 736ms
 stdout | tests/zkyc.test.ts > the program accepts the proof for its holder, today, under its policy
 verified onchain in 102524 CU
 
- ✓ tests/zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 535ms
+ ✓ tests/zkyc.test.ts > the program accepts the proof for its holder, today, under its policy 506ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
@@ -957,10 +961,11 @@ more tools kept the rest private:
 - **A salted commitment.** `require_eq(id.commitment(), commitment)` ties the private identity to
   the one the issuer committed to, so the prover can't choose it, and the salt makes that
   commitment, the only trace of the identity in the transaction, reveal nothing.
-- **A bound signer.** `bind(holder)` ties the proof to one wallet, which the program fills in from
-  the transaction's signer.
+- **A bound signer.** `bind(holder)` ties the proof to one wallet, an `Address`, which the program
+  fills in from the transaction's signer.
 
-Underneath, **typed inputs** (`Text`, `Days`, `Choice<Country>`, `Bitfield<Country>`, `u64`) gave
+Underneath, **typed inputs** (`Text`, `Days`, `Choice<Country>`, `Bitfield<Country>`, `u64`,
+`Address`) gave
 the circuit, the tests and the TypeScript client the same types, **packing** fit `Policy` into two
 public inputs, and **a policy from the verifier**, built from the program's constants and its
 `Clock`, made the rules and "today" the program's, not the prover's.

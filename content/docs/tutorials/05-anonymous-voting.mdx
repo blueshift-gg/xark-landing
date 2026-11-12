@@ -45,9 +45,9 @@ proves three things without saying which leaf is theirs:
 3. their choice is one of the poll's options (01's range proof).
 
 ```text
-identity   = (nullifier_key, trapdoor)             kept by the voter
-commitment = Poseidon2(nullifier_key, trapdoor)    a leaf of the voter list
-nullifier  = Poseidon2(nullifier_key, poll)        revealed by a vote in `poll`
+identity   = (nullifier_key, trapdoor)            kept by the voter
+commitment = commit([nullifier_key, trapdoor])    a leaf of the voter list
+nullifier  = nullifier([nullifier_key, poll])     revealed by a vote in `poll`
 ```
 
 The program keeps a receipt for each nullifier it counts, as 04 kept one for each nullifier it
@@ -76,8 +76,8 @@ cargo add -p vote xark-poseidon2@0.4 xark-merkle@0.4
 ```
 
 `xark init` makes the project and its starter circuit, `circuits/vote/`; every command from here
-runs at the project's root. Two of 03's three [gadget crates](/docs/gadgets): `xark-poseidon2` for the hashes, `xark-merkle`
-for the tree. No address enters this circuit, so there's no `xark-hash`.
+runs at the project's root. The same two [gadget crates](/docs/gadgets) as 03: `xark-poseidon2`
+for the hashes, `xark-merkle` for the tree.
 </Step>
 
 <Step>
@@ -87,8 +87,12 @@ Replace `circuits/vote/src/lib.rs` with:
 
 ```rust title="circuits/vote/src/lib.rs"
 use xark::prelude::*;
-use xark_merkle::cond_swap;
-use xark_poseidon2::{hash, hash2};
+use xark_merkle::poseidon2::merkle_root;
+#[cfg(not(xark))]
+use xark_merkle::tree::{self, Tree};
+#[cfg(not(xark))]
+use xark_poseidon2::hash2;
+use xark_poseidon2::{commit, nullifier};
 
 /// A voter's secret: whoever knows it votes as this voter. Two random field
 /// elements, kept by the voter; the voter list holds only their commitment.
@@ -100,26 +104,29 @@ pub struct Identity {
 
 #[input]
 impl Identity {
-    /// What the voter registers: `Poseidon2(nullifier_key, trapdoor)`, a leaf of
-    /// the voter list.
+    /// What the voter registers: `commit(nullifier_key, trapdoor)`, a leaf of the
+    /// voter list.
     pub fn commitment(&self) -> Field {
-        hash([self.nullifier_key, self.trapdoor])
+        commit([self.nullifier_key, self.trapdoor])
     }
 
-    /// What a vote in `poll` reveals: `Poseidon2(nullifier_key, poll)`. One per
+    /// What a vote in `poll` reveals: `nullifier(nullifier_key, poll)`. One per
     /// voter per poll.
     pub fn nullifier(&self, poll: Field) -> Field {
-        hash2(self.nullifier_key, poll)
+        nullifier([self.nullifier_key, poll])
     }
 }
 ```
 
 An `Identity` is two random field elements, and `#[input] impl` puts its two hashes in the
-TypeScript client, as `Claim.leaf` was in 03. The commitment is Poseidon2's sponge, `hash`; the
-nullifier is its 2-to-1 compression, `hash2`, of the key and the poll's ID.
+TypeScript client, as `Claim.leaf` was in 03. The commitment is `xark_poseidon2::commit` of both
+secrets; the nullifier is `xark_poseidon2::nullifier` of the key and the poll's ID. Both are
+Poseidon2's sponge, started in a domain of its own, so no commitment is ever a nullifier, and
+neither is a plain `hash` or a node of the tree, short of breaking Poseidon2. That's the domain
+separation the voter list relies on below, built into the two functions.
 
-That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nullifier hash was
-`hash([nullifier])`, one per note, forever. This one is one per voter *per poll*:
+That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nullifier hashed the
+note's secret alone: one per note, forever. This one is one per voter *per poll*:
 
 - **One vote per poll.** In one poll, a voter's nullifier is always the same. A second vote, even
   with a fresh proof, reveals it again, and the program finds its receipt.
@@ -133,8 +140,9 @@ That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nul
 <Step>
 ### Add the voter list
 
-The voter list is 03's tree, with commitments as its leaves. Append 03's `Path` and its builder to
-`circuits/vote/src/lib.rs`, unchanged except for two comments:
+The voter list is 03's tree, `xark-merkle`'s Poseidon2 tree, with commitments as its leaves.
+Append 03's `list`, `Path` and its builder to `circuits/vote/src/lib.rs`, unchanged except for
+their comments:
 
 ```rust title="circuits/vote/src/lib.rs"
 /// Tree depth: up to 2^20 voters.
@@ -143,6 +151,13 @@ pub const DEPTH: usize = 20;
 /// The empty leaf, ASCII `xarkzero`: no voter's commitment is this value, so
 /// the padding after the list can't vote.
 pub const EMPTY_LEAF: u64 = 0x7861_726b_7a65_726f;
+
+/// The empty voter list, as an authority builds it in Rust: push each voter's
+/// commitment, then take its `root()` and each voter's `path(i)`.
+#[cfg(not(xark))]
+pub fn list() -> Tree<DEPTH> {
+    Tree::poseidon2(Field::from(EMPTY_LEAF))
+}
 
 /// A leaf's authentication path: its index, and its sibling at each height.
 #[input]
@@ -155,22 +170,13 @@ pub struct Path {
 impl Path {
     /// The root of the tree with `leaf` at this path.
     pub fn root(&self, leaf: Field) -> Field {
-        let bits = Field::from(self.index).to_bits::<DEPTH>();
-        let mut node = leaf;
-        let mut i = 0;
-        while i < DEPTH {
-            // The bit orders the pair: 0, this node is the left child; 1, the right.
-            let (left, right) = cond_swap(bits[i], node, self.siblings[i]);
-            node = hash2(left, right);
-            i += 1;
-        }
-        node
+        merkle_root(leaf, self.siblings, Field::from(self.index).to_bits::<DEPTH>())
     }
 
     /// The first leaf's path, in the empty list.
     #[cfg(not(xark))]
     pub fn first() -> Path {
-        Path { index: 0, siblings: zeros() }
+        list().path(0).into()
     }
 
     /// For the next free leaf's path, the root of the list so far.
@@ -184,7 +190,7 @@ impl Path {
     pub fn next(self, leaf: Field) -> Path {
         assert!((self.index as usize) < (1 << DEPTH) - 1, "the list is full");
         let index = self.index + 1;
-        let z = zeros();
+        let empty = list();
         let mut siblings = self.siblings;
         let mut node = leaf;
         for (i, sibling) in siblings.iter_mut().enumerate() {
@@ -192,7 +198,7 @@ impl Path {
             let old = *sibling;
             if next != mine {
                 // A new subtree: its left sibling is this leaf's, its right is empty.
-                *sibling = if next & 1 == 1 { node } else { z[i] };
+                *sibling = if next & 1 == 1 { node } else { empty.empty_subtrees()[i] };
             }
             node = node_of(mine, node, old);
         }
@@ -216,29 +222,30 @@ impl Path {
     }
 }
 
+/// A path out of a `Tree`, as the circuit takes it.
+#[cfg(not(xark))]
+impl From<tree::Path<DEPTH>> for Path {
+    fn from(path: tree::Path<DEPTH>) -> Path {
+        Path { index: path.index as u32, siblings: path.siblings }
+    }
+}
+
 /// The parent of `node`, at position `at` in its level, and its `sibling`.
 #[cfg(not(xark))]
 fn node_of(at: u32, node: Field, sibling: Field) -> Field {
     if at & 1 == 0 { hash2(node, sibling) } else { hash2(sibling, node) }
 }
-
-/// `zeros()[i]` is the root of an empty subtree of height `i`.
-#[cfg(not(xark))]
-fn zeros() -> [Field; DEPTH] {
-    let mut z = [Field::from(EMPTY_LEAF); DEPTH];
-    for i in 1..DEPTH {
-        z[i] = hash2(z[i - 1], z[i - 1]);
-    }
-    z
-}
 ```
 
 [03's tree step](/docs/tutorials/03-token-claim#write-the-tree) explains it: `root` is the one
-function the circuit calls, and `first`, `next`, `update` and `list_root` are the host-only
-builder the authority runs from TypeScript. A commitment is the sponge and a node the compression,
-two different functions at a fixed depth, so no node passes for a voter. A nullifier is never a
-leaf, so sharing `hash2` with the nodes doesn't let one stand in for the other. The empty leaf is
-a constant no commitment hashes to, so the padding after the list can't vote.
+function the circuit calls, `xark_merkle::poseidon2::merkle_root`, which folds the path with a
+`cond_swap` and a Poseidon2 `hash2` per level. `list` is the whole list on the host, a
+`xark_merkle::tree::Tree`, for a Rust authority that holds every commitment. `first`, `next`,
+`update` and `list_root` keep one path at a time, without the tree, which is what the authority
+and the voters run from TypeScript. A node is the compression `hash2`, and a commitment and a
+nullifier each have their own domain of the sponge, so at a fixed depth no node passes for a
+voter, and no nullifier for either. The empty leaf is a constant no commitment hashes to, so the
+padding after the list can't vote.
 </Step>
 
 <Step>
@@ -287,16 +294,33 @@ mod tests {
         Identity { nullifier_key: Field::from(n), trapdoor: Field::from(n + 1_000) }
     }
 
-    /// The list's root and every voter's path, as 03's `list` builds them.
-    fn list(voters: &[Identity]) -> (Field, Vec<Path>) {
+    /// The list's root and every voter's path, as the authority builds them.
+    fn of(voters: &[Identity]) -> (Field, Vec<Path>) {
+        let mut tree = list();
+        tree.extend(voters.iter().map(Identity::commitment));
+        let paths = (0..voters.len()).map(|i| tree.path(i).into()).collect();
+        (tree.root(), paths)
+    }
+
+    /// One path at a time (`first`, `next`, `update`) agrees with the `Tree`.
+    #[test]
+    fn one_path_at_a_time_agrees_with_the_tree() {
+        let leaves: Vec<Field> = (1..=11).map(|n| identity(n).commitment()).collect();
+        let mut tree = list();
         let mut tip = Path::first(); // the next free leaf's path
         let mut paths: Vec<Path> = Vec::new();
-        for v in voters {
-            paths = paths.into_iter().map(|p| p.update(tip, v.commitment())).collect();
+        assert_eq!(tip.list_root(), tree.root());
+        for &leaf in &leaves {
+            paths = paths.into_iter().map(|p| p.update(tip, leaf)).collect();
             paths.push(tip);
-            tip = tip.next(v.commitment());
+            tip = tip.next(leaf);
+            tree.push(leaf);
+            assert_eq!(tip.list_root(), tree.root());
+            for (i, path) in paths.iter().chain([&tip]).enumerate() {
+                let want = tree.path(i);
+                assert_eq!((path.index as usize, path.siblings), (want.index, want.siblings));
+            }
         }
-        (tip.list_root(), paths)
     }
 
     #[test]
@@ -311,7 +335,7 @@ mod tests {
     #[test]
     fn every_voter_votes_for_any_option() {
         let voters = [identity(1), identity(2), identity(3)];
-        let (root, paths) = list(&voters);
+        let (root, paths) = of(&voters);
         for (path, v) in paths.iter().zip(voters) {
             for choice in 0..3 {
                 let ballot = Ballot::of(v, *path, Field::from(7u64), 3, choice);
@@ -324,7 +348,7 @@ mod tests {
     #[test]
     fn nothing_else_votes() {
         let voters = [identity(1), identity(2), identity(3)];
-        let (root, paths) = list(&voters);
+        let (root, paths) = of(&voters);
         let poll = Field::from(7u64);
         let ok = Ballot::of(voters[0], paths[0], poll, 3, 1);
         // Past the poll's options, which are 0, 1 and 2.
@@ -363,11 +387,12 @@ There's no `bind`, unlike 04's addresses: `root` and `nullifier` are compared, `
 and `options` and `choice` are range-checked and ordered, so every public input is already in a
 constraint.
 
-The tests build a list of three with 03's `list`. The first checks the nullifier's scope: another
-poll or another voter gives another nullifier, and neither is the commitment. The second has
-every voter vote for every option. The third refuses everything else: a choice past the options,
-a stranger at a voter's path, another voter's nullifier and the same voter's nullifier from
-another poll.
+`of` builds a list from the `Tree`: it pushes each voter's commitment and reads back the root and
+each voter's path. The first test checks the one-path-at-a-time builder against it, path for path,
+over eleven voters. The second checks the nullifier's scope: another poll or another voter gives
+another nullifier, and neither is the commitment. The third has every voter vote for every option.
+The fourth refuses everything else: a choice past the options, a stranger at a voter's path,
+another voter's nullifier and the same voter's nullifier from another poll.
 </Step>
 
 <Step>
@@ -377,14 +402,15 @@ another poll.
 $ xark test
 xark building circuit `vote`
 xark 5401 vars, 5401 constraints, 5374 witness-gen ops
-xark circuit digest ce0b157239ad8e60d3ce20bccf1a7eaa
+xark circuit digest cc4e57f3aa1855badd92cb19f59ede78
 ...
-running 3 tests
+running 4 tests
 test tests::one_nullifier_per_voter_per_poll ... ok
+test tests::one_path_at_a_time_agrees_with_the_tree ... ok
 test tests::nothing_else_votes ... ok
 test tests::every_voter_votes_for_any_option ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.37s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s
 ```
 
 The digest matches this one if your circuit does. `xark profile` shows where the 5,401
@@ -394,17 +420,17 @@ constraints go:
 $ xark profile
 ...
 lib.rs:149     require_eq(path.root(identity.commitment()), ba…    5101
-    ├─ root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
-    ├─ root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
-    ├─ commitment → hash → hash_in → perm → internal_round → sbox → pow  168   (Mul 168)
-    ├─ commitment → hash → hash_in → perm → external_round → sbox → pow   72   (Mul 72)
-    ├─ root → cond_swap                         20   (Mul 20)
-    ├─ root → cond_swap → require_bool          20   (Booleanity 20)
+    ├─ root → merkle_root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
+    ├─ root → merkle_root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
+    ├─ commitment → commit → tagged → perm → internal_round → sbox → pow  168   (Mul 168)
+    ├─ commitment → commit → tagged → perm → external_round → sbox → pow   72   (Mul 72)
+    ├─ root → merkle_root → cond_swap           20   (Mul 20)
+    ├─ root → merkle_root → cond_swap → require_bool   20   (Booleanity 20)
     ├─ root → to_bits                           20   (RangeCheck 20)
     └─ require_eq                                1   (Equality 1)
 lib.rs:150     require_eq(identity.nullifier(ballot.poll), bal…     251
-    ├─ nullifier → hash2 → hash2_in → perm → internal_round → sbox → pow  168   (Mul 168)
-    ├─ nullifier → hash2 → hash2_in → perm → external_round → sbox → pow   72   (Mul 72)
+    ├─ nullifier → tagged → perm → internal_round → sbox → pow  168   (Mul 168)
+    ├─ nullifier → tagged → perm → external_round → sbox → pow   72   (Mul 72)
     └─ require_eq                               11   (RangeCheck 8, Comparison 2, Equality 1)
 lib.rs:147     #[circuit]                                            48
     ├─ (top-level)                              32   (RangeCheck 32)
@@ -417,7 +443,7 @@ TOTAL  5401 constraints
 ```
 
 The path is 4,860, 243 per level as in 03. The commitment and the nullifier are 240 each, one
-permutation apiece, and the `u32` index is 32. The range proof is 27: 16 for the two `u8`s' bits
+permutation apiece (their own domain costs nothing), and the `u32` index is 32. The range proof is 27: 16 for the two `u8`s' bits
 (under `#[circuit]`), 10 for the comparison's difference and its borrow (which the profile files
 under line 150, beside that line's own equality) and 1 for the `require`.
 </Step>
@@ -560,8 +586,8 @@ commitment.
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1192ms
- ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2217ms
+ ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1220ms
+ ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2419ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -1433,24 +1459,24 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1199ms
- ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2313ms
+ ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1236ms
+ ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2274ms
 stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
-vote counted in 93187 CU
+vote counted in 91687 CU
 
 stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
-vote counted in 103497 CU
+vote counted in 94497 CU
 
 stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
 vote counted in 97497 CU
 
- ✓ tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer 6625ms
+ ✓ tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer 6761ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```
 
-Each vote took between 93,000 and 104,000 compute units: the proof's verification, the receipt and
+Each vote took between 91,000 and 98,000 compute units: the proof's verification, the receipt and
 the tally. Your numbers will differ: the verifier's cost depends on the nullifier's value, and
 finding the receipt's bump takes 1,500 more for each extra try. The tally reads `[1, 0, 2]`. Voter
 0's second vote, with a fresh proof, revealed the same nullifier and was refused with
@@ -1478,7 +1504,7 @@ What the chain does show:
 A poll counted votes from a list of voters, once each, without learning who cast which. The new
 ideas:
 
-- **A scoped nullifier.** `Poseidon2(nullifier_key, poll)` is the same for every vote of one voter
+- **A scoped nullifier.** `nullifier([nullifier_key, poll])` is the same for every vote of one voter
   in one poll, so the program's receipt counts them once, and unrelated across polls, so voting in
   many leaves nothing to link.
 - **Merkle membership, again.** A voter's commitment is a leaf of 03's tree, and the path to it
@@ -1518,6 +1544,6 @@ arbitrary, only a range check on each one stops a note from being worth "−1".
 <Cards>
   <Card title="06 · Shielded transfer" href="/docs/tutorials/06-shielded-transfer" description="Merkle trees and range proofs together: private payments of any amount, with every value range-checked so the sums can't wrap." />
   <Card title="Range proofs" href="/docs/learn-zk/range-proofs" description="Why a field has no order, and what a comparison costs." />
-  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, roots and cond_swap." />
+  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: Poseidon2 trees in a circuit, and their builders on the host." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the public inputs a program supplies, and the generated crate." />
 </Cards>

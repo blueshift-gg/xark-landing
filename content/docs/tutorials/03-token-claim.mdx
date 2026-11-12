@@ -51,13 +51,13 @@ token-claim/
 
 ```sh
 xark init token-claim && cd token-claim
-cargo add -p token-claim xark-poseidon2@0.4 xark-hash@0.4 xark-merkle@0.4
+cargo add -p token-claim xark-poseidon2@0.4 xark-merkle@0.4
 ```
 
 The circuit crate is `circuits/token-claim/`, and `-p token-claim` adds to it from the project's
-root, where every command from here on runs. Three [gadget crates](/docs/gadgets) this time:
-`xark-poseidon2` hashes the tree, `xark-hash` holds the address type you used in 02, and
-`xark-merkle` orders each pair of nodes.
+root, where every command from here on runs. Two [gadget crates](/docs/gadgets) this time:
+`xark-poseidon2` hashes the claims, and `xark-merkle` has the Merkle tree, both the circuit's side
+and a builder for the host.
 </Step>
 
 <Step>
@@ -68,14 +68,16 @@ A claim is one entry of the list: an address, and how many tokens it gets. Repla
 
 ```rust title="circuits/token-claim/src/lib.rs"
 use xark::prelude::*;
-use xark_hash::Hash;
-use xark_merkle::cond_swap;
+use xark_merkle::poseidon2::merkle_root;
+#[cfg(not(xark))]
+use xark_merkle::tree::{self, Tree};
+#[cfg(not(xark))]
 use xark_poseidon2::hash2;
 
 /// One entry of the list: `amount` tokens for the wallet `claimant`.
 #[input]
 pub struct Claim {
-    pub claimant: Hash,
+    pub claimant: Address,
     pub amount: u64,
 }
 
@@ -83,17 +85,16 @@ pub struct Claim {
 impl Claim {
     /// The claim's leaf: `Poseidon2(claimant.hi, claimant.lo, amount)`.
     pub fn leaf(&self) -> Field {
-        let mut halves = [Field::from(0u64); 2];
-        xark::input::write_fields(&self.claimant, &mut halves);
-        xark_poseidon2::hash([halves[0], halves[1], Field::from(self.amount)])
+        let [hi, lo] = self.claimant.to_fields();
+        xark_poseidon2::hash([hi, lo, Field::from(self.amount)])
     }
 }
 ```
 
-The address is a `Hash`, two field elements, as 02's holder was. A claim's **leaf** is the
-Poseidon2 hash of its three field elements, and `#[input] impl` puts `Claim.leaf` in the
-TypeScript client, as `Identity.commitment` was in 02. `write_fields` gives the address's two
-halves, `hi` and `lo`. See [Hashes](/docs/gadgets/hashes).
+The claimant is an `Address`, a Solana address as two field elements, as 02's holder was. A
+claim's **leaf** is the Poseidon2 hash of its three field elements, and `#[input] impl` puts
+`Claim.leaf` in the TypeScript client, as `Identity.commitment` was in 02. `to_fields` gives the
+address's two halves, `hi` and `lo`. See [Hashes](/docs/gadgets/hashes).
 </Step>
 
 <Step>
@@ -117,6 +118,13 @@ pub const DEPTH: usize = 20;
 /// padding after the list can't be claimed.
 pub const EMPTY_LEAF: u64 = 0x7861_726b_7a65_726f;
 
+/// The empty list, as a distributor builds it in Rust: push each claim's leaf, then
+/// take its `root()` and each claim's `path(i)`.
+#[cfg(not(xark))]
+pub fn list() -> Tree<DEPTH> {
+    Tree::poseidon2(Field::from(EMPTY_LEAF))
+}
+
 /// A leaf's authentication path: its index, and its sibling at each height.
 #[input]
 pub struct Path {
@@ -128,22 +136,13 @@ pub struct Path {
 impl Path {
     /// The root of the tree with `leaf` at this path.
     pub fn root(&self, leaf: Field) -> Field {
-        let bits = Field::from(self.index).to_bits::<DEPTH>();
-        let mut node = leaf;
-        let mut i = 0;
-        while i < DEPTH {
-            // The bit orders the pair: 0, this node is the left child; 1, the right.
-            let (left, right) = cond_swap(bits[i], node, self.siblings[i]);
-            node = hash2(left, right);
-            i += 1;
-        }
-        node
+        merkle_root(leaf, self.siblings, Field::from(self.index).to_bits::<DEPTH>())
     }
 
-    /// The first leaf's path, in the empty list.
+    /// The first leaf's path, in the empty list: every sibling is empty.
     #[cfg(not(xark))]
     pub fn first() -> Path {
-        Path { index: 0, siblings: zeros() }
+        list().path(0).into()
     }
 
     /// For the next free leaf's path, the root of the list so far.
@@ -157,7 +156,7 @@ impl Path {
     pub fn next(self, leaf: Field) -> Path {
         assert!((self.index as usize) < (1 << DEPTH) - 1, "the list is full");
         let index = self.index + 1;
-        let z = zeros();
+        let empty = list();
         let mut siblings = self.siblings;
         let mut node = leaf;
         for (i, sibling) in siblings.iter_mut().enumerate() {
@@ -165,7 +164,7 @@ impl Path {
             let old = *sibling;
             if next != mine {
                 // A new subtree: its left sibling is this leaf's, its right is empty.
-                *sibling = if next & 1 == 1 { node } else { z[i] };
+                *sibling = if next & 1 == 1 { node } else { empty.empty_subtrees()[i] };
             }
             node = node_of(mine, node, old);
         }
@@ -189,38 +188,40 @@ impl Path {
     }
 }
 
+/// A path out of a `Tree`, as the circuit takes it.
+#[cfg(not(xark))]
+impl From<tree::Path<DEPTH>> for Path {
+    fn from(path: tree::Path<DEPTH>) -> Path {
+        Path { index: path.index as u32, siblings: path.siblings }
+    }
+}
+
 /// The parent of `node`, at position `at` in its level, and its `sibling`.
 #[cfg(not(xark))]
 fn node_of(at: u32, node: Field, sibling: Field) -> Field {
     if at & 1 == 0 { hash2(node, sibling) } else { hash2(sibling, node) }
 }
-
-/// `zeros()[i]` is the root of an empty subtree of height `i`.
-#[cfg(not(xark))]
-fn zeros() -> [Field; DEPTH] {
-    let mut z = [Field::from(EMPTY_LEAF); DEPTH];
-    for i in 1..DEPTH {
-        z[i] = hash2(z[i - 1], z[i - 1]);
-    }
-    z
-}
 ```
 
 `root` is the one function the circuit calls. `to_bits` turns the index into the 20 bits that
-steer each level, and bounds it below 2^20. `cond_swap`, from `xark-merkle`, puts the running
-node on the left or the right by that bit, and constrains the bit to 0 or 1. `hash2` is
-Poseidon2's 2-to-1 hash. See [Commitments & Merkle trees](/docs/gadgets/commitments).
+steer each level, and bounds it below 2^20. `merkle_root`, from `xark_merkle::poseidon2`, folds the
+path up from the leaf. At each level, `cond_swap` puts the running node on the left or the right by
+that level's bit, and constrains the bit to 0 or 1; then `hash2`, Poseidon2's 2-to-1 hash, makes
+the parent. See [Commitments & Merkle trees](/docs/gadgets/commitments).
 
 The rest is the **builder**, host-only (`#[cfg(not(xark))]`), so it costs the circuit nothing:
 
+- `list()` is the empty list as `xark-merkle`'s host tree, a `Tree` with the same Poseidon2 nodes
+  and this empty leaf. A distributor in Rust pushes each claim's leaf and takes its `root()` and
+  each claim's `path(i)`; `From` turns that path into the circuit's `Path`.
 - `Path::first()` is the first leaf's path, in an empty list.
 - The distributor keeps the path of the next free leaf, the **tip**. `tip.list_root()` is the
   list's root so far, and `tip.next(leaf)` the next tip once `leaf` is added.
 - `path.update(tip, leaf)` keeps an earlier path current when `leaf` is added at `tip`.
 
-`#[input] impl` puts these in the client too, so the distributor builds the tree, and a claimant
-checks their path, with this same Rust. See
-[On the host](/docs/reference/language#on-the-host).
+`Tree` isn't an `#[input]` type, so it stays in Rust. `#[input] impl` puts `Path`'s functions in
+the client, so a distributor in TypeScript builds the tree, and a claimant checks their path, with
+this same Rust. See [On the host](/docs/reference/language#on-the-host).
 
 A leaf and a node can't be confused. The leaf is Poseidon2's sponge over three elements, and a node
 its 2-to-1 compression, two different functions; and every path is exactly 20 levels, so no node
@@ -248,37 +249,31 @@ mod tests {
     }
 
     /// The list's root and every claim's path, as a distributor builds them.
-    fn list(claims: &[Claim]) -> (Field, Vec<Path>) {
+    fn of(claims: &[Claim]) -> (Field, Vec<Path>) {
+        let mut tree = list();
+        tree.extend(claims.iter().map(Claim::leaf));
+        let paths = (0..claims.len()).map(|i| tree.path(i).into()).collect();
+        (tree.root(), paths)
+    }
+
+    /// One path at a time (`Path::first`, `next`, `update`), with no tree, agrees
+    /// with `Tree`'s, path for path.
+    #[test]
+    fn one_path_at_a_time_agrees_with_the_tree() {
+        let leaves: Vec<Field> = (1..=11).map(|n| claim(n, u64::from(n) * 100).leaf()).collect();
+        let mut tree = list();
         let mut tip = Path::first(); // the next free leaf's path
         let mut paths: Vec<Path> = Vec::new();
-        for c in claims {
-            paths = paths.into_iter().map(|p| p.update(tip, c.leaf())).collect();
+        assert_eq!(tip.list_root(), tree.root());
+        for &leaf in &leaves {
+            paths = paths.into_iter().map(|p| p.update(tip, leaf)).collect();
             paths.push(tip);
-            tip = tip.next(c.leaf());
-        }
-        (tip.list_root(), paths)
-    }
-
-    /// The root of `leaves`, hashed from scratch level by level.
-    fn root_of(leaves: &[Field]) -> Field {
-        let mut level = leaves.to_vec();
-        let mut empty = Field::from(EMPTY_LEAF);
-        for _ in 0..DEPTH {
-            level = level.chunks(2).map(|p| hash2(p[0], *p.get(1).unwrap_or(&empty))).collect();
-            empty = hash2(empty, empty);
-        }
-        level.first().copied().unwrap_or(empty)
-    }
-
-    #[test]
-    fn the_builder_agrees_with_the_whole_tree() {
-        let claims: Vec<Claim> = (1..=11).map(|n| claim(n, u64::from(n) * 100)).collect();
-        let leaves: Vec<Field> = claims.iter().map(Claim::leaf).collect();
-        for n in 0..=claims.len() {
-            let (root, paths) = list(&claims[..n]);
-            assert_eq!(root, root_of(&leaves[..n]));
-            for (path, leaf) in paths.iter().zip(&leaves) {
-                assert_eq!(path.root(*leaf), root);
+            tip = tip.next(leaf);
+            tree.push(leaf);
+            assert_eq!(tip.list_root(), tree.root());
+            for (i, path) in paths.iter().chain([&tip]).enumerate() {
+                let want = tree.path(i);
+                assert_eq!((path.index as usize, path.siblings), (want.index, want.siblings));
             }
         }
     }
@@ -286,7 +281,7 @@ mod tests {
     #[test]
     fn everyone_on_the_list_claims_their_amount() {
         let claims = [claim(1, 500), claim(2, 1_000), claim(3, 250)];
-        let (root, paths) = list(&claims);
+        let (root, paths) = of(&claims);
         for (path, c) in paths.iter().zip(claims) {
             token_claim(*path, root, c).unwrap();
         }
@@ -295,12 +290,14 @@ mod tests {
     #[test]
     fn nothing_else_is_on_the_list() {
         let claims = [claim(1, 500), claim(2, 1_000), claim(3, 250)];
-        let (root, paths) = list(&claims);
+        let (root, paths) = of(&claims);
         assert!(token_claim(paths[0], root, claim(1, 501)).is_err()); // another amount
         assert!(token_claim(paths[1], root, claim(1, 500)).is_err()); // someone else's path
         assert!(token_claim(paths[0], root, claim(9, 500)).is_err()); // not on the list
+        let (other, _) = of(&[claim(1, 500)]);
+        assert!(token_claim(paths[0], other, claims[0]).is_err()); // another list
         // The slot after the list holds the empty leaf, which no claim is.
-        let (_, longer) = list(&[claims[0], claims[1], claims[2], claim(4, 1)]);
+        let (_, longer) = of(&[claims[0], claims[1], claims[2], claim(4, 1)]);
         assert!(token_claim(longer[3], root, claim(4, 1)).is_err());
     }
 }
@@ -309,10 +306,12 @@ mod tests {
 The whole circuit is one line: the path's root over the claim's leaf is the published root. The
 `path` is private; the `root` and the `claim` are public.
 
-The tests build the list as a distributor will, with `list`. The first checks the builder against
-the tree hashed from scratch, level by level, for lists of 0 to 11 claims. The other two check
-that everyone on a list of three can claim their amount, and nothing else can: another amount,
-someone else's path, an address that isn't on the list, or the empty slot after it.
+The tests build the list as a distributor in Rust will, with `of`: every leaf into `list()`, then
+the `Tree`'s root and each claim's path. The first checks the one-path-at-a-time builder, which the
+TypeScript client will use, against the `Tree`, root and every path, for lists of 0 to 11 claims.
+The other two check that everyone on a list of three can claim their amount, and nothing else can:
+another amount, someone else's path, an address that isn't on the list, another list's root, or
+the empty slot after it.
 </Step>
 
 <Step>
@@ -325,11 +324,11 @@ xark 5438 vars, 5437 constraints, 5413 witness-gen ops
 xark circuit digest 41f8cf4f8d4625284ec61bea304dc68b
 ...
 running 3 tests
-test tests::the_builder_agrees_with_the_whole_tree ... ok
+test tests::one_path_at_a_time_agrees_with_the_tree ... ok
 test tests::everyone_on_the_list_claims_their_amount ... ok
 test tests::nothing_else_is_on_the_list ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
 ```
 
 `xark profile` shows where the 5,437 constraints go:
@@ -337,16 +336,16 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```console
 $ xark profile
 ...
-lib.rs:120     require_eq(path.root(claim.leaf()), root);          5341
-    ├─ root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
-    ├─ root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
-    ├─ leaf → hash → hash_in → perm → internal_round → sbox → pow  336   (Mul 336)
-    ├─ leaf → hash → hash_in → perm → external_round → sbox → pow  144   (Mul 144)
-    ├─ root → cond_swap                         20   (Mul 20)
-    ├─ root → cond_swap → require_bool          20   (Booleanity 20)
+lib.rs:117     require_eq(path.root(claim.leaf()), root);          5341
+    ├─ root → merkle_root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
+    ├─ root → merkle_root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
+    ├─ leaf → perm → internal_round → sbox → pow  336   (Mul 336)
+    ├─ leaf → perm → external_round → sbox → pow  144   (Mul 144)
+    ├─ root → merkle_root → cond_swap           20   (Mul 20)
+    ├─ root → merkle_root → cond_swap → require_bool   20   (Booleanity 20)
     ├─ root → to_bits                           20   (RangeCheck 20)
     └─ require_eq                                1   (Equality 1)
-lib.rs:118     #[circuit]                                            96   (RangeCheck 96)
+lib.rs:115     #[circuit]                                            96   (RangeCheck 96)
 ────────────────────────────────────────────────────────────
 TOTAL  5437 constraints
 ...
@@ -405,6 +404,7 @@ npm install
 Replace `tests/token-claim.test.ts` with:
 
 ```ts title="tests/token-claim.test.ts"
+import { generateKeyPairSigner } from "@solana/kit";
 import { circuit } from "@blueshift-gg/xark/testing";
 import { Claim, Path, TokenClaim, type Field, type PathValue, type TokenClaimProver } from "../clients/token-claim/ts/token_claim";
 
@@ -428,13 +428,14 @@ function list(claims: Claim[]): { root: Field; paths: PathValue[] } {
   return { root: tip.listRoot(), paths };
 }
 
-const wallet = (n: number) => new Uint8Array(32).fill(n);
+/** A new wallet's address. */
+const wallet = async () => (await generateKeyPairSigner()).address;
 
 test("a claimant on the list has a proof", async () => {
   const claims: Claim[] = [
-    { claimant: wallet(1), amount: 500 },
-    { claimant: wallet(2), amount: 1_000 },
-    { claimant: wallet(3), amount: 250 },
+    { claimant: await wallet(), amount: 500 },
+    { claimant: await wallet(), amount: 1_000 },
+    { claimant: await wallet(), amount: 250 },
   ];
   const { root, paths } = list(claims);
   expect(paths[1].root(Claim.leaf(claims[1]))).toEqual(root);
@@ -447,28 +448,29 @@ test("a claimant on the list has a proof", async () => {
   expect(verifier.verify(proof.toBytes(), { root, claim: { ...claims[1], amount: 1_001 } })).toBe(false);
 });
 
-test("an address not on the list has no proof", () => {
-  const { root, paths } = list([{ claimant: wallet(1), amount: 500 }]);
-  const stranger = { claimant: wallet(9), amount: 500 };
+test("an address not on the list has no proof", async () => {
+  const { root, paths } = list([{ claimant: await wallet(), amount: 500 }]);
+  const stranger = { claimant: await wallet(), amount: 500 };
   expect(() => prover.prove({ path: paths[0], root, claim: stranger })).toThrow(/path\.root\(claim\.leaf\(\)\)/);
 });
 ```
 
-`circuit("token-claim")` reads the circuit's build output and its keys, and `client.wasm` among
-them is the crate's Rust compiled for the client. `list` is the distributor: it adds each claim at
+A claimant is a wallet's address as @solana/kit has it: the client splits it into the circuit's
+two halves. `circuit("token-claim")` reads the circuit's build output and its keys, and
+`client.wasm` among them is the crate's Rust compiled for the client. `list` is the distributor: it adds each claim at
 the tip, updates the paths it has already handed out, and publishes `tip.listRoot()`. Every hash in
 it is the Rust you wrote, so the root it makes is the one the circuit checks. A claimant can check
 the path they're given the same way, with `path.root(Claim.leaf(claim))`, as the first test
 does. See [Call the circuit's Rust from TypeScript](/docs/guides/typescript-clients#call-the-circuits-rust-from-typescript).
 
 `list` updates every path at every step, which is fine for a few claims and too slow for a
-million. A real distributor hashes the tree once, level by level, as the circuit's
-`the_builder_agrees_with_the_whole_tree` test does, and hands each claimant its path.
+million. A real distributor builds the tree once in Rust, with `list()` as the circuit's tests do
+(`Tree::extend` hashes each node once), and hands each claimant its path.
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/token-claim.test.ts > a claimant on the list has a proof 1199ms
- ✓ tests/token-claim.test.ts > an address not on the list has no proof 1111ms
+ ✓ tests/token-claim.test.ts > a claimant on the list has a proof 1226ms
+ ✓ tests/token-claim.test.ts > an address not on the list has no proof 1149ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -476,7 +478,7 @@ $ npx vitest run --reporter=verbose
 
 The proof verifies for Bob's claim and not for the same address with another amount. An address
 that isn't on the list doesn't get as far as a proof: the client throws a `CheckFailed`,
-``the inputs fail the check at src/lib.rs:120:5: `require_eq(path.root(claim.leaf()), root);` ``.
+``the inputs fail the check at src/lib.rs:117:5: `require_eq(path.root(claim.leaf()), root);` ``.
 </Step>
 
 <Step>
@@ -939,14 +941,13 @@ tops such an account up, allocates it and assigns it to its owner instead.
 
 ```console
 $ xark build
-xark building circuit `token-claim`
 ...
 xark building the programs (cargo build-sbf)
 ...
    Compiling token-claim-verifier v0.1.0 (.../clients/token-claim/rust)
 ...
    Compiling token-claim-program v0.1.0 (.../programs/token-claim)
-    Finished `release` profile [optimized] target(s) in 0.59s
+    Finished `release` profile [optimized] target(s) in 0.76s
 ```
 
 `xark build` builds the circuit, regenerates its clients, then runs `cargo build-sbf` for the
@@ -963,7 +964,7 @@ Add the SPL Token program's client, to make a mint and token accounts:
 npm install -D @solana-program/token
 ```
 
-Replace the first import of `tests/token-claim.test.ts` with these:
+Replace the first two imports of `tests/token-claim.test.ts` with these:
 
 ```ts title="tests/token-claim.test.ts"
 import {
@@ -1057,9 +1058,9 @@ test("each address on the list claims its amount, once", async () => {
   // The list, its root, and a vault funded with its total.
   const [alice, bob, carol] = await Promise.all([funded(svm), funded(svm), funded(svm)]);
   const claims: Claim[] = [
-    { claimant: bytes(alice.address), amount: 500 },
-    { claimant: bytes(bob.address), amount: 1_000 },
-    { claimant: bytes(carol.address), amount: 250 },
+    { claimant: alice.address, amount: 500 },
+    { claimant: bob.address, amount: 1_000 },
+    { claimant: carol.address, amount: 250 },
   ];
   const { root, paths } = list(claims);
   const drop = await distributorOf(program, root);
@@ -1102,18 +1103,18 @@ Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ tests/token-claim.test.ts > a claimant on the list has a proof 1210ms
- ✓ tests/token-claim.test.ts > an address not on the list has no proof 1126ms
+ ✓ tests/token-claim.test.ts > a claimant on the list has a proof 1215ms
+ ✓ tests/token-claim.test.ts > an address not on the list has no proof 1127ms
 stdout | tests/token-claim.test.ts > each address on the list claims its amount, once
-claimed onchain in 100465 CU
+claimed onchain in 103465 CU
 
- ✓ tests/token-claim.test.ts > each address on the list claims its amount, once 3286ms
+ ✓ tests/token-claim.test.ts > each address on the list claims its amount, once 3266ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```
 
-Bob's claim landed in about 100,000 compute units: the proof's verification, the receipt and the
+Bob's claim landed in about 103,000 compute units: the proof's verification, the receipt and the
 transfer. Your number will differ by a few thousand, because finding the receipt's PDA takes more
 or fewer tries depending on the claimant's address. His second claim found his receipt; Mallory,
 signing his proof, and Carol, claiming more than her amount, were refused by `verify` with
@@ -1150,9 +1151,10 @@ on it claimed its tokens once, with a proof of a path no transaction ever carrie
 - **A Merkle tree in a circuit.** Each leaf is `Poseidon2(claimant.hi, claimant.lo, amount)`;
   `Private<Path>` holds an index and 20 siblings, and `require_eq(path.root(claim.leaf()), root)`,
   the whole circuit, proves the leaf is under the published root.
-- **A builder written once.** `Path::first`, `next`, `update` and `list_root` are host-only Rust in
-  the circuit crate, and through `#[input] impl` the distributor's TypeScript calls them, so the
-  tree it publishes is hashed exactly as the circuit hashes it.
+- **A builder written once.** `list()`, `xark-merkle`'s host `Tree`, builds the list in Rust;
+  `Path::first`, `next`, `update` and `list_root` are host-only Rust in the circuit crate, and
+  through `#[input] impl` the distributor's TypeScript calls them, so the tree it publishes is
+  hashed exactly as the circuit's `merkle_root` hashes it.
 - **Poseidon2 leaves and nodes**, as two different functions of it, at a fixed depth.
 - **A receipt instead of a nullifier.** The claimant and the amount are public, so the program
   keys a receipt PDA on the signer's address.
@@ -1189,7 +1191,7 @@ and the [test](https://github.com/blueshift-gg/xark-examples/tree/main/03-token-
 
 <Cards>
   <Card title="04 · Shielded pool" href="/docs/tutorials/04-shielded-pool" description="Merkle trees plus salted commitments: notes and nullifiers make a withdrawal unlinkable to its deposit." />
-  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, roots and cond_swap." />
-  <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs and arrays, packing, and how a Hash enters a circuit." />
+  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, appends, indexed trees, and the host builder." />
+  <Card title="Inputs" href="/docs/reference/inputs" description="#[input] structs and arrays, packing, and how an Address enters a circuit." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the public inputs a program supplies, and the generated crate." />
 </Cards>
