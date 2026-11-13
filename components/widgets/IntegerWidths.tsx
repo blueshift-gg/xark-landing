@@ -39,7 +39,7 @@ export function IntegerWidths() {
         ty === "Field" ? (
           <>
             A <code>Field</code> has no width: it wraps at a 254-bit prime, so <code>&lt;</code> means
-            nothing until you give it one (<code>x &lt; 100u32</code>, <code>a.lt::&lt;32&gt;(b)</code>).
+            nothing until you give it one (e.g. <code>x &lt; 100u32</code>, <code>a.lt::&lt;32&gt;(b)</code>).
           </>
         ) : (
           <>

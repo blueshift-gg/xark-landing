@@ -74,8 +74,7 @@ pub fn over_9000(power_level: Private<u64>) {
 That's the whole circuit. `Private` means the prover supplies `power_level` but the proof never
 reveals it. `require` states what must hold: if it doesn't, there is no proof to make.
 
-The `u64` is the range proof. In the field, `0 − 1` is the largest value there is, so `>` on raw
-field elements could be fooled. Declaring `power_level` a `u64` makes xark split it into 64 bits and
+The `u64` is the range proof. Declaring `power_level` a `u64` makes xark split it into 64 bits and
 constrain each to 0 or 1, which proves it lies in `[0, 2^64)`. With both sides that small, the
 comparison can't wrap, and `>` means what it says. [Range proofs](/docs/learn-zk/range-proofs)
 explains why, step by step. Pick a type and a value to see the bits a value is checked against:
@@ -145,7 +144,7 @@ R1CS form: reduced (minimize saves 0.0% rows, 0.0% variables)
 Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
 ```
 
-This writes the proving key `pk.bin` and the verifying key `vk.bin` to `keys/over-9000/`. Keys
+This writes the proving key `pk.bin` and the verifying key `vk.bin` to `keys/over-9000/`. Both keys
 belong in version control: the program you'll write embeds the verifying key. Now prove that 9001
 is over 9000:
 
@@ -388,8 +387,9 @@ xark building the programs (cargo build-sbf)
 
 `xark build` builds the circuit and regenerates its clients when they're out of date (here they
 aren't: the circuit hasn't changed since `xark add program`), then runs `cargo build-sbf` for the
-program. The program is at `target/deploy/over_9000_program.so`. If a stack frame in it goes past
-the SBF limit of 4 KiB, which `cargo build-sbf` only warns about, `xark build` fails instead.
+program. The program is at `target/deploy/over_9000_program.so`. An additional benefit of
+`xark build` is that it fails when a stack frame in the program goes past the SBPF limit of 4 KiB,
+whereas `cargo build-sbf` only warns about it.
 </Step>
 
 <Step>
@@ -400,25 +400,26 @@ The test proves with the generated client, then sends the proof to the program i
 syscalls as mainnet, and no validator or network. Replace `tests/over-9000.test.ts` with:
 
 ```ts title="tests/over-9000.test.ts"
-// Prove "over 9000" with the generated client, then verify it onchain: the
-// instruction data is the proof itself, 256 bytes.
+// Prove "over 9000" with the generated client, then verify it onchain.
+// The instruction data is the proof, which is 256 bytes.
 import { generateKeyPairSigner, type Address, type Instruction } from "@solana/kit";
 import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 import { CheckFailed, Over9000, type Over9000Prover } from "../clients/over-9000/ts/over_9000";
 
-let program: Address;
+let programAddress: Address;
 let prover: Over9000Prover;
+
 beforeAll(async () => {
-  program = (await generateKeyPairSigner()).address; // the program takes any address
+  programAddress = (await generateKeyPairSigner()).address; // the program takes any address
   // Pinned to the circuit this client was generated from: a deployment can't swap it.
   prover = await Over9000.prover(circuit("over-9000"), { digest: Over9000.digest });
 });
 
-const verify = (data: Uint8Array): Instruction => ({ programAddress: program, data });
+const verify = (data: Uint8Array): Instruction => ({ programAddress, data });
 
 test("a proof of 9001 verifies onchain", async () => {
   const proof = prover.prove({ powerLevel: 9001 });
-  const svm = vm({ [program]: deployed("over-9000") });
+  const svm = vm({ [programAddress]: deployed("over-9000") });
   const payer = await funded(svm);
 
   await send(svm, payer, verify(proof.toBytes()));
@@ -426,7 +427,7 @@ test("a proof of 9001 verifies onchain", async () => {
   const tampered = proof.toBytes();
   tampered[0] ^= 1;
   await expect(send(svm, payer, verify(tampered))).rejects.toThrow(/InvalidProof/);
-  // Anything but the 256 bytes is not this instruction.
+  // A truncated proof is invalid
   await expect(send(svm, payer, verify(proof.toBytes().slice(1)))).rejects.toThrow(/invalid instruction data/);
 });
 
@@ -438,12 +439,13 @@ test("9000 has no proof", () => {
 ```
 
 `@blueshift-gg/xark/testing` finds the project's build output: `circuit("over-9000")` is the
-circuit and its keys, `deployed("over-9000")` the program's `.so`. `vm` starts a LiteSVM with the
+circuit and its keys, `deployed("over-9000")` the program's `.so` ELF file. `vm` starts a LiteSVM with the
 program at an address the test makes up, `funded` makes a payer, and `send` signs and sends a
 transaction, throwing with the program's logs when it fails. `{ digest: Over9000.digest }` pins the
 prover to the circuit this client was generated from, so a different circuit file is refused.
 
-A proof is always 256 bytes, and `toBytes()` is exactly what the program reads. Flipping one bit of
+A proof is always 256 bytes, and `toBytes()` is exactly what the program reads. `verify` refuses to Any sort of tempering —
+flipping one of its bits, or truncating it — must
 it must make `verify` refuse it, and a proof one byte short must fail the length check first. When
 inputs fail, the client throws a `CheckFailed` that names the same source line `xark prove` did:
 ``the inputs fail the check at src/lib.rs:5:5: `require(power_level > 9000u64);` ``.
