@@ -12,8 +12,9 @@ cargo install xark-cli
 ```
 
 Each command takes the circuit crate's directory, the current one by default, and infers every
-path from the crate's `target/xark/<name>/`, where `<name>` is the crate's package name. Most
-commands also accept that output directory itself. Flags below override an inferred path.
+path from it: the build output and proofs in the crate's `target/xark/<name>/`, where `<name>` is
+the crate's package name, and the keys there too outside a project. Most commands also accept that
+output directory itself. Flags below override an inferred path.
 
 At a [project](/docs/guides/projects)'s root, `xark build`, `xark test` and `xark check` act on the
 whole project, and a command that takes one circuit uses the project's only one (with several,
@@ -238,8 +239,9 @@ xark prove examples/cube --inputs inputs.json
   object, or `name = value` lines with `#` comments). Names may be as declared (`net_worth`) or
   camelCase (`netWorth`, as a TypeScript client has them). Inputs that fail a check are reported as
   the source line that fails.
-- `--proving-key <PATH>` — default `target/xark/<name>/pk.bin`.
-- `--out <DIR>` — where to write the proof (default `target/xark/<name>/`).
+- `--proving-key <PATH>` — default `keys/<name>/pk.bin` in a project, otherwise
+  `<crate>/target/xark/<name>/pk.bin`.
+- `--out <DIR>` — where to write the proof (default `<crate>/target/xark/<name>/`).
 - `--cache` — also write the caches that make later proofs against this key faster:
   `pk.decoded.bin` (the proving key with uncompressed points, twice its size) and, for a
   `minimized` key without one, `r1cs.stream`. Existing caches are always used.
