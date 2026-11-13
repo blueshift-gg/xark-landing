@@ -444,10 +444,8 @@ program at an address the test makes up, `funded` makes a payer, and `send` sign
 transaction, throwing with the program's logs when it fails. `{ digest: Over9000.digest }` pins the
 prover to the circuit this client was generated from, so a different circuit file is refused.
 
-A proof is always 256 bytes, and `toBytes()` is exactly what the program reads. `verify` refuses to Any sort of tempering —
-flipping one of its bits, or truncating it — must
-it must make `verify` refuse it, and a proof one byte short must fail the length check first. When
-inputs fail, the client throws a `CheckFailed` that names the same source line `xark prove` did:
+A proof is always 256 bytes. A tempered proof is rejected by the verifier. When inputs fail,
+the client throws a `CheckFailed` that names the source line of the check:
 ``the inputs fail the check at src/lib.rs:5:5: `require(power_level > 9000u64);` ``.
 
 Install the test's packages, then run every test in the project:
