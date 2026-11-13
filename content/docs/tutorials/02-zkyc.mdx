@@ -693,15 +693,22 @@ that. The circuit stays the same for every verifier; each picks its rules by wha
 The program can't link xark, but it doesn't need to: the verifier crate's `Policy` is the circuit's,
 with its types. `Days::from_unix` turns the clock into the circuit's day, a `Bitfield<Country>` is
 built at compile time, and `PublicInputs` packs it all. The one thing left to the program is the
-calendar: `Policy::on` gets `born_by` from xark's `years_before`, which the program does in a few
-lines of `no_std` Rust. Create `programs/zkyc/src/policy.rs`:
+calendar: `Policy::on` gets `born_by` from xark's `years_before`, and the program does the same with
+the `time` crate, which builds for Solana without its default features:
+
+```sh
+cargo add -p zkyc-program time --no-default-features
+```
+
+Create `programs/zkyc/src/policy.rs`:
 
 ```rust title="programs/zkyc/src/policy.rs"
+use time::OffsetDateTime;
 use zkyc_verifier::{Bitfield, Country, Days, Policy};
 
 // The program's policy: 18 or older, worth at least 500,000, a national of DE, FR,
 // GB or US, with a document valid today.
-const MIN_AGE: i64 = 18;
+const MIN_AGE: i32 = 18;
 const MIN_NET_WORTH: u64 = 500_000;
 const ALLOWED: Bitfield<Country> = Bitfield::EMPTY
     .with(Country::DE)
@@ -727,41 +734,19 @@ pub fn policy(unix: i64) -> Option<Policy> {
 /// The latest birth date of someone `MIN_AGE` on `today`: the same day `MIN_AGE`
 /// years earlier, or the 28th for a 29 February that year doesn't have.
 fn born_by(today: Day) -> Option<Day> {
-    let (y, m, d) = civil_from_days(today.to_unix().div_euclid(86_400));
-    let y = y - MIN_AGE;
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let d = if m == 2 && d == 29 && !leap { 28 } else { d };
-    Day::from_unix(days_from_civil(y, m, d) * 86_400)
-}
-
-/// The civil date of a day count from 1970-01-01: Howard Hinnant's
-/// `civil_from_days` (http://howardhinnant.github.io/date_algorithms.html).
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(month <= 2), month, day)
-}
-
-/// Its inverse: Hinnant's `days_from_civil`.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    let today = OffsetDateTime::from_unix_timestamp(today.to_unix()).ok()?.date();
+    let year = today.year() - MIN_AGE;
+    let born_by = today
+        .replace_year(year)
+        .or_else(|_| today.replace_day(28)?.replace_year(year))
+        .ok()?;
+    Day::from_unix(born_by.midnight().assume_utc().unix_timestamp())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_AGE, MIN_NET_WORTH, days_from_civil, policy};
-    use xark::Field;
+    use super::{MIN_AGE, MIN_NET_WORTH, policy};
+    use xark::{Field, Timestamp};
     use xark::prelude::Country::*;
     use zkyc::{Day, Policy};
     use zkyc_verifier::PublicInputs;
@@ -770,8 +755,8 @@ mod tests {
     /// element for field element: the dates, the countries and their packing.
     #[test]
     fn the_policy_is_the_circuits() {
-        let start = days_from_civil(1918, 1, 1) * 86_400;
-        let end = days_from_civil(2101, 1, 1) * 86_400;
+        let start = Timestamp::new(1918, 1, 1).unix();
+        let end = Timestamp::new(2101, 1, 1).unix();
         for unix in (start..end).step_by(86_400) {
             let today = Day::from_unix(unix).unwrap();
             let want = Policy::on(today, MIN_AGE as u16, MIN_NET_WORTH, [DE, FR, GB, US]);
@@ -793,8 +778,8 @@ mod tests {
     /// Before 1918, someone 18 was born before the circuit's first day.
     #[test]
     fn no_policy_outside_the_circuits_days() {
-        assert!(policy(days_from_civil(1917, 12, 31) * 86_400).is_none());
-        assert!(policy(days_from_civil(2101, 1, 1) * 86_400).is_none());
+        assert!(policy(Timestamp::new(1917, 12, 31).unix()).is_none());
+        assert!(policy(Timestamp::new(2101, 1, 1).unix()).is_none());
     }
 }
 ```
