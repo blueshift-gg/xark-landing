@@ -15,15 +15,15 @@ voter list is that tree with nothing to withdraw. The new idea is a **scoped nul
 [01](/docs/tutorials/01-over-9000)'s [range proof](/docs/learn-zk/range-proofs) comes back, smaller:
 the choice is proved to be one of the poll's options. By the end you'll have:
 
-- a **circuit crate**, `vote`: a voter's identity, 03's tree of voters, and the circuit;
-- a **TypeScript client** that builds the voter list and proves a vote;
+- a **circuit**, `vote`: a voter's identity, 03's tree of voters, and the circuit;
+- a **TypeScript test** that builds the voter list and proves a vote with the generated client;
 - a **Pinocchio program** that creates polls, verifies votes and counts each voter once per poll;
 - an **end-to-end test**: voters vote through a relayer, a second vote and a replayed proof are
   refused, and the same voter votes again in a second poll.
 
 <Callout title="Prerequisites">
 Everything from [01's prerequisites](/docs/tutorials/01-over-9000): stable Rust 1.89 or newer,
-`xark-cli` 0.3, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new: Cargo
+`xark-cli` 0.4, Node 22 or newer, and the Anza CLI for `cargo-build-sbf`. Nothing new: Cargo
 fetches `pinocchio` and `pinocchio-system`. This tutorial assumes you've done
 [01](/docs/tutorials/01-over-9000) to [04](/docs/tutorials/04-shielded-pool), and doesn't
 re-explain their commands. You don't need their files.
@@ -45,50 +45,54 @@ proves three things without saying which leaf is theirs:
 3. their choice is one of the poll's options (01's range proof).
 
 ```text
-identity   = (nullifier_key, trapdoor)             kept by the voter
-commitment = Poseidon2(nullifier_key, trapdoor)    a leaf of the voter list
-nullifier  = Poseidon2(nullifier_key, poll)        revealed by a vote in `poll`
+identity   = (nullifier_key, trapdoor)            kept by the voter
+commitment = commit([nullifier_key, trapdoor])    a leaf of the voter list
+nullifier  = nullifier([nullifier_key, poll])     revealed by a vote in `poll`
 ```
 
 The program keeps a receipt for each nullifier it counts, as 04 kept one for each nullifier it
 paid, so a second vote in the same poll is refused. The authority sees commitments and the chain
 sees nullifiers, and neither says anything about the other without the `nullifier_key`.
 
-This tutorial gets its own directory:
+This tutorial gets its own project:
 
 ```text
-xark-vote/
-├── vote/      the circuit crate: identities, the voter list, the circuit
-├── program/   the Pinocchio program
-└── app/       the TypeScript client and the end-to-end test
+vote/
+├── circuits/vote/               the circuit: identities, the voter list, the circuit
+├── programs/anonymous-voting/   the Pinocchio program
+├── clients/vote/                generated: the verifier crate (rust/) and the client (ts/)
+├── keys/vote/                   the proving and verifying keys
+└── tests/                       the end-to-end test
 ```
 
 <Steps>
 
 <Step>
-### Create the circuit crate
+### Create the project
 
 ```sh
-mkdir xark-vote && cd xark-vote
-xark init vote
-cd vote
-cargo add xark-poseidon2@0.3 xark-merkle@0.3
-cd ..
+xark init vote && cd vote
+cargo add -p vote xark-poseidon2@0.4 xark-merkle@0.4
 ```
 
-Two of 03's three [gadget crates](/docs/gadgets): `xark-poseidon2` for the hashes, `xark-merkle`
-for the tree. No address enters this circuit, so there's no `xark-hash`.
+`xark init` makes the project and its starter circuit, `circuits/vote/`; every command from here
+runs at the project's root. The same two [gadget crates](/docs/gadgets) as 03: `xark-poseidon2`
+for the hashes, `xark-merkle` for the tree.
 </Step>
 
 <Step>
 ### Describe a voter
 
-Replace `vote/src/lib.rs` with:
+Replace `circuits/vote/src/lib.rs` with:
 
-```rust title="vote/src/lib.rs"
+```rust title="circuits/vote/src/lib.rs"
 use xark::prelude::*;
-use xark_merkle::cond_swap;
-use xark_poseidon2::{hash, hash2};
+use xark_merkle::poseidon2::merkle_root;
+#[cfg(not(xark))]
+use xark_merkle::tree::{self, Tree};
+#[cfg(not(xark))]
+use xark_poseidon2::hash2;
+use xark_poseidon2::{commit, nullifier};
 
 /// A voter's secret: whoever knows it votes as this voter. Two random field
 /// elements, kept by the voter; the voter list holds only their commitment.
@@ -100,26 +104,29 @@ pub struct Identity {
 
 #[input]
 impl Identity {
-    /// What the voter registers: `Poseidon2(nullifier_key, trapdoor)`, a leaf of
-    /// the voter list.
+    /// What the voter registers: `commit(nullifier_key, trapdoor)`, a leaf of the
+    /// voter list.
     pub fn commitment(&self) -> Field {
-        hash([self.nullifier_key, self.trapdoor])
+        commit([self.nullifier_key, self.trapdoor])
     }
 
-    /// What a vote in `poll` reveals: `Poseidon2(nullifier_key, poll)`. One per
+    /// What a vote in `poll` reveals: `nullifier(nullifier_key, poll)`. One per
     /// voter per poll.
     pub fn nullifier(&self, poll: Field) -> Field {
-        hash2(self.nullifier_key, poll)
+        nullifier([self.nullifier_key, poll])
     }
 }
 ```
 
 An `Identity` is two random field elements, and `#[input] impl` puts its two hashes in the
-TypeScript client, as `Claim.leaf` was in 03. The commitment is Poseidon2's sponge, `hash`; the
-nullifier is its 2-to-1 compression, `hash2`, of the key and the poll's ID.
+TypeScript client, as `Claim.leaf` was in 03. The commitment is `xark_poseidon2::commit` of both
+secrets; the nullifier is `xark_poseidon2::nullifier` of the key and the poll's ID. Both are
+Poseidon2's sponge, started in a domain of its own, so no commitment is ever a nullifier, and
+neither is a plain `hash` or a node of the tree, short of breaking Poseidon2. That's the domain
+separation the voter list relies on below, built into the two functions.
 
-That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nullifier hash was
-`hash([nullifier])`, one per note, forever. This one is one per voter *per poll*:
+That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nullifier hashed the
+note's secret alone: one per note, forever. This one is one per voter *per poll*:
 
 - **One vote per poll.** In one poll, a voter's nullifier is always the same. A second vote, even
   with a fresh proof, reveals it again, and the program finds its receipt.
@@ -133,16 +140,24 @@ That `poll` in the nullifier is the new idea, the **scoped nullifier**. 04's nul
 <Step>
 ### Add the voter list
 
-The voter list is 03's tree, with commitments as its leaves. Append 03's `Path` and its builder to
-`vote/src/lib.rs`, unchanged except for two comments:
+The voter list is 03's tree, `xark-merkle`'s Poseidon2 tree, with commitments as its leaves.
+Append 03's `list`, `Path` and its builder to `circuits/vote/src/lib.rs`, unchanged except for
+their comments:
 
-```rust title="vote/src/lib.rs"
+```rust title="circuits/vote/src/lib.rs"
 /// Tree depth: up to 2^20 voters.
 pub const DEPTH: usize = 20;
 
 /// The empty leaf, ASCII `xarkzero`: no voter's commitment is this value, so
 /// the padding after the list can't vote.
 pub const EMPTY_LEAF: u64 = 0x7861_726b_7a65_726f;
+
+/// The empty voter list, as an authority builds it in Rust: push each voter's
+/// commitment, then take its `root()` and each voter's `path(i)`.
+#[cfg(not(xark))]
+pub fn list() -> Tree<DEPTH> {
+    Tree::poseidon2(Field::from(EMPTY_LEAF))
+}
 
 /// A leaf's authentication path: its index, and its sibling at each height.
 #[input]
@@ -155,22 +170,13 @@ pub struct Path {
 impl Path {
     /// The root of the tree with `leaf` at this path.
     pub fn root(&self, leaf: Field) -> Field {
-        let bits = Field::from(self.index).to_bits::<DEPTH>();
-        let mut node = leaf;
-        let mut i = 0;
-        while i < DEPTH {
-            // The bit orders the pair: 0, this node is the left child; 1, the right.
-            let (left, right) = cond_swap(bits[i], node, self.siblings[i]);
-            node = hash2(left, right);
-            i += 1;
-        }
-        node
+        merkle_root(leaf, self.siblings, Field::from(self.index).to_bits::<DEPTH>())
     }
 
     /// The first leaf's path, in the empty list.
     #[cfg(not(xark))]
     pub fn first() -> Path {
-        Path { index: 0, siblings: zeros() }
+        list().path(0).into()
     }
 
     /// For the next free leaf's path, the root of the list so far.
@@ -184,7 +190,7 @@ impl Path {
     pub fn next(self, leaf: Field) -> Path {
         assert!((self.index as usize) < (1 << DEPTH) - 1, "the list is full");
         let index = self.index + 1;
-        let z = zeros();
+        let empty = list();
         let mut siblings = self.siblings;
         let mut node = leaf;
         for (i, sibling) in siblings.iter_mut().enumerate() {
@@ -192,7 +198,7 @@ impl Path {
             let old = *sibling;
             if next != mine {
                 // A new subtree: its left sibling is this leaf's, its right is empty.
-                *sibling = if next & 1 == 1 { node } else { z[i] };
+                *sibling = if next & 1 == 1 { node } else { empty.empty_subtrees()[i] };
             }
             node = node_of(mine, node, old);
         }
@@ -216,29 +222,30 @@ impl Path {
     }
 }
 
+/// A path out of a `Tree`, as the circuit takes it.
+#[cfg(not(xark))]
+impl From<tree::Path<DEPTH>> for Path {
+    fn from(path: tree::Path<DEPTH>) -> Path {
+        Path { index: path.index as u32, siblings: path.siblings }
+    }
+}
+
 /// The parent of `node`, at position `at` in its level, and its `sibling`.
 #[cfg(not(xark))]
 fn node_of(at: u32, node: Field, sibling: Field) -> Field {
     if at & 1 == 0 { hash2(node, sibling) } else { hash2(sibling, node) }
 }
-
-/// `zeros()[i]` is the root of an empty subtree of height `i`.
-#[cfg(not(xark))]
-fn zeros() -> [Field; DEPTH] {
-    let mut z = [Field::from(EMPTY_LEAF); DEPTH];
-    for i in 1..DEPTH {
-        z[i] = hash2(z[i - 1], z[i - 1]);
-    }
-    z
-}
 ```
 
 [03's tree step](/docs/tutorials/03-token-claim#write-the-tree) explains it: `root` is the one
-function the circuit calls, and `first`, `next`, `update` and `list_root` are the host-only
-builder the authority runs from TypeScript. A commitment is the sponge and a node the compression,
-two different functions at a fixed depth, so no node passes for a voter. A nullifier is never a
-leaf, so sharing `hash2` with the nodes doesn't let one stand in for the other. The empty leaf is
-a constant no commitment hashes to, so the padding after the list can't vote.
+function the circuit calls, `xark_merkle::poseidon2::merkle_root`, which folds the path with a
+`cond_swap` and a Poseidon2 `hash2` per level. `list` is the whole list on the host, a
+`xark_merkle::tree::Tree`, for a Rust authority that holds every commitment. `first`, `next`,
+`update` and `list_root` keep one path at a time, without the tree, which is what the authority
+and the voters run from TypeScript. A node is the compression `hash2`, and a commitment and a
+nullifier each have their own domain of the sponge, so at a fixed depth no node passes for a
+voter, and no nullifier for either. The empty leaf is a constant no commitment hashes to, so the
+padding after the list can't vote.
 </Step>
 
 <Step>
@@ -247,7 +254,7 @@ a constant no commitment hashes to, so the padding after the list can't vote.
 A vote's public statement is its `Ballot`: the list's root, the poll, the nullifier, the number of
 options and the choice. Append it, the circuit and three tests:
 
-```rust title="vote/src/lib.rs"
+```rust title="circuits/vote/src/lib.rs"
 /// What the program checks a vote against: the public inputs, in this order.
 #[input]
 pub struct Ballot {
@@ -287,16 +294,33 @@ mod tests {
         Identity { nullifier_key: Field::from(n), trapdoor: Field::from(n + 1_000) }
     }
 
-    /// The list's root and every voter's path, as 03's `list` builds them.
-    fn list(voters: &[Identity]) -> (Field, Vec<Path>) {
+    /// The list's root and every voter's path, as the authority builds them.
+    fn of(voters: &[Identity]) -> (Field, Vec<Path>) {
+        let mut tree = list();
+        tree.extend(voters.iter().map(Identity::commitment));
+        let paths = (0..voters.len()).map(|i| tree.path(i).into()).collect();
+        (tree.root(), paths)
+    }
+
+    /// One path at a time (`first`, `next`, `update`) agrees with the `Tree`.
+    #[test]
+    fn one_path_at_a_time_agrees_with_the_tree() {
+        let leaves: Vec<Field> = (1..=11).map(|n| identity(n).commitment()).collect();
+        let mut tree = list();
         let mut tip = Path::first(); // the next free leaf's path
         let mut paths: Vec<Path> = Vec::new();
-        for v in voters {
-            paths = paths.into_iter().map(|p| p.update(tip, v.commitment())).collect();
+        assert_eq!(tip.list_root(), tree.root());
+        for &leaf in &leaves {
+            paths = paths.into_iter().map(|p| p.update(tip, leaf)).collect();
             paths.push(tip);
-            tip = tip.next(v.commitment());
+            tip = tip.next(leaf);
+            tree.push(leaf);
+            assert_eq!(tip.list_root(), tree.root());
+            for (i, path) in paths.iter().chain([&tip]).enumerate() {
+                let want = tree.path(i);
+                assert_eq!((path.index as usize, path.siblings), (want.index, want.siblings));
+            }
         }
-        (tip.list_root(), paths)
     }
 
     #[test]
@@ -311,7 +335,7 @@ mod tests {
     #[test]
     fn every_voter_votes_for_any_option() {
         let voters = [identity(1), identity(2), identity(3)];
-        let (root, paths) = list(&voters);
+        let (root, paths) = of(&voters);
         for (path, v) in paths.iter().zip(voters) {
             for choice in 0..3 {
                 let ballot = Ballot::of(v, *path, Field::from(7u64), 3, choice);
@@ -324,7 +348,7 @@ mod tests {
     #[test]
     fn nothing_else_votes() {
         let voters = [identity(1), identity(2), identity(3)];
-        let (root, paths) = list(&voters);
+        let (root, paths) = of(&voters);
         let poll = Field::from(7u64);
         let ok = Ballot::of(voters[0], paths[0], poll, 3, 1);
         // Past the poll's options, which are 0, 1 and 2.
@@ -363,48 +387,50 @@ There's no `bind`, unlike 04's addresses: `root` and `nullifier` are compared, `
 and `options` and `choice` are range-checked and ordered, so every public input is already in a
 constraint.
 
-The tests build a list of three with 03's `list`. The first checks the nullifier's scope: another
-poll or another voter gives another nullifier, and neither is the commitment. The second has
-every voter vote for every option. The third refuses everything else: a choice past the options,
-a stranger at a voter's path, another voter's nullifier and the same voter's nullifier from
-another poll.
+`of` builds a list from the `Tree`: it pushes each voter's commitment and reads back the root and
+each voter's path. The first test checks the one-path-at-a-time builder against it, path for path,
+over eleven voters. The second checks the nullifier's scope: another poll or another voter gives
+another nullifier, and neither is the commitment. The third has every voter vote for every option.
+The fourth refuses everything else: a choice past the options, a stranger at a voter's path,
+another voter's nullifier and the same voter's nullifier from another poll.
 </Step>
 
 <Step>
 ### Run the tests
 
 ```console
-$ xark test vote
+$ xark test
 xark building circuit `vote`
 xark 5401 vars, 5401 constraints, 5374 witness-gen ops
-xark circuit digest ce0b157239ad8e60d3ce20bccf1a7eaa
+xark circuit digest cc4e57f3aa1855badd92cb19f59ede78
 ...
-running 3 tests
+running 4 tests
 test tests::one_nullifier_per_voter_per_poll ... ok
+test tests::one_path_at_a_time_agrees_with_the_tree ... ok
 test tests::nothing_else_votes ... ok
 test tests::every_voter_votes_for_any_option ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.39s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s
 ```
 
 The digest matches this one if your circuit does. `xark profile` shows where the 5,401
 constraints go:
 
 ```console
-$ xark profile vote
+$ xark profile
 ...
 lib.rs:149     require_eq(path.root(identity.commitment()), ba…    5101
-    ├─ root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
-    ├─ root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
-    ├─ commitment → hash → hash_in → perm → internal_round → sbox → pow  168   (Mul 168)
-    ├─ commitment → hash → hash_in → perm → external_round → sbox → pow   72   (Mul 72)
-    ├─ root → cond_swap                         20   (Mul 20)
-    ├─ root → cond_swap → require_bool          20   (Booleanity 20)
+    ├─ root → merkle_root → hash2 → hash2_in → perm → internal_round → sbox → pow 3360   (Mul 3360)
+    ├─ root → merkle_root → hash2 → hash2_in → perm → external_round → sbox → pow 1440   (Mul 1440)
+    ├─ commitment → commit → tagged → perm → internal_round → sbox → pow  168   (Mul 168)
+    ├─ commitment → commit → tagged → perm → external_round → sbox → pow   72   (Mul 72)
+    ├─ root → merkle_root → cond_swap           20   (Mul 20)
+    ├─ root → merkle_root → cond_swap → require_bool   20   (Booleanity 20)
     ├─ root → to_bits                           20   (RangeCheck 20)
     └─ require_eq                                1   (Equality 1)
 lib.rs:150     require_eq(identity.nullifier(ballot.poll), bal…     251
-    ├─ nullifier → hash2 → hash2_in → perm → internal_round → sbox → pow  168   (Mul 168)
-    ├─ nullifier → hash2 → hash2_in → perm → external_round → sbox → pow   72   (Mul 72)
+    ├─ nullifier → tagged → perm → internal_round → sbox → pow  168   (Mul 168)
+    ├─ nullifier → tagged → perm → external_round → sbox → pow   72   (Mul 72)
     └─ require_eq                               11   (RangeCheck 8, Comparison 2, Equality 1)
 lib.rs:147     #[circuit]                                            48
     ├─ (top-level)                              32   (RangeCheck 32)
@@ -417,34 +443,38 @@ TOTAL  5401 constraints
 ```
 
 The path is 4,860, 243 per level as in 03. The commitment and the nullifier are 240 each, one
-permutation apiece, and the `u32` index is 32. The range proof is 27: 16 for the two `u8`s' bits
+permutation apiece (their own domain costs nothing), and the `u32` index is 32. The range proof is 27: 16 for the two `u8`s' bits
 (under `#[circuit]`), 10 for the comparison's difference and its borrow (which the profile files
 under line 150, beside that line's own equality) and 1 for the `require`.
 </Step>
 
 <Step>
-### Make the keys, the verifier crate and the client
+### Add the program, its keys and its clients
 
-The same three commands as in 03:
+One command makes the circuit's keys, the verifier crate and the TypeScript client, and a Pinocchio
+program that uses them, which you'll fill in below:
 
 ```console
-$ xark setup vote
+$ xark add program anonymous-voting --circuit vote
 ...
 Key: a single-party setup from OS randomness: sound unless whoever ran `xark setup` kept that randomness (xark doesn't). `xark ceremony` spreads that trust.
-
-$ xark export vote
-Generated verifier crate `vote-verifier` at .../vote/vote-verifier (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify_instruction_data(...)`.
 ...
-✅ On-chain verifier crate ready (verifying key embedded).
+Generated verifier crate `vote-verifier` at .../vote/clients/vote/rust (4 public input(s), VK = 768 B). Depend on it from your Solana program and call `verify(&proof, PublicInputs { .. })`.
+...
+✅ TypeScript client for `vote` at .../vote/clients/vote/ts/vote.ts
 
-$ xark client vote --out app/
-✅ TypeScript client for `vote` at app/vote.ts
+xark added program `anonymous-voting-program` in .../vote/programs/anonymous-voting, verifying `vote`
 ```
+
+The keys are in `keys/vote/`, the verifier crate `vote-verifier` in `clients/vote/rust/`, the
+client in `clients/vote/ts/vote.ts`, the program in `programs/anonymous-voting/` and a LiteSVM test
+in `tests/anonymous-voting.test.ts`. `--circuit` names the circuit, since the program's name isn't
+the circuit's.
 
 Five fields, four public inputs:
 
 ```console
-$ xark inspect vote --json | tail -7
+$ xark inspect --json | tail -7
   "public_inputs": [
     "ballot.root",
     "ballot.poll",
@@ -456,44 +486,45 @@ $ xark inspect vote --json | tail -7
 
 `#[input]` packs a struct's consecutive integers into one field element, the first in the lowest
 bits: `options` in bits 0 to 7, `choice` in bits 8 to 15. So making `options` public cost nothing
-onchain. See [Packing](/docs/reference/inputs#packing).
+onchain. See [Packing](/docs/reference/inputs#packing). The verifier crate has the same `Ballot`,
+with each field by name, and packs it the same way, so the program will never shift a bit. In
+`clients/vote/rust/src/lib.rs`:
+
+```rust
+pub struct Ballot {
+    pub root: [u8; 32],
+    pub poll: [u8; 32],
+    pub nullifier: [u8; 32],
+    pub options: u8,
+    pub choice: u8,
+}
+
+pub struct PublicInputs {
+    pub ballot: Ballot,
+}
+```
 </Step>
 
 <Step>
 ### Build the list and prove from TypeScript
 
-Set up `app/` as before:
+Install the project's npm packages, the generated client's runtime and the test's:
 
 ```sh
-cd app
-npm init -y
-npm pkg set type=module
-npm install @blueshift-gg/xark@^0.3.0 vitest
+npm install
 ```
 
-Create `app/anonymous-voting.test.ts`:
+Replace `tests/anonymous-voting.test.ts`, which `xark add program` wrote as a placeholder, with:
 
-```ts title="app/anonymous-voting.test.ts"
-import { readFileSync } from "node:fs";
-import { beforeAll, expect, test } from "vitest";
-import { Ballot, Field, Identity, Path, Vote, type PathValue, type VoteProver } from "./vote";
-
-// What `xark build` and `xark setup` wrote. A web app would serve this
-// directory and pass its URL instead.
-const out = "../vote/target/xark/vote/";
-const read = (file: string) => new Uint8Array(readFileSync(out + file));
+```ts title="tests/anonymous-voting.test.ts"
+import { circuit } from "@blueshift-gg/xark/testing";
+import { Ballot, Field, Identity, Path, Vote, type PathValue, type VoteProver } from "../clients/vote/ts/vote";
 
 let prover: VoteProver;
 beforeAll(async () => {
-  prover = await Vote.prover(
-    {
-      circuit: read("circuit.xbc"),
-      provingKey: read("pk.bin"),
-      sources: readFileSync(out + "sources.json", "utf8"),
-      client: read("client.wasm"), // the crate's Rust: Identity, Path, Ballot.of
-    },
-    { digest: Vote.digest },
-  );
+  // The circuit's build output and its keys. A web app would serve these and
+  // pass their bytes instead.
+  prover = await Vote.prover(circuit("vote"), { digest: Vote.digest });
 });
 
 /** A new voter: two random field elements, kept by the voter. */
@@ -524,7 +555,7 @@ test("a voter on the list has a proof, and a new nullifier in each poll", async 
   const proof = prover.prove({ identity: voters[1], path: paths[1], ballot });
 
   // The verifier sees the ballot, and nothing of the identity or the path.
-  const verifier = await Vote.verifier(read("vk.bin"));
+  const verifier = await Vote.verifier(circuit("vote").verifyingKey);
   expect(verifier.verify(proof.toBytes(), { ballot })).toBe(true);
   expect(verifier.verify(proof.toBytes(), { ballot: { ...ballot, choice: 0 } })).toBe(false);
 
@@ -545,6 +576,9 @@ test("nothing else has a proof", () => {
 });
 ```
 
+`circuit("vote")` reads the circuit's build output, and its keys from `keys/vote/`. `test`,
+`expect` and `beforeAll` are vitest's globals, which the project's `vitest.config.ts` turns on.
+
 `newIdentity` is what a voter's wallet does once: two random secrets of 31 bytes each, so each is
 below the field's modulus. `list` is 03's, over commitments: the authority adds each voter's
 commitment at the tip and publishes `tip.listRoot()`. It never sees an identity, only its
@@ -552,8 +586,8 @@ commitment.
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1098ms
- ✓ anonymous-voting.test.ts > nothing else has a proof 2037ms
+ ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1220ms
+ ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2419ms
 
  Test Files  1 passed (1)
       Tests  2 passed (2)
@@ -577,10 +611,10 @@ The program has two instructions:
   nullifier and adds one to the choice's tally. A second vote with the same nullifier finds the
   receipt and fails.
 
-It's laid out as 04's was:
+It's laid out as 04's was, in `programs/anonymous-voting/`, where `xark add program` started it:
 
 ```text
-program/src/
+programs/anonymous-voting/src/
 ├── lib.rs                  the entrypoint
 ├── state.rs                the poll's account
 ├── helpers.rs              the account checks the instructions share
@@ -591,43 +625,50 @@ program/src/
 └── errors.rs               the program's own errors
 ```
 
-From `xark-vote/`:
+Its `instructions/verify.rs` takes the public inputs from the instruction, which this program
+won't do, so delete it:
 
 ```sh
-cd ..
-cargo new --lib program --name anonymous-voting
-mkdir program/src/instructions
+rm programs/anonymous-voting/src/instructions/verify.rs
 ```
 
-Replace `program/Cargo.toml` with:
+Replace `programs/anonymous-voting/Cargo.toml` with:
 
-```toml title="program/Cargo.toml"
+```toml title="programs/anonymous-voting/Cargo.toml"
 [package]
-name = "anonymous-voting"
+name = "anonymous-voting-program"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
-vote-verifier = { path = "../vote/vote-verifier" }
+# Generated from circuits/vote: `xark build` updates it when the circuit changes.
+vote-verifier = { path = "../../clients/vote/rust" }
 pinocchio = "0.11"
 pinocchio-system = "0.6"
 
 # Onchain, PDAs come from the runtime's syscalls; a host build (your editor,
-# clippy) derives them in software.
+# clippy, the tests) derives them in software.
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-address = { version = "2", features = ["curve25519"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(target_arch, values("bpf"))',
+] }
 ```
 
-Replace `program/src/lib.rs` with the entrypoint:
+It adds `pinocchio-system`, to create accounts, and `solana-address` for host builds, to what
+`xark add program` wrote.
 
-```rust title="program/src/lib.rs"
-#![no_std]
+Replace `programs/anonymous-voting/src/lib.rs` with the entrypoint:
+
+```rust title="programs/anonymous-voting/src/lib.rs"
+#![cfg_attr(not(test), no_std)]
 
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError, program_entrypoint};
 
@@ -646,7 +687,9 @@ pub const ID: Address = Address::new_from_array([
 ]);
 
 program_entrypoint!(process_instruction);
+#[cfg(not(test))]
 pinocchio::nostd_panic_handler!();
+#[cfg(not(test))]
 pinocchio::no_allocator!();
 
 fn process_instruction(
@@ -693,9 +736,9 @@ and anyone could link a voter's votes in the two. A receipt holds nothing; that 
 the vote.
 
 The account checks are [04's](/docs/tutorials/04-shielded-pool#check-every-account), which says
-what each one prevents, and so are `field_from_u64` and `log`. Create `program/src/helpers.rs`:
+what each one prevents, and so is `log`. Create `programs/anonymous-voting/src/helpers.rs`:
 
-```rust title="program/src/helpers.rs"
+```rust title="programs/anonymous-voting/src/helpers.rs"
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
 /// An account the program writes to.
@@ -729,28 +772,21 @@ pub fn is_uninitialized(account: &AccountView) -> bool {
     account.owned_by(&pinocchio_system::ID) && account.is_data_empty()
 }
 
-/// A u64 as a 32-byte little-endian field element.
-pub fn field_from_u64(x: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&x.to_le_bytes());
-    out
-}
-
 /// `Program log: <message>`.
 pub fn log(message: &str) {
-    #[cfg(target_os = "solana")]
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     // SAFETY: the pointer and length are a valid `&str`'s.
     unsafe {
         pinocchio::syscalls::sol_log_(message.as_ptr(), message.len() as u64)
     };
-    #[cfg(not(target_os = "solana"))]
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
     let _ = message;
 }
 ```
 
-Then the poll. Create `program/src/state.rs`:
+Then the poll. Create `programs/anonymous-voting/src/state.rs`:
 
-```rust title="program/src/state.rs"
+```rust title="programs/anonymous-voting/src/state.rs"
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 
 use crate::helpers::writable;
@@ -872,9 +908,10 @@ options; the circuit would take up to 255. `count` adds one vote with checked ar
 ### Create a poll
 
 Each instruction is three structs, as in 04: its accounts, its instruction data and the
-instruction, whose `process` does the work. Create `program/src/instructions/mod.rs`:
+instruction, whose `process` does the work. Replace
+`programs/anonymous-voting/src/instructions/mod.rs` with:
 
-```rust title="program/src/instructions/mod.rs"
+```rust title="programs/anonymous-voting/src/instructions/mod.rs"
 pub mod create_poll;
 pub mod vote;
 
@@ -882,9 +919,9 @@ pub use create_poll::*;
 pub use vote::*;
 ```
 
-Then `program/src/instructions/create_poll.rs`:
+Then `programs/anonymous-voting/src/instructions/create_poll.rs`:
 
-```rust title="program/src/instructions/create_poll.rs"
+```rust title="programs/anonymous-voting/src/instructions/create_poll.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
@@ -1030,19 +1067,19 @@ Anyone can create a poll, and the first to take an ID has it. An authority shoul
 <Step>
 ### Count a vote
 
-Create `program/src/instructions/vote.rs`:
+Create `programs/anonymous-voting/src/instructions/vote.rs`:
 
-```rust title="program/src/instructions/vote.rs"
+```rust title="programs/anonymous-voting/src/instructions/vote.rs"
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
 };
-use vote_verifier::{Proof, verify};
+use vote_verifier::{Ballot, Proof, PublicInputs, fields, verify};
 
 use crate::{
     VotingError,
-    helpers::{field_from_u64, is_uninitialized, system_program, writable, writable_signer},
+    helpers::{is_uninitialized, system_program, writable, writable_signer},
     state::{Poll, VOTED_SEED},
 };
 
@@ -1140,20 +1177,11 @@ impl<'a> Vote<'a> {
     pub const DISCRIMINATOR: &'a u8 = &1;
 
     pub fn process(&mut self) -> ProgramResult {
-        // The circuit's public `Ballot`: the root, id and options from the poll,
-        // the nullifier and choice from the instruction.
-        let public_inputs = {
+        let inputs = {
             let data = self.accounts.poll.try_borrow()?;
-            let poll = Poll::load(&data)?;
-            public_inputs(
-                &poll.root,
-                u64::from_le_bytes(poll.id),
-                self.data.nullifier,
-                poll.options,
-                self.data.choice,
-            )
+            public_inputs(Poll::load(&data)?, self.data.nullifier, self.data.choice)
         };
-        if !verify(&Proof::from_le_bytes(self.data.proof), &public_inputs) {
+        if !verify(&Proof::from_le_bytes(self.data.proof), inputs) {
             return Err(VotingError::InvalidProof.into());
         }
 
@@ -1178,30 +1206,27 @@ impl<'a> Vote<'a> {
     }
 }
 
-/// The circuit's public inputs, in `xark inspect`'s order: `root`, `poll`,
-/// `nullifier`, then `options` and `choice` packed into one field element,
-/// `options` in bits 0–7 and `choice` in bits 8–15.
-fn public_inputs(
-    root: &[u8; 32],
-    poll_id: u64,
-    nullifier: &[u8; 32],
-    options: u8,
-    choice: u8,
-) -> [[u8; 32]; 4] {
-    let packed = u64::from(options) | u64::from(choice) << 8;
-    [
-        *root,
-        field_from_u64(poll_id),
-        *nullifier,
-        field_from_u64(packed),
-    ]
+/// The circuit's public `Ballot`: the root, the id and the options from the poll,
+/// the nullifier and the choice from the instruction.
+fn public_inputs(poll: &Poll, nullifier: &[u8; 32], choice: u8) -> PublicInputs {
+    PublicInputs {
+        ballot: Ballot {
+            root: poll.root,
+            poll: fields::uint(u64::from_le_bytes(poll.id).into()),
+            nullifier: *nullifier,
+            options: poll.options,
+            choice,
+        },
+    }
 }
 ```
 
-`public_inputs` builds the circuit's `Ballot` in the order `xark inspect` printed. The root, the ID
-and the options come from the poll's account, and the nullifier and the choice from the
-instruction, with `options` and `choice` packed into one field element as `#[input]` packed them.
-A proof made for another poll, another list or another choice fails `verify`, with `InvalidProof`.
+`public_inputs` fills in the circuit's `Ballot` by name, with the generated `PublicInputs`. The
+root, the ID and the options come from the poll's account, and the nullifier and the choice from
+the instruction. The poll's ID is a `u64`, and `fields::uint` makes it the field element the
+circuit's `poll` is. The verifier crate does the rest: it puts the fields in the order `xark
+inspect` printed and packs `options` and `choice` into one field element, as `#[input]` packed
+them. A proof made for another poll, another list or another choice fails `verify`, with `InvalidProof`.
 The proof stays a reference into the instruction data, as in 03: a copy on the stack, beside the
 verifier's own, would crowd the 4 KiB frame a Solana program gets.
 
@@ -1241,9 +1266,9 @@ Every other check returns a built-in Solana error: `NotEnoughAccountKeys`,
 `InvalidInstructionData`, `MissingRequiredSignature`, `Immutable`, `IncorrectProgramId`,
 `InvalidAccountOwner`, `InvalidAccountData`, `InvalidSeeds`, `AccountAlreadyInitialized`,
 `InvalidArgument` and `ArithmeticOverflow`. Two are the program's own. Create
-`program/src/errors.rs`:
+`programs/anonymous-voting/src/errors.rs` with:
 
-```rust title="program/src/errors.rs"
+```rust title="programs/anonymous-voting/src/errors.rs"
 use pinocchio::error::{ProgramError, ToStr};
 
 /// The program's own errors, as `ProgramError::Custom` codes.
@@ -1289,67 +1314,48 @@ impl ToStr for VotingError {
 <Step>
 ### Build the program
 
+At the project's root, `xark build` builds the circuit and refreshes its clients when they're out
+of date (here they aren't), then builds the program:
+
 ```console
-$ cd program
-$ cargo build-sbf --arch v3
+$ xark build
+xark circuit `circuits/vote` is unchanged since the last build
+xark verifier crate `vote-verifier` at .../vote/clients/vote/rust is unchanged
+xark TypeScript client for `vote` at .../vote/clients/vote/ts/vote.ts is unchanged
+xark building the programs (cargo build-sbf)
 ...
-   Compiling vote-verifier v0.1.0 (.../vote/vote-verifier)
+   Compiling vote-verifier v0.1.0 (.../vote/clients/vote/rust)
    Compiling solana-instruction-view v2.1.0
    Compiling pinocchio v0.11.2
    Compiling pinocchio-system v0.6.1
-   Compiling anonymous-voting v0.1.0 (.../program)
-    Finished `release` profile [optimized] target(s) in 0.50s
+   Compiling anonymous-voting-program v0.1.0 (.../vote/programs/anonymous-voting)
+    Finished `release` profile [optimized] target(s) in 0.48s
 ```
 
-The program is at `program/target/deploy/anonymous_voting.so`. Check that the build printed no
-warning: `cargo build-sbf` only warns when a function's stack frame is over 4 KiB, and a program
-built that way corrupts its own memory when it runs. This one prints none. If yours does, put
-`#[inline(never)]` on `Vote::process`, so the verifier's work gets a frame of its own.
+The program is at `target/deploy/anonymous_voting_program.so`. A function whose stack frame is
+over 4 KiB corrupts the program's memory when it runs, and `cargo build-sbf` only warns about it;
+`xark build` fails on that warning instead. If yours does, put `#[inline(never)]` on
+`Vote::process`, so the verifier's work gets a frame of its own.
 </Step>
 
 <Step>
 ### Vote onchain
 
-Back in `app/`, add the Solana packages:
+Replace the first import of `tests/anonymous-voting.test.ts` with these, for LiteSVM and the
+testing helpers:
 
-```sh
-cd ../app
-npm install @solana/kit litesvm
+```ts title="tests/anonymous-voting.test.ts"
+import { AccountRole, address, getAddressEncoder, getProgramDerivedAddress, type Address, type Instruction, type KeyPairSigner } from "@solana/kit";
+import type { LiteSVM } from "litesvm";
+import { circuit, funded, program as deployed, send, vm } from "@blueshift-gg/xark/testing";
 ```
 
-Add these imports at the top of `anonymous-voting.test.ts`:
+`vm` starts a LiteSVM with the program loaded at an address, `program("anonymous-voting")` is the
+path of the `.so` that `xark build` wrote, `funded` makes a keypair holding SOL, and `send` signs
+and sends an instruction, and throws with the program's logs if it fails. Add 03's helpers at the
+end:
 
-```ts title="app/anonymous-voting.test.ts"
-import {
-  AccountRole, address, appendTransactionMessageInstruction, createTransactionMessage, generateKeyPairSigner,
-  getAddressEncoder, getProgramDerivedAddress, lamports, pipe, setTransactionMessageFeePayerSigner,
-  setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners,
-  type Address, type Instruction, type KeyPairSigner,
-} from "@solana/kit";
-import { FailedTransactionMetadata, LiteSVM } from "litesvm";
-```
-
-Then add 04's `send` and 03's helpers at the end:
-
-```ts title="app/anonymous-voting.test.ts"
-// Send `instruction` in one transaction, paid by `payer`. Returns the compute
-// units it used, or throws with the program's logs.
-async function send(svm: LiteSVM, payer: KeyPairSigner, instruction: Instruction) {
-  const tx = await pipe(
-    createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayerSigner(payer, m),
-    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: svm.latestBlockhash(), lastValidBlockHeight: 0n }, m),
-    (m) => appendTransactionMessageInstruction(instruction, m),
-    (m) => signTransactionMessageWithSigners(m),
-  );
-  const result = svm.sendTransaction(tx);
-  svm.expireBlockhash();
-  if (result instanceof FailedTransactionMetadata) {
-    throw new Error(`transaction failed: ${result.err()}\n${result.meta().logs().join("\n")}`);
-  }
-  return result.computeUnitsConsumed();
-}
-
+```ts title="tests/anonymous-voting.test.ts"
 const program = address("HrQMmAAVGe9MhJMXMjQYsNA3g9qztY3TMjG9d4gKT1r6"); // the program's `ID`
 const system = address("11111111111111111111111111111111");
 const bytes = (a: Address) => new Uint8Array(getAddressEncoder().encode(a));
@@ -1367,18 +1373,11 @@ function u64le(x: bigint) {
   new DataView(out.buffer).setBigUint64(0, x, true);
   return out;
 }
-
-/** A new keypair holding 10 SOL. */
-async function funded(svm: LiteSVM) {
-  const s = await generateKeyPairSigner();
-  svm.airdrop(s.address, lamports(10_000_000_000n));
-  return s;
-}
 ```
 
 and the program's two instructions, and a reader for a poll's tally:
 
-```ts title="app/anonymous-voting.test.ts"
+```ts title="tests/anonymous-voting.test.ts"
 /** `create_poll`: poll `id` over the list rooted at `root`, with `options` options. */
 async function createPoll(svm: LiteSVM, authority: KeyPairSigner, id: bigint, root: Field, options: number) {
   const [poll] = await getProgramDerivedAddress({ programAddress: program, seeds: ["poll", u64le(id)] });
@@ -1412,10 +1411,9 @@ function tally(svm: LiteSVM, poll: Address): bigint[] {
 Finally, the test. Four voters register and the authority opens a poll. Three vote through the
 relayer, and then everything that shouldn't count is tried:
 
-```ts title="app/anonymous-voting.test.ts"
+```ts title="tests/anonymous-voting.test.ts"
 test("each voter on the list votes once per poll, through a relayer", async () => {
-  const svm = new LiteSVM();
-  svm.addProgramFromFile(program, "../program/target/deploy/anonymous_voting.so");
+  const svm = vm({ [program]: deployed("anonymous-voting") });
   const authority = await funded(svm);
   // The relayer signs and pays for every vote, so no voter's wallet appears.
   const relayer = await funded(svm);
@@ -1435,8 +1433,8 @@ test("each voter on the list votes once per poll, through a relayer", async () =
   // Three of them vote: voter 0 for option 0, voters 1 and 2 for option 2.
   for (const [i, choice] of [[0, 0], [1, 2], [2, 2]]) {
     const { proof, nullifier } = ballot(i, 1n, choice);
-    const units = await send(svm, relayer, await vote(poll, relayer, proof, nullifier, choice));
-    console.log(`vote counted in ${units} CU`);
+    const result = await send(svm, relayer, await vote(poll, relayer, proof, nullifier, choice));
+    console.log(`vote counted in ${result.computeUnitsConsumed()} CU`);
   }
   expect(tally(svm, poll)).toEqual([1n, 0n, 2n]);
 
@@ -1456,37 +1454,40 @@ test("each voter on the list votes once per poll, through a relayer", async () =
   expect(other.nullifier).not.toEqual(again.nullifier);
   await send(svm, relayer, await vote(second, relayer, other.proof, other.nullifier, 1));
   expect(tally(svm, second)).toEqual([0n, 1n, 0n]);
-}, 60_000);
+});
 ```
 
 Run the tests:
 
 ```console
 $ npx vitest run --reporter=verbose
- ✓ anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1221ms
- ✓ anonymous-voting.test.ts > nothing else has a proof 2018ms
-stdout | anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
-vote counted in 93842 CU
+ ✓ tests/anonymous-voting.test.ts > a voter on the list has a proof, and a new nullifier in each poll 1236ms
+ ✓ tests/anonymous-voting.test.ts > nothing else has a proof 2274ms
+stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
+vote counted in 91687 CU
 
-stdout | anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
-vote counted in 93626 CU
+stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
+vote counted in 94497 CU
 
-stdout | anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
-vote counted in 93626 CU
+stdout | tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer
+vote counted in 97497 CU
 
- ✓ anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer 5877ms
+ ✓ tests/anonymous-voting.test.ts > each voter on the list votes once per poll, through a relayer 6761ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```
 
-Each vote took about 94,000 compute units: the proof's verification, the receipt and the tally.
-Your numbers will differ by a little: the verifier's cost depends on the nullifier's value, and
+Each vote took between 91,000 and 98,000 compute units: the proof's verification, the receipt and
+the tally. Your numbers will differ: the verifier's cost depends on the nullifier's value, and
 finding the receipt's bump takes 1,500 more for each extra try. The tally reads `[1, 0, 2]`. Voter
 0's second vote, with a fresh proof, revealed the same nullifier and was refused with
 `AlreadyVoted`. Voter 3's proof, replayed for another choice or sent to poll 2, was refused with
 `InvalidProof`. And voter 0 voted in poll 2, with a nullifier unlike their first, and it counted.
 No transaction carried a voter's wallet, only the relayer's.
+
+From now on, `xark test` at the root runs all of it: the circuit's tests, `xark build`, the
+program's Rust tests and these.
 
 What the chain does show:
 
@@ -1505,7 +1506,7 @@ What the chain does show:
 A poll counted votes from a list of voters, once each, without learning who cast which. The new
 ideas:
 
-- **A scoped nullifier.** `Poseidon2(nullifier_key, poll)` is the same for every vote of one voter
+- **A scoped nullifier.** `nullifier([nullifier_key, poll])` is the same for every vote of one voter
   in one poll, so the program's receipt counts them once, and unrelated across polls, so voting in
   many leaves nothing to link.
 - **Merkle membership, again.** A voter's commitment is a leaf of 03's tree, and the path to it
@@ -1524,14 +1525,15 @@ stores one root, so registering later means a new list and a new poll; a voter's
 over, and their nullifiers stay unlinkable.
 
 <Callout type="warn" title="Before you deploy">
-`xark setup` made a single-party key: anyone who kept its randomness could forge a proof for any
+`xark add program` made a single-party key: anyone who kept its randomness could forge a proof for any
 ballot, and vote as often as they like. A vote that matters needs a key from a ceremony. See
 [The trusted setup](/docs/trust/trusted-setup).
 </Callout>
 
 The finished example is
 [05-anonymous-voting](https://github.com/blueshift-gg/xark-examples/tree/main/05-anonymous-voting)
-in xark-examples. It adds npm scripts that run every step, a demo proof (`circuit/examples/demo.rs`)
+in xark-examples. It adds a demo proof
+([`circuits/vote/examples/demo.rs`](https://github.com/blueshift-gg/xark-examples/tree/main/05-anonymous-voting/circuits/vote/examples/demo.rs))
 bundled as the verifier crate's self-test, which this tutorial skips, a `close_poll` instruction
 that lets the authority freeze the tally, host tests that feed each account check the accounts it
 exists to refuse, and more refusals in its end-to-end test: a proof made against four options, a
@@ -1544,6 +1546,6 @@ arbitrary, only a range check on each one stops a note from being worth "−1".
 <Cards>
   <Card title="06 · Shielded transfer" href="/docs/tutorials/06-shielded-transfer" description="Merkle trees and range proofs together: private payments of any amount, with every value range-checked so the sums can't wrap." />
   <Card title="Range proofs" href="/docs/learn-zk/range-proofs" description="Why a field has no order, and what a comparison costs." />
-  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: membership, roots and cond_swap." />
+  <Card title="Commitments & Merkle trees" href="/docs/gadgets/commitments" description="xark-merkle: Poseidon2 trees in a circuit, and their builders on the host." />
   <Card title="How verification works" href="/docs/guides/how-verification-works" description="The proof's bytes, the public inputs a program supplies, and the generated crate." />
 </Cards>

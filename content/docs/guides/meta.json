@@ -1,4 +1,11 @@
 {
   "title": "Guides",
-  "pages": ["testing", "typescript-clients", "browser-proving", "how-verification-works", "examples"]
+  "pages": [
+    "projects",
+    "testing",
+    "typescript-clients",
+    "browser-proving",
+    "how-verification-works",
+    "examples"
+  ]
 }

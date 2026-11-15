@@ -1,22 +1,23 @@
 ---
 title: Commitments & Merkle trees
-description: Prove membership in a Poseidon Merkle tree, and compute Grumpkin Pedersen hashes.
+description: Merkle trees on Poseidon2 (membership, appends, indexed trees for non-membership), commitments and nullifiers, and Grumpkin Pedersen hashes.
 ---
 
-The two gadgets on this page are the ones that turn a hash into a *data structure*: a Merkle path
-proves membership without revealing the leaf, and a Pedersen hash gives a commitment whose group
+The gadgets on this page turn a hash into a *data structure*: a Merkle path proves membership
+without revealing the leaf, an indexed tree proves a value is absent, a commitment and its
+nullifier make a note that can be spent once, and a Pedersen hash gives a commitment whose group
 structure makes it additive — the property folding schemes are built on.
 
-## Merkle membership (`xark-merkle`)
+## Merkle trees (`xark-merkle`)
 
 ```rust
-use xark_merkle::prelude::*;
+use xark_merkle::poseidon2::prelude::*;
 
 /// The tree's depth: a `const` sizes the path parameters.
-pub const DEPTH: usize = 4;
+pub const DEPTH: usize = 20;
 
 #[circuit]
-pub fn merkle(
+pub fn member(
     leaf: Private<Field>,
     siblings: Private<[Field; DEPTH]>,
     index_bits: Private<[Field; DEPTH]>,
@@ -26,20 +27,112 @@ pub fn merkle(
 }
 ```
 
+`xark_merkle::poseidon2` hashes nodes with Poseidon2's [`hash2`](/docs/gadgets/hashes), and is the
+tree to use for a new circuit: it has appends and indexed trees too. The crate root has the same
+`merkle_verify` and `merkle_root` with Poseidon nodes (`xark_poseidon::hash2`).
+
 | Item | What it does |
 | --- | --- |
 | `merkle_verify::<DEPTH>(leaf, siblings, index_bits, root)` | Assert `leaf` is in the tree with this `root`, at the position `index_bits` |
 | `merkle_root::<DEPTH>(leaf, siblings, index_bits)` | Fold the path and return the computed root, without checking it |
+| `merkle_append::<DEPTH>(old_root, empty_leaf, leaf, siblings, index_bits)` | Assert the slot at `index_bits` holds `empty_leaf` under `old_root`, and return the root with `leaf` written there |
+| `IndexedLeaf` | An indexed tree's leaf: `value`, `next_index`, `next_value`; `hash()` is what the tree holds |
+| `indexed_non_membership::<DEPTH, BITS>(x, low, siblings, index_bits, root)` | Assert no leaf of the indexed tree has the value `x` |
+| `indexed_insert::<DEPTH, BITS>(old_root, x, low, low_siblings, low_index_bits, new_siblings, new_index_bits)` | Assert `x` is absent, insert it, and return the new root |
 | `cond_swap(bit, a, b)` | `bit ? (b, a) : (a, b)`, with `bit` constrained to 0 or 1; not in the prelude |
+
+The functions after `merkle_root` are in `poseidon2` only.
 
 - `siblings` is the authentication path, **leaf level first**.
 - `index_bits` is the leaf position, **least significant bit first**: `0` means the running node
   is the left child at that level, `1` the right. Each bit is constrained to 0 or 1 inside the
   gadget, so a prover can't pass some other value to steer the path.
-- Nodes are hashed with Poseidon's [`hash2(left, right)`](/docs/gadgets/hashes); the tree must be
-  built with the same function.
+- The tree must be built with the same hash: `Tree::poseidon2` for `poseidon2`, `Tree::poseidon`
+  for the crate root (below).
 
-**Cost:** membership in a depth-4 tree is 957 constraints (`examples/merkle`).
+### Appending
+
+A program that keeps a tree's root, but doesn't hash, grows the tree with proofs: each proves the
+new root is the old tree with one leaf written in an empty slot. One path proves both roots, since
+the empty leaf under `old_root` and the new leaf under `new_root` share every sibling.
+
+```rust
+use xark_merkle::poseidon2::prelude::*;
+
+/// ASCII `xarkzero`: no real leaf hashes to it, so an empty slot can't be claimed.
+pub const EMPTY: u64 = 0x7861_726b_7a65_726f;
+
+#[circuit]
+pub fn deposit(
+    siblings: Private<[Field; 20]>,
+    leaf: Public<Field>,
+    index: Public<u32>,
+    old_root: Public<Field>,
+    new_root: Public<Field>,
+) {
+    let bits = Field::from(index).to_bits::<20>();
+    require_eq(merkle_append(old_root, Field::from(EMPTY), leaf, siblings, bits), new_root);
+}
+```
+
+The circuit checks that the slot was empty, not that it's the next one: the program does that,
+here by checking `index` against the next free slot it keeps.
+
+### Non-membership: indexed trees
+
+An indexed tree (Aztec's nullifier tree) keeps its values as a linked list sorted by value. Each
+leaf is `(value, next_index, next_value)`, the next larger value and its slot, with `next_value = 0`
+on the largest. A value `x` is absent when its *low leaf*, the one with the largest value below `x`,
+has `value < x < next_value`, or `value < x` with `next_value = 0`. `indexed_insert` proves that,
+rewrites the low leaf to point at `x`, and appends `(x, low.next_index, low.next_value)` in an empty
+slot, so a tree changed only by `indexed_insert` from `IndexedTree::new()` (the head `(0, 0, 0)` in
+slot 0) is always a sorted list, and a non-membership proof against its root is sound.
+
+The comparisons are on `BITS`-bit integers, `BITS ≤ 252`, with both sides range-checked below
+`2^BITS`, so they can't wrap the field. A value at or above `2^BITS` can't be proven absent or
+inserted; it's never compared wrong. `0` is the head's value, so it's always present. A hash fits
+252 bits only about a third of the time: to use one as a value, take its low 252 bits from
+`to_bits_canonical()` first (353 constraints). A narrower `BITS` (64 for `u64` values) is cheaper.
+xark's `examples/nullifier_tree` spends nullifiers this way.
+
+### On the host (`xark_merkle::tree`)
+
+The client that makes a proof needs the roots and paths the circuit computes. `xark_merkle::tree`
+builds them, with the same hashes:
+
+```rust
+use xark::Field;
+use xark_merkle::tree::{IndexedTree, Tree};
+
+let mut tree = Tree::<20>::poseidon2(Field::from(0x7861_726b_7a65_726fu64)); // the empty leaf
+let old_root = tree.root();
+let path = tree.path(tree.len()); // the next free slot: path.siblings, path.index
+tree.push(leaf);
+// prove `deposit(path.siblings, leaf, path.index as u32, old_root, tree.root())`
+
+let mut nullifiers = IndexedTree::<20>::new();
+let ins = nullifiers.insert(nullifier)?; // Err(InsertError::Present) if it's there
+// ins.old_root, ins.new_root, ins.low, ins.low_path, ins.new_path: `indexed_insert`'s arguments
+```
+
+| Item | What it does |
+| --- | --- |
+| `Tree<DEPTH>` | A tree filled from the left: `Tree::poseidon2(empty_leaf)` or `Tree::poseidon(empty_leaf)`, then `push`, `extend`, `set`, `root`, `path(index)`, `empty_subtrees()` |
+| `Path<DEPTH>` | A leaf's path: `siblings`, `index`, and `index_bits()` for the circuit's `index_bits` |
+| `IndexedTree<DEPTH>` | An indexed tree: `insert(x)` gives an `indexed_insert` witness, `non_membership(x)` an `indexed_non_membership` one |
+
+**Cost**, at depth 20 with 252-bit values:
+
+| Circuit | Constraints |
+| --- | --- |
+| `merkle_verify` (Poseidon2) | 4,840 |
+| `merkle_append` | 9,660 |
+| `indexed_non_membership` | 6,585 |
+| `indexed_insert` | 22,025 |
+
+Each level is a Poseidon2 `hash2` (240 constraints) and two for `cond_swap`; a second leaf folding
+up the same path (an append, the rewritten low leaf) pays a hash and one more. Membership in a
+depth-4 Poseidon tree is 957 constraints (`examples/merkle`).
 
 <Callout title="The chain never hashes">
 This is the design note behind the shielded examples: the circuit proves that a new root correctly
@@ -47,6 +140,13 @@ extends the old one, so an onchain program only has to store roots and verify pr
 chain agree **by construction** instead of by carefully matching two hash implementations. See
 [The examples](/docs/guides/examples).
 </Callout>
+
+## Commitments and nullifiers (`xark-poseidon2`)
+
+A note, an identity or a vote is committed to with `xark_poseidon2::commit`, and spent once with a
+`nullifier`: each a Poseidon2 sponge in a domain of its own, so a commitment is never a nullifier,
+a plain `hash` or a Merkle node. Put a random element in a commitment to make it hiding. See
+[Commitments, nullifiers and domains](/docs/gadgets/hashes#commitments-nullifiers-and-domains).
 
 ## Pedersen hash (`xark-pedersen`)
 
@@ -91,10 +191,14 @@ instances. Its output is a Grumpkin point, so you can feed it straight into the
 
 | Need | Use |
 | --- | --- |
-| Membership in a set, cheap to verify | `xark-merkle` (Poseidon) |
+| Membership in a set, cheap to verify | `xark_merkle::poseidon2` |
+| A set that grows by proofs, its root stored onchain | `merkle_append` |
+| Proving a value is *not* in a set (spent nullifiers) | an indexed tree: `indexed_non_membership`, `indexed_insert` |
+| A hiding commitment, and a nullifier to spend it once | `xark_poseidon2::commit`, `nullifier` |
 | A commitment with homomorphic / algebraic structure | `xark-pedersen` (Grumpkin) |
-| A hash inside a Merkle tree whose root is stored onchain | Poseidon — see [the chain never hashes](/docs/guides/examples) |
+| A hash inside a Merkle tree whose root is stored onchain | Poseidon2 — see [the chain never hashes](/docs/guides/examples) |
 | Accumulating many statements (folding / IVC) | Pedersen, for the commitment fold |
 
-Both gadgets are unaudited reference implementations. Merkle's conditional swap is proven sound in
-Lean over its rows; see [Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).
+These gadgets are unaudited reference implementations. Merkle's conditional swap is proven sound
+in Lean over its rows (the Poseidon2 trees are `cond_swap` and Poseidon2 composed, with no gadget
+of their own); see [Formal proofs & audit status](/docs/trust/formal-proofs-and-audit).

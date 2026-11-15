@@ -1,15 +1,19 @@
 ---
 title: Signatures
-description: Verify secp256k1, secp256r1 (P-256), and Ed25519 signatures inside a Groth16 circuit.
+description: Verify secp256k1, secp256r1 (P-256), Ed25519 and Grumpkin Schnorr signatures inside a Groth16 circuit.
 ---
 
 Signature gadgets let a proof say *"this signature is valid for this public key and this
-digest"* — and, if you make them private inputs, without revealing the key or the signature. All
-three take the same shape — a public key, a signature, and a digest — and all three verify the
-curve algebra in-circuit, so the verifier never trusts an oracle.
+digest"* — and, if you make them private inputs, without revealing the key or the signature. The
+three standard curves take the same shape — a public key, a signature, and a digest — and all of
+them verify the curve algebra in-circuit, so the verifier never trusts an oracle.
 
-The three crates share a design: the **digest is an input**, not something the gadget hashes. If
-the statement you want is about a *message*, you either hash it with a
+When you pick the key scheme yourself (a key a circuit issues, a note's owner, an app's own
+signer), a [Schnorr signature over Grumpkin](#schnorr-over-grumpkin-xark-grumpkin) is 45 to 80
+times cheaper than these: Grumpkin's coordinates are the circuit's own field.
+
+The three standard crates share a design: the **digest is an input**, not something the gadget
+hashes. If the statement you want is about a *message*, you either hash it with a
 [hash gadget](/docs/gadgets/hashes) inside the same circuit, or make the digest public so the
 verifier can recompute it from the message. This separation is deliberate — it lets you combine
 any hash with any curve, and it keeps the expensive hash out of the circuit when the digest can be
@@ -20,6 +24,7 @@ public.
 | `xark-secp256k1` | secp256k1 (Bitcoin, Ethereum) | 227,168 constraints (`examples/secp256k1_ecdsa`) |
 | `xark-secp256r1` | P-256 (WebAuthn passkeys) | 344,969 constraints (`examples/secp256r1_ecdsa`) |
 | `xark-ed25519` | Ed25519 (Solana keys) | 396,912 constraints (`examples/ed25519`) |
+| `xark-grumpkin` (`schnorr`) | Grumpkin, Schnorr with a Poseidon2 challenge | 5,051 constraints for a two-element message (`examples/grumpkin_schnorr`) |
 
 ## secp256k1 ECDSA (`xark-secp256k1`)
 
@@ -126,9 +131,58 @@ statement is "this signature is valid for message `M`" and `k` is private, you m
 yourself; otherwise the proof is only about *some* challenge.
 </Callout>
 
+## Schnorr over Grumpkin (`xark-grumpkin`)
+
+```rust
+use xark_grumpkin::prelude::*;
+use xark_grumpkin::schnorr::{self, Signature};
+
+#[circuit]
+pub fn authorised(pubkey: Public<Affine>, msg: Public<[Field; 2]>, sig: Private<Signature>) {
+    schnorr::verify(pubkey, sig, msg);
+}
+```
+
+`schnorr::verify(pubkey, sig, msg)` requires `s·G = R + e·P` for the key `P`, the signature
+`(R, s)` and the challenge `e = Poseidon2(R.x, R.y, P.x, P.y, msg…)`. Unlike the gadgets above, it
+hashes the message itself: `msg` is a `[Field; N]`, and the challenge is a Poseidon2 sponge with its
+capacity seeded with the tag `"grumpkin-schnorr"·2⁶⁴ + (4 + N)`, so it's never a plain
+`xark_poseidon2::hash` of the same elements.
+
+- `R` and `P` must be on the curve; Grumpkin has cofactor 1, so that is the whole subgroup check.
+- `s` must be below the group order `n`, so a signature has one encoding, and the challenge's
+  limbs are pinned below the field's modulus, so the prover can't use `e + r` in its place.
+- It costs 5,051 constraints for a two-element message, where an Ed25519 signature costs ~397k.
+
+| Item | What it does |
+| --- | --- |
+| `schnorr::verify(pubkey, sig, msg)` | Require a Schnorr signature `sig` on `msg: [Field; N]` by `pubkey` |
+| `schnorr::challenge(r, pubkey, msg)` | Its challenge `e`, a field element |
+| `Signature` | A circuit input: the point `R` and the scalar `s` |
+| `schnorr::host` | On the host, over `ark-grumpkin`: `SigningKey` (`from_seed`, `from_scalar`, `public_key`, `sign`), `verify`, `challenge` |
+
+On the host, `schnorr::host` makes keys and signs, with a deterministic nonce (a Poseidon2 sponge
+over the secret, the key and the message):
+
+```rust
+use xark_grumpkin::schnorr::host::{Base, SigningKey};
+
+let sk = SigningKey::from_seed(&seed).unwrap(); // or from_scalar
+let sig = sk.sign(&[Base::from(1u64), Base::from(2u64)]);
+let inputs = AuthorisedInputs {
+    pubkey: sk.public_key().into(),
+    msg: [1u64.into(), 2u64.into()],
+    sig: sig.into(),
+};
+```
+
+The tests check the host signer against an independent Python implementation, and the circuit
+against tampered keys, messages, `R` and `s`. See [Curves & recursion](/docs/gadgets/curves) for the
+rest of `xark-grumpkin`.
+
 ## The pattern they share
 
-Each example verifies a signature against a public digest, which proves possession of a valid
+Each ECDSA and Ed25519 example verifies a signature against a public digest, which proves possession of a valid
 signature over *whatever* digest was supplied. To make it a statement about a private message,
 compute the digest from the message inside the same circuit with a
 [hash gadget](/docs/gadgets/hashes) — for ECDSA, `int(hash(msg)) mod n` — and pass that to
